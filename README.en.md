@@ -89,8 +89,6 @@ All crypto runs in Rust. The frontend only ever sees plaintext views and ciphert
 
 ## Interface
 
-> Open the static high-fidelity prototype in a browser: [`doc/ui-prototype/index.html`](doc/ui-prototype/index.html)
-
 | Unlock | Editor | Settings |
 |---|---|---|
 | ![unlock](doc/screenshots/unlock.png) | ![editor](doc/screenshots/editor.png) | ![settings](doc/screenshots/settings.png) |

@@ -37,8 +37,6 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 
 ## 界面
 
-> 静态高保真原型可在浏览器直接打开预览：[`doc/ui-prototype/index.html`](doc/ui-prototype/index.html)
-
 | 启动与解锁 | 主编辑器 | 设置 |
 |---|---|---|
 | ![unlock](doc/screenshots/unlock.png) | ![editor](doc/screenshots/editor.png) | ![settings](doc/screenshots/settings.png) |
