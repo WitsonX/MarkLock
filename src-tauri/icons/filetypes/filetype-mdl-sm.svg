@@ -1,0 +1,9 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- 小尺寸专用（16/32px 帧）：与 filetype-mdl.svg 同造型，加粗描边 + 提高对比 + 放大盾牌与 M。 -->
+  <g transform="translate(64 64) scale(1.16) translate(-64 -64)">
+    <path d="M31 14 H75 L103 42 V108 a6 6 0 0 1 -6 6 H31 a6 6 0 0 1 -6 -6 V20 a6 6 0 0 1 6 -6 Z" fill="#ffffff" stroke="#a7adba" stroke-width="6" stroke-linejoin="round"/>
+    <path d="M75 14 v22 a6 6 0 0 0 6 6 h22" fill="none" stroke="#a7adba" stroke-width="6" stroke-linejoin="round" stroke-linecap="round"/>
+    <path d="M64 41 C58 41 47 45 43 49 L43 65 C43 79 52 87 64 93 C76 87 85 79 85 65 L85 49 C81 45 70 41 64 41 Z" fill="none" stroke="#1D4ED8" stroke-width="6" stroke-linejoin="round"/>
+    <text x="64" y="67" text-anchor="middle" dominant-baseline="central" font-family="'Inter','Segoe UI',Arial,sans-serif" font-size="34" font-weight="700" fill="#1D4ED8">M</text>
+  </g>
+</svg>

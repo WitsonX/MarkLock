@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MarkLock · 可加密的 Markdown 查看编辑器</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #f5f6f8; }
+    </style>
+    <script>window.__splashBootAt = performance.now();</script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- 启动屏：内联标记 + 内联样式，随 HTML 首帧立即绘制，盖住 JS bundle 加载与
+         会话恢复的空白期；前端就绪后由 src/lib/splash.ts 淡出移除。
+         视觉沿用原型「启动与解锁」品牌区（同款渐变 / logo 玻璃块 / 文案）。 -->
+    <div id="splash" aria-hidden="true">
+      <div class="sp-tile">
+        <svg width="64" height="64" viewBox="0 0 96 96" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M48 18 C41 18 27 23 22 28 L22 46 C22 63 35 72 48 79 C61 72 74 63 74 46 L74 28 C69 23 55 18 48 18 Z" />
+          <path d="M37 57 V38 L48 50 L59 38 V57" />
+        </svg>
+      </div>
+      <h1 class="sp-name">MarkLock</h1>
+      <p class="sp-tag">可加密的 Markdown 查看编辑器<br />你的笔记，只有你能打开。</p>
+      <div class="sp-spin"></div>
+      <div class="sp-ver">v1.0.0 · macOS / Windows</div>
+    </div>
+    <style>
+      #splash {
+        position: fixed; inset: 0; z-index: 9999;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        color: #fff; text-align: center;
+        font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: linear-gradient(160deg, #1d39c4 0%, #1677ff 58%, #36cfc9 130%);
+        overflow: hidden;
+        transition: opacity 0.3s ease;
+      }
+      /* 与品牌区同款的两个装饰圆 */
+      #splash::before, #splash::after {
+        content: ""; position: absolute; border-radius: 50%;
+        background: rgba(255, 255, 255, 0.08);
+      }
+      #splash::before { width: 520px; height: 520px; right: -160px; top: -170px; }
+      #splash::after { width: 360px; height: 360px; left: -110px; bottom: -120px; }
+      #splash .sp-tile {
+        width: 88px; height: 88px; border-radius: 22px;
+        background: rgba(255, 255, 255, 0.16);
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        display: flex; align-items: center; justify-content: center;
+        backdrop-filter: blur(4px);
+        position: relative; z-index: 1;
+      }
+      #splash .sp-name { font-size: 30px; font-weight: 600; margin: 22px 0 0; letter-spacing: 1px; position: relative; z-index: 1; }
+      #splash .sp-tag { font-size: 13px; line-height: 1.8; opacity: 0.85; margin: 10px 0 0; position: relative; z-index: 1; }
+      #splash .sp-spin {
+        width: 22px; height: 22px; margin: 34px 0 0;
+        border: 2.5px solid rgba(255, 255, 255, 0.35);
+        border-top-color: #fff; border-radius: 50%;
+        animation: sp-rotate 0.8s linear infinite;
+        position: relative; z-index: 1;
+      }
+      #splash .sp-ver { position: absolute; left: 0; right: 0; bottom: 24px; font-size: 12px; opacity: 0.55; }
+      #splash.sp-hide { opacity: 0; pointer-events: none; }
+      @keyframes sp-rotate { to { transform: rotate(360deg); } }
+    </style>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

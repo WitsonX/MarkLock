@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MarkLock · 界面原型</title>
+<style>
+  :root {
+    --primary: #1677ff;
+    --text: #1f2329; --text-2: #4e5563; --text-3: #8a919e; --text-4: #b6bcc7;
+    --border: #e3e6eb; --border-2: #eef0f4;
+    --panel: #fff; --hover: #f2f3f6;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: var(--text); background: #f5f6f8;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* 顶部栏 */
+  header {
+    flex: 0 0 52px;
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 18px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    width: 28px; height: 28px; border-radius: 7px;
+    background: linear-gradient(160deg, #1d39c4, #1677ff);
+    display: flex; align-items: center; justify-content: center;
+  }
+  header h1 { font-size: 15px; font-weight: 600; }
+  header .sub { font-size: 12px; color: var(--text-3); }
+  header .right { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-3); }
+  .badge {
+    padding: 2px 8px; border-radius: 4px; font-size: 11px;
+    background: #fffbe6; color: #d48806; border: 1px solid #ffe58f;
+  }
+
+  .layout { flex: 1; display: flex; min-height: 0; }
+
+  /* 左侧屏幕列表 */
+  nav {
+    width: 264px; flex: 0 0 264px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 12px 10px;
+  }
+  .cap { font-size: 11px; color: var(--text-4); letter-spacing: .5px; padding: 4px 10px 8px; }
+  .nav-item {
+    display: flex; gap: 11px; align-items: flex-start;
+    padding: 10px 11px;
+    border-radius: 8px;
+    cursor: pointer; margin-bottom: 4px;
+    border: 1px solid transparent;
+  }
+  .nav-item:hover { background: var(--hover); }
+  .nav-item.on { background: #e6f4ff; border-color: #91caff; }
+  .nav-item .no {
+    flex: 0 0 22px; height: 22px;
+    border-radius: 6px;
+    background: #f2f3f6; color: var(--text-3);
+    font-size: 11px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+  }
+  .nav-item.on .no { background: var(--primary); color: #fff; }
+  .nav-item .t { font-size: 13.5px; font-weight: 500; }
+  .nav-item .d { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; }
+
+  nav .note {
+    margin: 14px 10px 4px;
+    padding: 10px 12px;
+    background: #f8f9fb;
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    font-size: 12px; color: var(--text-3); line-height: 1.7;
+  }
+
+  /* 预览区 */
+  .viewer { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .viewer-bar {
+    flex: 0 0 34px;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px;
+    font-size: 12px; color: var(--text-3);
+  }
+  .viewer-bar code {
+    font-family: "SF Mono", Menlo, monospace; font-size: 11.5px;
+    background: #eceef1; padding: 2px 8px; border-radius: 4px;
+  }
+  .frame-wrap { flex: 1; min-height: 0; border-top: 1px solid var(--border); background: #e9ebef; }
+  iframe { width: 100%; height: 100%; border: none; display: block; background: #fff; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="logo">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.6" fill="#fff" stroke="none"/></svg>
+    </div>
+    <h1>MarkLock · 界面原型</h1>
+    <span class="sub">可加密的 Markdown 查看编辑器</span>
+    <div class="right">
+      <span class="badge">v0.1 静态原型</span>
+      <span>Tauri 2 · Vue 3 · Ant Design Vue</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav>
+      <div class="cap">界面清单（4）</div>
+
+      <div class="nav-item" data-src="screens/unlock.html">
+        <span class="no">01</span>
+        <div>
+          <div class="t">启动与解锁</div>
+          <div class="d">品牌区 + 最近加密库列表 + 主密码解锁表单</div>
+        </div>
+      </div>
+
+      <div class="nav-item on" data-src="screens/editor.html">
+        <span class="no">02</span>
+        <div>
+          <div class="t">主编辑界面</div>
+          <div class="d">打开的文件·打开的库·收藏·最近·工作目录 / 锁定占位 / 页签与列表可切换</div>
+        </div>
+      </div>
+
+      <div class="nav-item" data-src="screens/settings.html">
+        <span class="no">03</span>
+        <div>
+          <div class="t">设置</div>
+          <div class="d">通用 / 外观 / 安全与加密 / 快捷键 / 关于</div>
+        </div>
+      </div>
+
+      <div class="nav-item" data-src="screens/dialogs.html">
+        <span class="no">04</span>
+        <div>
+          <div class="t">弹窗集合</div>
+          <div class="d">新建加密库 · 解锁错误态 · 修改主密码</div>
+        </div>
+      </div>
+
+      <div class="note">
+        <b style="color:var(--text-2);">说明</b><br>
+        纯静态高保真原型，无外部依赖，直接双击 html 即可查看。
+        视觉基调对齐 Ant Design Vue 默认主题（#1677ff / 8px 圆角），
+        作为后续 Vue 组件拆分的视觉基准。
+      </div>
+    </nav>
+
+    <div class="viewer">
+      <div class="viewer-bar">
+        <span>当前界面：</span><code id="curPath">screens/editor.html</code>
+      </div>
+      <div class="frame-wrap">
+        <iframe id="frame" src="screens/editor.html" title="MarkLock 界面原型预览"></iframe>
+      </div>
+    </div>
+  </div>
+
+<script>
+  var frame = document.getElementById('frame');
+  var curPath = document.getElementById('curPath');
+  document.querySelectorAll('.nav-item').forEach(function (it) {
+    it.addEventListener('click', function () {
+      document.querySelectorAll('.nav-item').forEach(function (n) { n.classList.remove('on'); });
+      it.classList.add('on');
+      frame.src = it.dataset.src;
+      curPath.textContent = it.dataset.src;
+    });
+  });
+</script>
+</body>
+</html>

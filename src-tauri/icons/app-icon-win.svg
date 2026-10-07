@@ -1,0 +1,9 @@
+<svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
+  <!-- Windows 专用：与 mac（src-tauri/icons/app-icon.svg）同设计（浅色底 #EAF2FE 圆角方块 + 品牌蓝盾牌描边 + M），
+       但去掉 mac 的外圈留白（mac viewBox -8 -8 112 112，方块仅占 82%），
+       这里收紧到 0 0 96 96，让方块占满画布约 96%，整体放大约 1.17x，避免任务栏/exe 下偏小。
+       另加一圈柔和但可见的浅蓝描边（#9CC0EC / stroke 3），在浅桌面/磁贴下提亮轮廓、增加一点层次（用户要求的「虚一点的框」）。 -->
+  <rect x="2" y="2" width="92" height="92" rx="24" fill="#EAF2FE" stroke="#9CC0EC" stroke-width="3"/>
+  <path d="M48 18 C41 18 27 23 22 28 L22 46 C22 63 35 72 48 79 C61 72 74 63 74 46 L74 28 C69 23 55 18 48 18 Z" fill="none" stroke="#1D4ED8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="48" y="45" text-anchor="middle" dominant-baseline="central" font-family="'Inter','Roboto','PingFang SC','Segoe UI',Arial,sans-serif" font-size="32" font-weight="700" fill="#1D4ED8">M</text>
+</svg>

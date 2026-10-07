@@ -1,0 +1,4 @@
+/* MarkLock 简体中文本地化占位文件。
+   存在 zh-Hans.lproj 目录可让 macOS 认定本 App 支持简体中文，
+   从而用系统自带的中文资源渲染原生打开/保存面板等 Apple 框架 UI。 */
+CFBundleDisplayName = "MarkLock";

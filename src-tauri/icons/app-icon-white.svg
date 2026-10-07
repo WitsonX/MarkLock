@@ -1,0 +1,24 @@
+<svg viewBox="2 2 92 92" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- 背景柔和纵向渐变：顶部纯白 → 底部极淡蓝灰，营造轻微立体感 -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.6" stop-color="#FBFCFE"/>
+      <stop offset="1" stop-color="#F0F5FB"/>
+    </linearGradient>
+    <!-- 顶部高光：上半区叠加一层渐隐白，增强受光感 -->
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="squircle">
+      <rect x="2" y="2" width="92" height="92" rx="24"/>
+    </clipPath>
+  </defs>
+  <rect x="2" y="2" width="92" height="92" rx="24" fill="url(#bg)"/>
+  <g clip-path="url(#squircle)">
+    <rect x="2" y="2" width="92" height="52" fill="url(#gloss)"/>
+  </g>
+  <path d="M48 18 C41 18 27 23 22 28 L22 46 C22 63 35 72 48 79 C61 72 74 63 74 46 L74 28 C69 23 55 18 48 18 Z" fill="none" stroke="#1D4ED8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="48" y="45" text-anchor="middle" dominant-baseline="central" font-family="'Inter','Roboto','PingFang SC','Segoe UI',Arial,sans-serif" font-size="32" font-weight="700" fill="#1D4ED8">M</text>
+</svg>

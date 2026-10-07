@@ -1,0 +1,12 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- 整体按 1.10 放大居中（文件组本身已较宽，放大幅度收敛以免贴边） -->
+  <g transform="translate(64 64) scale(1.1) translate(-64 -64)">
+    <!-- 文件组外框：后页（右上露边）+ 前页，单页均为竖版比例 -->
+    <path d="M48 8 H86 L112 34 V92 a6 6 0 0 1 -6 6 H48 a6 6 0 0 1 -6 -6 V14 a6 6 0 0 1 6 -6 Z" fill="#ffffff" stroke="#c9ced8" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M24 26 H62 L88 52 V110 a6 6 0 0 1 -6 6 H24 a6 6 0 0 1 -6 -6 V32 a6 6 0 0 1 6 -6 Z" fill="#ffffff" stroke="#c9ced8" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M62 26 v20 a6 6 0 0 0 6 6 h20" fill="none" stroke="#c9ced8" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+    <!-- 前页中央盾牌 + M（同 mdl） -->
+    <path d="M53 49 C48 49 39 52 35 56 L35 70 C35 82 43 89 53 95 C63 89 71 82 71 70 L71 56 C67 52 58 49 53 49 Z" fill="none" stroke="#1D4ED8" stroke-width="4" stroke-linejoin="round"/>
+    <text x="53" y="70" text-anchor="middle" dominant-baseline="central" font-family="'Inter','Segoe UI',Arial,sans-serif" font-size="24" font-weight="700" fill="#1D4ED8">M</text>
+  </g>
+</svg>

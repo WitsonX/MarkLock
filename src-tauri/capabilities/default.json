@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "MarkLock 主窗口权限。窗口加载本地 dist 前端，通过 core 命令调用 Rust 加密核心。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "notification:default",
+    "autostart:default",
+    "dialog:default"
+  ]
+}

@@ -1,0 +1,373 @@
+/* ============================================================
+   MarkLock 全局样式
+   视觉基调对齐 Ant Design Vue（亮色系 / #1677ff 主色 / 8px 圆角）
+   迁移自 doc/ui-prototype/assets/base.css，作为 Vue 组件的共享视觉基准
+   ============================================================ */
+
+:root {
+  --primary: #1677ff;
+  --primary-hover: #4096ff;
+  --primary-active: #0958d9;
+  --primary-bg: #e6f4ff;
+
+  --text: #1f2329;
+  --text-2: #4e5563;
+  --text-3: #8a919e;
+  --text-4: #b6bcc7;
+
+  --border: #e3e6eb;
+  --border-2: #eef0f4;
+  --border-pop: #d6dae1; /* 弹出菜单边框（比 --border 略深，提升浮层边界感） */
+  --bg: #f5f6f8;
+  --editor-bg: #fafbfc; /* 编辑器（CodeMirror）专用底色：比 --bg 更淡、接近白，与预览/代码块区分 */
+  --panel: #ffffff;
+  --hover: #f2f3f6;
+  --sidebar-bg: #eef0f4; /* 侧边栏底色：比 --bg 略深一档，与右列区分 */
+
+  --gold: #faad14;
+  --gold-bg: #fffbe6;
+  --orange: #fa8c16;
+  --green: #52c41a;
+  --green-bg: #f6ffed;
+  --red: #ff4d4f;
+  --red-bg: #fff2f0;
+
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-lg: 12px;
+
+  --shadow-modal: 0 6px 16px 0 rgba(0, 0, 0, 0.08), 0 3px 6px -4px rgba(0, 0, 0, 0.12), 0 9px 28px 8px rgba(0, 0, 0, 0.05);
+  --shadow-pop: 0 3px 6px -4px rgba(0, 0, 0, 0.16), 0 6px 16px 0 rgba(0, 0, 0, 0.11);
+
+  --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace;
+
+  /* highlight.js 代码块 token 配色（亮色，对齐 GitHub _light_） */
+  --hl-comment: #6a737d;
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-number: #0550ae;
+  --hl-title: #8250df;
+  --hl-attr: #953800;
+  --hl-built: #953800;
+  --hl-meta: #57606a;
+}
+
+/* ---------- 深色主题（Ant Design 暗色系，与亮色结构一一对应） ---------- */
+html[data-theme='dark'] {
+  --text: #e5e7eb;
+  --text-2: #a3aab5;
+  --text-3: #6b7280;
+  --text-4: #4b5563;
+
+  --border: #2a2e35;
+  --border-2: #23262c;
+  --border-pop: #3a3f47; /* 弹出菜单边框（暗色下适当提亮以增强边界感） */
+  --bg: #141619;
+  --editor-bg: #141619; /* 深色下编辑器底色沿用 --bg（未单独提亮） */
+  --panel: #1d2025;
+  --hover: #262a30;
+  --sidebar-bg: #101215; /* 侧边栏底色：比 --bg 略深一档，与右列区分 */
+
+  --gold-bg: #2b2410;
+  --green-bg: #162313;
+  --red-bg: #2a1416;
+  --primary-bg: #14263d;
+
+  --shadow-modal: 0 6px 16px 0 rgba(0, 0, 0, 0.5), 0 3px 6px -4px rgba(0, 0, 0, 0.5), 0 9px 28px 8px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 3px 6px -4px rgba(0, 0, 0, 0.6), 0 6px 16px 0 rgba(0, 0, 0, 0.55);
+
+  /* highlight.js 代码块 token 配色（深色，对齐 GitHub Dark） */
+  --hl-comment: #8b949e;
+  --hl-keyword: #ff7b72;
+  --hl-string: #a5d6ff;
+  --hl-number: #79c0ff;
+  --hl-title: #d2a8ff;
+  --hl-attr: #ffa657;
+  --hl-built: #ffa657;
+  --hl-meta: #8b949e;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #app { height: 100%; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI",
+    "Helvetica Neue", "Microsoft YaHei", Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5715;
+  color: var(--text);
+  background: var(--panel);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+::selection { background: rgba(22, 119, 255, 0.18); }
+
+/* 细滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-4); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 窗口标题栏（应用自绘） ---------- */
+.titlebar {
+  height: 38px;
+  flex: 0 0 38px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border-2);
+  user-select: none;
+}
+/* macOS：原生标题栏已隐藏，红绿灯叠加在工具条左侧，需预留 78px 空间 */
+html[data-platform='macos'] .titlebar {
+  padding-left: 78px;
+}
+
+/* 侧边栏 / 文件树前置图标（.lead，含文件/库/文件夹/折叠箭头）统一 13px，与页签文件图标对齐；
+   CSS width/height 会覆盖 SVG 上的 width/height 呈现属性，故各内联 14/15 一并归一 */
+.lead {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+/* ---------- 标签 ---------- */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 12px;
+  line-height: 20px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.tag-gold { color: #d48806; background: var(--gold-bg); border-color: #ffe58f; }
+.tag-green { color: #389e0d; background: var(--green-bg); border-color: #b7eb8f; }
+.tag-blue { color: var(--primary-active); background: var(--primary-bg); border-color: #91caff; }
+.tag-gray { color: var(--text-3); background: var(--hover); border-color: var(--border); }
+
+/* ---------- 状态图标（替代文字标签，配 tooltip） ---------- */
+.st-ico {
+  width: 14px; height: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: 0 0 auto;
+}
+.st-ico.locked { color: #d48806; }
+.st-ico.unlocked { color: #389e0d; }
+.st-ico.encrypted { color: #8a919e; }
+.st-ico.vault { color: var(--primary); }
+
+/* ---------- 通用布局 ---------- */
+.screen { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.divider-v { width: 1px; background: var(--border-2); align-self: stretch; }
+.divider-h { height: 1px; background: var(--border-2); }
+
+.kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+  background: var(--hover);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+}
+
+/* ---------- 图标按钮（通用） ---------- */
+.icon-btn {
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+  border: none;
+  background: transparent;
+}
+.icon-btn:hover { background: var(--hover); color: var(--text); }
+
+/* ---------- Markdown 预览样式 ---------- */
+/* 字号跟随编辑器字号设置（+1px：正文非等宽，同 px 值下视觉偏小）；标题/代码均为 em，根字号一变整体等比缩放 */
+.md { padding: 20px 26px 40px; line-height: 1.7; color: var(--text); font-size: calc(var(--editor-font-size, 14px) + 1px); }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
+.md h1 { font-size: 1.8em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.md h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.md h3 { font-size: 1.25em; }
+.md p { margin: 0.8em 0; }
+.md a { color: var(--primary); text-decoration: none; }
+.md a:hover { text-decoration: underline; }
+.md code { background: var(--hover); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: var(--mono); }
+.md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; position: relative; }
+.md pre code { background: transparent; padding: 0; font-size: 0.85em; tab-size: var(--code-indent, 4); }
+/* 预览代码块右上角复制按钮：悬停代码块时显现，复制成功后 .copied 切换为对勾 + 主色 */
+.code-copy-btn {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+.md pre:hover > .code-copy-btn,
+.code-copy-btn:focus-visible { opacity: 1; }
+.code-copy-btn:hover { color: var(--text); border-color: var(--border-pop); }
+.code-copy-btn .cc-check { display: none; }
+.code-copy-btn.copied { color: var(--green); border-color: var(--green); opacity: 1; }
+.code-copy-btn.copied .cc-copy { display: none; }
+.code-copy-btn.copied .cc-check { display: inline; }
+/* 行内代码复制：按钮绝对定位悬浮在 code 右端、略微覆盖，不占行宽；
+   右侧预留 margin 补偿覆盖量避免压到后续文字；不透明底色 + 微阴影保证压在文字上仍可读，
+   仅留图标隐藏文字（.cc-txt 宽度归零），悬停行内容器时显现，复制成功后变对勾 */
+.md .codespan-wrap { position: relative; display: inline-flex; margin-inline-end: 10px; }
+.md .codespan-wrap > .code-copy-btn {
+  position: absolute;
+  top: 50%;
+  right: -18px;
+  transform: translateY(-50%);
+  gap: 0;
+  padding: 0;
+  margin: 0;
+  font-size: 10px;
+  line-height: 1;
+  height: 22px;
+  width: 22px;
+  justify-content: center;
+  border-radius: 4px;
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+.md .codespan-wrap > .code-copy-btn .cc-ico { width: 11px; height: 11px; }
+.codespan-wrap > .code-copy-btn .cc-txt { width: 0; overflow: hidden; }
+.md .codespan-wrap:hover > .code-copy-btn,
+.codespan-wrap > .code-copy-btn:focus-visible { opacity: 1; }
+.md .codespan-wrap > .code-copy-btn.copied { border-color: var(--green); }
+.md blockquote { border-left: 4px solid var(--primary); padding: 0.5em 1em; margin: 1em 0; background: var(--hover); color: var(--text-2); }
+.md ul, .md ol { padding-left: 2em; margin: 0.8em 0; }
+.md li { margin: 0.3em 0; }
+/* 任务清单复选框：替换浏览器默认的灰色禁用态，对齐 Ant Design Checkbox */
+.md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.5em; }
+.md input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  margin-inline-end: 8px;
+  vertical-align: -3px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  cursor: default;
+  transition: border-color 0.2s, background 0.2s;
+}
+.md input[type="checkbox"]:hover { border-color: var(--primary); }
+/* 对勾直接画在 input 的 background 上：input 是替换元素，WKWebView 下 ::after 不渲染 */
+.md input[type="checkbox"]:checked {
+  border-color: var(--primary);
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896' fill='%23fff'%3E%3Cpath d='M912 190h-69.9c-9.8 0-19.1 4.5-25.3 12.2L472.4 614.7a31.8 31.8 0 0 1-50.6.2L219.2 341.8a32 32 0 0 0-25.3-12.2H112c-14.5 0-22.1 17.6-12.6 28.7l295.9 335.4a64.2 64.2 0 0 0 99.1.3l411.9-467.9C934.1 207.6 926.5 190 912 190z'/%3E%3C/svg%3E") center / 11px no-repeat var(--primary);
+}
+/* 深色主题下对勾改用深色，保证在蓝色底上的对比度 */
+html[data-theme='dark'] .md input[type="checkbox"]:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896' fill='%23141619'%3E%3Cpath d='M912 190h-69.9c-9.8 0-19.1 4.5-25.3 12.2L472.4 614.7a31.8 31.8 0 0 1-50.6.2L219.2 341.8a32 32 0 0 0-25.3-12.2H112c-14.5 0-22.1 17.6-12.6 28.7l295.9 335.4a64.2 64.2 0 0 0 99.1.3l411.9-467.9C934.1 207.6 926.5 190 912 190z'/%3E%3C/svg%3E");
+}
+.md li:has(> input[type="checkbox"]:checked) > p { color: var(--text-3); text-decoration: line-through; }
+.md table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+.md th, .md td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+.md th { background: var(--bg); font-weight: 600; }
+.md tr:nth-child(even) { background: var(--hover); }
+.md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
+.md hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+
+/* ---------- highlight.js token 颜色（随主题切换，替代官方主题包） ---------- */
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-tag, .hljs-template-tag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition { color: var(--hl-string); }
+.hljs-number, .hljs-literal, .hljs-variable, .hljs-template-variable, .hljs-symbol { color: var(--hl-number); }
+.hljs-title, .hljs-title.function_, .hljs-title.class_ { color: var(--hl-title); }
+.hljs-attr, .hljs-attribute, .hljs-name, .hljs-selector-attr, .hljs-selector-class { color: var(--hl-attr); }
+.hljs-built_in, .hljs-type, .hljs-class { color: var(--hl-built); }
+.hljs-meta, .hljs-section, .hljs-deletion { color: var(--hl-meta); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+
+/* Monokai */
+.hljs-theme-monokai {
+  --hl-comment: #75715e;
+  --hl-keyword: #f92672;
+  --hl-string: #e6db74;
+  --hl-number: #ae81ff;
+  --hl-title: #a6e22e;
+  --hl-attr: #66d9ef;
+  --hl-built: #66d9ef;
+  --hl-meta: #75715e;
+}
+
+/* Dracula */
+.hljs-theme-dracula {
+  --hl-comment: #6272a4;
+  --hl-keyword: #ff79c6;
+  --hl-string: #f1fa8c;
+  --hl-number: #bd93f9;
+  --hl-title: #50fa7b;
+  --hl-attr: #8be9fd;
+  --hl-built: #8be9fd;
+  --hl-meta: #6272a4;
+}
+
+/* Atom One Dark */
+.hljs-theme-atom-one-dark {
+  --hl-comment: #5c6370;
+  --hl-keyword: #c678dd;
+  --hl-string: #98c379;
+  --hl-number: #d19a66;
+  --hl-title: #61afef;
+  --hl-attr: #e06c75;
+  --hl-built: #e5c07b;
+  --hl-meta: #5c6370;
+}
+
+/* ---------- 禁用态（通用）：耗时操作进行中让按钮/输入框变灰并阻断交互 ----------
+   注：各视图的 scoped 基类（.input/.btn）特异性更高，这里用 !important 保证覆盖 */
+.btn:disabled,
+button:disabled {
+  opacity: 0.5 !important;
+  cursor: not-allowed !important;
+  pointer-events: none; /* 屏蔽 hover 变色，保持灰化观感 */
+}
+/* 预览区任务清单复选框是 marked 强制 disabled 的，须豁免于通用灰化规则，否则勾选态背景/对勾被 !important 遮掉 */
+.input:disabled,
+input:disabled:not(.md input[type="checkbox"]),
+select:disabled,
+textarea:disabled {
+  background: var(--bg) !important;
+  color: var(--text-4) !important;
+  cursor: not-allowed !important;
+  opacity: 1;
+}
+.input:disabled:hover,
+input:disabled:not(.md input[type="checkbox"]):hover,
+select:disabled:hover {
+  border-color: var(--border) !important; /* 禁用时 hover 不再高亮边框 */
+  box-shadow: none !important;
+}
+

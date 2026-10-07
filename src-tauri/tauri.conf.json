@@ -1,0 +1,63 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MarkLock",
+  "mainBinaryName": "MarkLock",
+  "version": "1.0.0",
+  "identifier": "com.marklock.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "zh-Hans.lproj",
+      "icons/filetypes/*.ico",
+      "icons/filetypes/*.icns"
+    ],
+    "macOS": {
+      "infoPlist": "Info.plist"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "name": "Markdown 文档",
+        "description": "Markdown 文档（MarkLock）",
+        "role": "Editor",
+        "ext": ["md", "markdown"]
+      },
+      {
+        "name": "MarkLock 加密文件",
+        "description": "MarkLock 单文件加密文档（.mdl）",
+        "role": "Editor",
+        "ext": ["mdl"]
+      },
+      {
+        "name": "MarkLock 加密库",
+        "description": "MarkLock 单文件加密库（.mdlb）",
+        "role": "Editor",
+        "ext": ["mdlb"]
+      }
+    ]
+  }
+}

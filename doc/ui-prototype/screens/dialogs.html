@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MarkLock 原型 · 弹窗集合</title>
+<link rel="stylesheet" href="../assets/base.css">
+<style>
+  body { background: #eceef1; }
+  .stage {
+    flex: 1;
+    display: flex; flex-wrap: wrap;
+    align-items: flex-start; justify-content: center;
+    gap: 28px;
+    padding: 34px 26px;
+    background:
+      radial-gradient(circle at 1px 1px, #d6d9e0 1px, transparent 0) 0 0 / 22px 22px,
+      #eceef1;
+    overflow-y: auto;
+  }
+  .modal { flex: 0 0 auto; }
+  .modal-cap {
+    text-align: center; font-size: 12px; color: var(--text-3);
+    margin-top: 10px;
+  }
+  .m-col { display: flex; flex-direction: column; align-items: center; }
+
+  .path-row { display: flex; gap: 8px; }
+  .path-row .input { flex: 1; font-family: var(--mono); font-size: 13px; }
+
+  .adv {
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-size: 12.5px; color: var(--text-2);
+    display: flex; justify-content: space-between; align-items: center;
+    cursor: pointer;
+  }
+  .adv:hover { border-color: var(--primary-hover); color: var(--primary); }
+
+  .unlock-hero { text-align: center; margin-bottom: 18px; }
+  .unlock-hero .ico {
+    width: 52px; height: 52px; margin: 0 auto 10px;
+    border-radius: 13px;
+    background: linear-gradient(135deg, #e6f4ff, #f0f5ff);
+    border: 1px solid #d6e4ff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .unlock-hero .vn { font-weight: 600; font-size: 15px; }
+  .unlock-hero .vp { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+
+  .warn-bar {
+    display: flex; gap: 8px; align-items: flex-start;
+    background: var(--gold-bg);
+    border: 1px solid #ffe58f;
+    border-radius: var(--radius-sm);
+    padding: 9px 12px;
+    font-size: 12.5px; color: #ad6800;
+    margin-bottom: 16px; line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="screen">
+  <div class="titlebar" style="background:transparent;border-bottom:none;">
+    <div class="traffic"><i class="c"></i><i class="m"></i><i class="z"></i></div>
+    <span style="font-size:13px;color:var(--text-3);">弹窗集合 · 新建 / 解锁 / 修改主密码</span>
+  </div>
+
+  <div class="stage">
+
+    <!-- ============ 弹窗 1：新建加密库 ============ -->
+    <div class="m-col">
+      <div class="modal" style="width:460px;">
+        <div class="modal-head">
+          <span class="modal-title">新建加密库</span>
+          <span class="modal-x">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </span>
+        </div>
+        <div class="modal-body">
+          <div class="form-item">
+            <label class="form-label"><b>名称</b></label>
+            <input class="input" value="工作笔记">
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>保存位置</b></label>
+            <div class="path-row">
+              <input class="input" value="~/Documents/Vaults/工作笔记.mlkv">
+              <button class="btn">浏览…</button>
+            </div>
+            <div class="form-hint">.mlkv 是一个文件夹包，内部所有 .mdk 文件均为密文，可直接放进 iCloud / Dropbox 同步</div>
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>主密码</b></label>
+            <input class="input" type="password" value="Tr0ub4dor&3x">
+            <div class="strength"><i class="lv4"></i><i class="lv4"></i><i class="lv4"></i><i class="lv4"></i><em>强 · 建议使用密码管理器生成</em></div>
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>确认主密码</b></label>
+            <input class="input" type="password" value="Tr0ub4dor&3x">
+          </div>
+          <div class="adv">
+            <span>高级：AES-256-GCM · Argon2id（64MB / t=3 / p=4）</span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn">取消</button>
+          <button class="btn btn-primary">创建并解锁</button>
+        </div>
+      </div>
+      <div class="modal-cap">① 新建加密库（含密码强度提示）</div>
+    </div>
+
+    <!-- ============ 弹窗 2：解锁（错误态） ============ -->
+    <div class="m-col">
+      <div class="modal" style="width:400px;">
+        <div class="modal-head">
+          <span class="modal-title">解锁加密库</span>
+          <span class="modal-x">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </span>
+        </div>
+        <div class="modal-body">
+          <div class="unlock-hero">
+            <div class="ico">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#1677ff" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+            </div>
+            <div class="vn">工作笔记</div>
+            <div class="vp">~/Documents/Vaults/work.mlkv</div>
+          </div>
+          <div class="form-item">
+            <input class="input input-lg input-error" type="password" value="•••••••••••">
+            <div class="form-hint err">
+              密码错误，请重试。连续失败 5 次后将锁定 10 分钟（还剩 4 次）
+            </div>
+          </div>
+          <div class="form-item" style="display:flex;justify-content:space-between;font-size:13px;">
+            <span class="link gray">使用密码提示</span>
+            <span class="link gray">忘记密码？</span>
+          </div>
+        </div>
+        <div class="modal-foot" style="justify-content:stretch;">
+          <button class="btn btn-primary btn-lg btn-block">解锁</button>
+        </div>
+      </div>
+      <div class="modal-cap">② 解锁（密码错误态 + 失败次数限制）</div>
+    </div>
+
+    <!-- ============ 弹窗 3：修改主密码 ============ -->
+    <div class="m-col">
+      <div class="modal" style="width:440px;">
+        <div class="modal-head">
+          <span class="modal-title">修改主密码</span>
+          <span class="modal-x">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+          </span>
+        </div>
+        <div class="modal-body">
+          <div class="warn-bar">
+            <svg width="15" height="15" style="flex:0 0 auto;margin-top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+            <span>修改后，128 个文件的 DEK 将以新密码重新包裹（约 3 秒），<b>无需全文重加密</b>。旧密码即刻失效且不可找回。</span>
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>当前主密码</b></label>
+            <input class="input" type="password" value="••••••••••">
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>新主密码</b></label>
+            <input class="input" type="password" value="newpass123">
+            <div class="strength"><i class="lv1"></i><i class="lv2"></i><i></i><i></i><em>偏弱 · 建议 12 位以上并混合符号</em></div>
+          </div>
+          <div class="form-item">
+            <label class="form-label"><b>确认新主密码</b></label>
+            <input class="input" type="password" value="newpass123">
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn">取消</button>
+          <button class="btn btn-primary">确认修改</button>
+        </div>
+      </div>
+      <div class="modal-cap">③ 修改主密码（仅重包裹 DEK）</div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

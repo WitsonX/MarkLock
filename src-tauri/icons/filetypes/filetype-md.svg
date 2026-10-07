@@ -1,0 +1,10 @@
+<svg viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <!-- 整体按 1.16 放大居中，减少四周留白，让文档更饱满（对齐 App 图标观感） -->
+  <g transform="translate(64 64) scale(1.16) translate(-64 -64)">
+    <!-- 白色文档：竖版比例（宽高约 0.78），对齐系统默认白页 -->
+    <path d="M31 14 H75 L103 42 V108 a6 6 0 0 1 -6 6 H31 a6 6 0 0 1 -6 -6 V20 a6 6 0 0 1 6 -6 Z" fill="#ffffff" stroke="#c9ced8" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M75 14 v22 a6 6 0 0 0 6 6 h22" fill="none" stroke="#c9ced8" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+    <!-- 中央蓝色 M -->
+    <text x="64" y="66" text-anchor="middle" dominant-baseline="central" font-family="'Inter','Segoe UI',Arial,sans-serif" font-size="42" font-weight="700" fill="#1D4ED8">M</text>
+  </g>
+</svg>
