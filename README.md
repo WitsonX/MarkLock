@@ -37,9 +37,17 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 
 ## 界面
 
-| 启动与解锁 | 主编辑器 | 设置 |
-|---|---|---|
-| ![unlock](doc/screenshots/unlock.png) | ![editor](doc/screenshots/editor.png) | ![settings](doc/screenshots/settings.png) |
+**启动与解锁**
+
+![unlock](doc/screenshots/unlock.png)
+
+**主编辑器**（分屏预览 + 侧边栏库树）
+
+![editor](doc/screenshots/editor.png)
+
+**设置 → 安全与加密**
+
+![settings](doc/screenshots/settings.png)
 
 ## 核心概念
 

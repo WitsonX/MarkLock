@@ -89,9 +89,17 @@ All crypto runs in Rust. The frontend only ever sees plaintext views and ciphert
 
 ## Interface
 
-| Unlock | Editor | Settings |
-|---|---|---|
-| ![unlock](doc/screenshots/unlock.png) | ![editor](doc/screenshots/editor.png) | ![settings](doc/screenshots/settings.png) |
+**Unlock**
+
+![unlock](doc/screenshots/unlock.png)
+
+**Editor** (split preview + vault tree in the sidebar)
+
+![editor](doc/screenshots/editor.png)
+
+**Settings → Security & Encryption**
+
+![settings](doc/screenshots/settings.png)
 
 ## Development
 
