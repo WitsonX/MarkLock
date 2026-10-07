@@ -29,7 +29,12 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 | macOS (Apple Silicon / Intel) | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows (x64) | `MarkLock_<ver>_x64-setup.exe` |
 
-> Binaries are not code-signed yet. On macOS, allow the app under System Settings → Privacy & Security on first launch; on Windows, dismiss the SmartScreen prompt.
+> Installers carry an ad-hoc signature only — they are not notarized by Apple, so Gatekeeper blocks the first launch with "cannot be opened because the developer cannot be verified". Bypass it either way:
+> - **Right-click** `MarkLock.app` in Applications → **Open** → click **Open** in the dialog;
+> - or click **Open Anyway** at the bottom of System Settings → Privacy & Security.
+>
+> If macOS instead reports the app is "damaged", clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/MarkLock.app`.
+> Windows binaries are unsigned too: click **More info → Run anyway** on the SmartScreen prompt.
 
 ## Core concepts
 

@@ -28,7 +28,12 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 | macOS（Apple Silicon / Intel） | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows（x64） | `MarkLock_<ver>_x64-setup.exe` |
 
-> 暂未做代码签名。macOS 首次打开需在「系统设置 → 隐私与安全性」中允许；Windows 需确认 SmartScreen 提示。
+> 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会被 Gatekeeper 拦下并提示「无法验证开发者」。任选一种放行：
+> - 在「应用程序」里**右键 MarkLock.app →「打开」**，弹窗中再点「打开」；
+> - 或到「系统设置 → 隐私与安全性」底部点「仍要打开」。
+>
+> 万一仍提示「已损坏」，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 清除隔离属性即可。
+> Windows 同样未签名，安装时在 SmartScreen 提示里点「更多信息 → 仍要运行」。
 
 ## 界面
 
@@ -258,7 +263,7 @@ Windows 上 Rust 和 Build Tools 缺一不可：rustup 只给编译器，链接�
 
 **Windows 全新机器安装顺序**（装完每一项都重开终端）：
 
-1. VS Build Tools — https://visualstudio.microsoft.com/zh-hans/downloads/（「所有下载」→「Visual Studio 生成工具」）。安装器里只勾**「使用 C++ 的桌面开发」**一个工作负载
+1. VS Build Tools — https://visualstudio.microsoft.com/zh-hans/downloads/ （「所有下载」→「Visual Studio 生成工具」）。安装器里只勾**「使用 C++ 的桌面开发」**一个工作负载
 2. Rust — https://rustup.rs/ 下载 `rustup-init.exe`，一路默认
 3. Node — https://nodejs.org/ LTS 版
 4. WebView2 Runtime — 老 Win10 从 https://developer.microsoft.com/microsoft-edge/webview2/ 下 Evergreen 独立安装包

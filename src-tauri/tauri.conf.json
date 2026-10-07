@@ -30,7 +30,8 @@
       "icons/filetypes/*.icns"
     ],
     "macOS": {
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "signingIdentity": "-"
     },
     "icon": [
       "icons/32x32.png",
