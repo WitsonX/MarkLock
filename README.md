@@ -28,11 +28,14 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 | macOS（Apple Silicon / Intel） | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows（x64） | `MarkLock_<ver>_x64-setup.exe` |
 
-> 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会被 Gatekeeper 拦下并提示「无法验证开发者」。任选一种放行：
-> - 在「应用程序」里**右键 MarkLock.app →「打开」**，弹窗中再点「打开」；
-> - 或到「系统设置 → 隐私与安全性」底部点「仍要打开」。
+> 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会提示「未打开 MarkLock —— Apple 无法验证…」（这是未公证的固定流程，不是检测到恶意软件）。放行只需一次：
 >
-> 万一仍提示「已损坏」，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 清除隔离属性即可。
+> 1. 在那个弹窗点「完成」；
+> 2. 打开「系统设置 → 隐私与安全性」，滚到「安全性」一节，会看到「已阻止 "MarkLock" 以保护 Mac」，点右侧的**「仍要打开」**；
+> 3. 输入密码确认，应用即启动，同一个安装位置以后不再询问。
+>
+> 新版 macOS 已移除「任何来源」选项，上面这条是最稳的路径；部分版本在「应用程序」里右键 → 打开 也能弹出同样的放行提示，可以一试。
+> 万一提示的是「MarkLock 已损坏」（而非「无法验证」），说明拿到的是没有资源密封的旧构建，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 清除隔离属性即可。
 > Windows 同样未签名，安装时在 SmartScreen 提示里点「更多信息 → 仍要运行」。
 
 ## 界面
