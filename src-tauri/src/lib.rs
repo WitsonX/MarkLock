@@ -1032,6 +1032,12 @@ fn inspect_path(path: String) -> Result<crypto::vault::PathInfo, crypto::CryptoE
     vault::inspect_path(Path::new(&path))
 }
 
+/// 路径是否仍存在（解锁页进入时校验登记库是否指向有效文件，供自动清理失效条目）。
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
 /// 已解锁库数量。
 #[tauri::command]
 fn unlocked_count() -> usize {
@@ -1174,6 +1180,7 @@ pub fn run() {
             rename_path,
             delete_path,
             inspect_path,
+            path_exists,
             reveal_in_finder,
             open_url,
             file_stamps,

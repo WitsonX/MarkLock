@@ -259,6 +259,11 @@ export function inspectPath(path: string) {
   return invoke<PathInfo>('inspect_path', { path })
 }
 
+/** 路径是否仍存在（解锁页校验登记库是否指向有效文件）。 */
+export function pathExists(path: string) {
+  return invoke<boolean>('path_exists', { path })
+}
+
 // ==================== 外部修改监控 ====================
 
 /** 磁盘文件戳记（stat 级别，不读内容）。 */

@@ -23,6 +23,15 @@ fn check_password_strength(pwd: &str) -> Result<()> {
     Ok(())
 }
 
+/// IO 错误包装：「不存在」类给出可读提示（登记后文件被移动/删除的常见场景），其余原样透传。
+fn io_err(path: &Path, e: std::io::Error, what: &str) -> CryptoError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        CryptoError::Io(format!("{what}不存在：{}（可能已被移动或删除）", path.display()))
+    } else {
+        CryptoError::Io(e.to_string())
+    }
+}
+
 // ==================== 单文件 .mdl ====================
 
 /// 创建一个新的加密文件（`.mdl`）。
@@ -70,7 +79,7 @@ pub fn unlock_file(
     password: &str,
     auto_lock: Option<Duration>,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = fs::read(path).map_err(|e| io_err(path, e, "加密文件"))?;
     let (header, _rest) = file::parse_header(&bytes)?;
 
     let salt = format::b64::decode(&header.kdf.salt)?;
@@ -151,7 +160,7 @@ pub fn unlock_vault_dir(
 /// 读取库元数据（不校验密码）。
 pub fn read_vault_meta(dir: &Path) -> Result<VaultMeta> {
     let meta_path = dir.join(format::VAULT_META_FILE);
-    let json = fs::read(&meta_path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let json = fs::read(&meta_path).map_err(|e| io_err(dir, e, "库"))?;
     serde_json::from_slice(&json)
         .map_err(|e| CryptoError::BadHeader(format!("库元数据解析失败: {e}")))
 }
@@ -538,7 +547,7 @@ pub fn unlock_file_vault(
     password: &str,
     auto_lock: Option<Duration>,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = fs::read(path).map_err(|e| io_err(path, e, "库文件"))?;
     let (header, _rest) = file::parse_header(&bytes)?;
     if header.format != format::VAULT_FILE_FORMAT {
         return Err(CryptoError::Unsupported(format!(

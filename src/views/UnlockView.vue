@@ -28,7 +28,9 @@ export default defineComponent({
       return this.vaults.find((v) => v.id === this.targetId) || null
     },
   },
-  mounted() {
+  async mounted() {
+    // 先剔除磁盘上已不存在的登记库（被移动/删除），再做目标选择，避免解锁时报原始 IO 错误
+    await this.pruneMissingVaults()
     // 目标库优先级：路由 query > pendingOpen > 唯一库自动选中
     const qid = (this.$route.query.id as string) || ''
     const pid = this.store.pendingOpen?.vaultId || ''
@@ -46,6 +48,27 @@ export default defineComponent({
     window.removeEventListener('keydown', this.onKeydown)
   },
   methods: {
+    /** 把文件/目录已不在磁盘上的库从登记与收藏快照中一并移除（被移动或删除）；已解锁会话不动。 */
+    async pruneMissingVaults() {
+      // 候选 = 登记的库（锁定态）+ 收藏快照里未登记的库（收藏自持快照，移出登记后仍能被点回来）
+      const infos = new Map<string, { name: string; path: string }>()
+      for (const v of this.store.recent) infos.set(v.id, { name: v.name, path: v.path })
+      for (const f of this.store.favorites) if (!infos.has(f.id)) infos.set(f.id, { name: f.name, path: f.path })
+      const missing: { id: string; name: string }[] = []
+      for (const [id, info] of infos) {
+        if (this.store.recent.some((v) => v.id === id && v.unlocked)) continue
+        if (!(await tauri.pathExists(info.path))) missing.push({ id, name: info.name })
+      }
+      if (!missing.length) return
+      missing.forEach((m) => {
+        this.store.removeVault(m.id)
+        const fi = this.store.favorites.findIndex((x) => x.id === m.id)
+        if (fi >= 0) this.store.favorites.splice(fi, 1)
+      })
+      this.store.persistFavorites()
+      if (missing.some((m) => m.id === this.targetId)) this.targetId = ''
+      message.warning(`库文件不存在，已从列表移除：${missing.map((m) => m.name).join('、')}`)
+    },
     async doUnlock() {
       const vault = this.targetVault
       if (!vault) {
@@ -59,6 +82,13 @@ export default defineComponent({
       this.loading = true
       this.error = ''
       try {
+        // 解锁前再确认一次文件仍在；不存在则从列表移除，避免报原始 IO 错误
+        if (!(await tauri.pathExists(vault.path))) {
+          this.store.removeVault(vault.id)
+          this.targetId = ''
+          this.error = '库文件不存在（可能已被移动或删除），已从库列表移除'
+          return
+        }
         await this.store.unlockVault(vault.id, this.password)
         message.success('解锁成功')
         this.$router.push('/editor')

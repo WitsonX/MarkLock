@@ -277,7 +277,7 @@ html[data-platform='macos'] .titlebar {
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--panel);
-  cursor: default;
+  cursor: pointer; /* 预览里可点击回改源码任务标记（见 EditorView onPreviewTaskToggle） */
   transition: border-color 0.2s, background 0.2s;
 }
 .md input[type="checkbox"]:hover { border-color: var(--primary); }
@@ -354,7 +354,7 @@ button:disabled {
   cursor: not-allowed !important;
   pointer-events: none; /* 屏蔽 hover 变色，保持灰化观感 */
 }
-/* 预览区任务清单复选框是 marked 强制 disabled 的，须豁免于通用灰化规则，否则勾选态背景/对勾被 !important 遮掉 */
+/* 任务复选框若处于 disabled（如导出 HTML 补回的只读态）须豁免于通用灰化规则，否则勾选态背景/对勾被 !important 遮掉 */
 .input:disabled,
 input:disabled:not(.md input[type="checkbox"]),
 select:disabled,

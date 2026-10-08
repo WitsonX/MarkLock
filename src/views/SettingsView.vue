@@ -522,6 +522,10 @@ greet('MarkLock');`
               <div class="info"><div class="t">关闭当前页签</div><div class="d">{{ modKey }} + W</div></div>
               <span><span class="kbd">{{ modKey }}</span> <span class="kbd">W</span></span>
             </div>
+            <div class="row" data-key="kb-reopen" data-keywords="撤销关闭 重新打开 reopen undo 页签">
+              <div class="info"><div class="t">重新打开已关闭页签</div><div class="d">{{ modKey }} + ⇧ + T（仅本次启动期间，最多撤销 20 个）</div></div>
+              <span><span class="kbd">{{ modKey }}</span> <span class="kbd">⇧</span> <span class="kbd">T</span></span>
+            </div>
           </div>
           <div class="group">
             <div class="group-head">搜索</div>

@@ -101,6 +101,11 @@ marked.use({
       const t = title ? ` title="${escAttr(title)}"` : ''
       return `<img src="${escAttr(resolveImgSrc(href))}" alt="${escAttr(text || '')}"${t}>`
     },
+    // 任务清单复选框：去掉 marked 默认的 disabled，预览里可点击回改源码标记（见 onPreviewTaskToggle）；
+    // 勾选态完全由源码渲染驱动，导出 HTML 时再补回 disabled（离线页面无回写能力）。
+    checkbox({ checked }: { checked: boolean }) {
+      return `<input type="checkbox" class="task-cb"${checked ? ' checked=""' : ''}>`
+    },
   },
 })
 
@@ -156,6 +161,10 @@ export default defineComponent({
       newFileName: '',
       newFileVaultId: '',
       newFileDir: '', // 目标文件夹（相对库根，空 = 库根）
+      // 工作目录新建文件类型：普通 md / 独立加密文件 .mdl / 单文件库 .mdlb（库内新建恒为加密）
+      newFileType: 'plain' as 'plain' | 'encrypted' | 'vault',
+      newFilePwd: '',
+      newFileConfirm: '',
       showNewFolder: false,
       newFolderName: '',
       newFolderVaultId: '',
@@ -258,6 +267,13 @@ export default defineComponent({
       deleteNodePath: '',
       deleteIsDir: false,
       deleting: false,
+
+      // 预览模式勾选任务清单的确认弹窗（pendingTaskSrc 为改好勾选的源码，确认后写回并保存；
+      // text/checked 仅供弹窗展示：哪条任务、要勾上还是取消）
+      showTaskConfirm: false,
+      pendingTaskSrc: '',
+      pendingTaskText: '',
+      pendingTaskChecked: false,
 
       // 关闭未保存文件的确认弹窗
       showCloseConfirm: false,
@@ -444,6 +460,14 @@ export default defineComponent({
     /** 另存为密码强度（4 格） */
     saveAsStrength(): number {
       const p = this.saveAsPwd
+      if (p.length >= 12 && /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p)) return 4
+      if (p.length >= 8) return 3
+      if (p.length >= 4) return 2
+      return p.length ? 1 : 0
+    },
+    /** 工作目录新建加密文件/单文件库的密码强度（与另存为口径一致，4 格）。 */
+    newFileStrength(): number {
+      const p = this.newFilePwd
       if (p.length >= 12 && /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p)) return 4
       if (p.length >= 8) return 3
       if (p.length >= 4) return 2
@@ -810,6 +834,11 @@ export default defineComponent({
           if (cur) this.closeFile(cur)
         }
       }
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 't' || e.key === 'T')) {
+        // Cmd+Shift+T：撤销关闭（重开最近关闭的页签，与主流浏览器一致）
+        e.preventDefault()
+        this.reopenLastClosed()
+      }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
         // 切换到编辑或分屏模式，确保编辑器可见
@@ -1113,6 +1142,8 @@ export default defineComponent({
     onPreviewDblClick(e: MouseEvent) {
       if (!this.store.settings.previewDblClickToggle) return
       if ((e.target as HTMLElement | null)?.closest('.code-copy-btn')) return
+      // 连点复选框是连续勾选/取消，不应误触视图切换
+      if ((e.target as HTMLElement | null)?.closest('input.task-cb')) return
       this.setMode(this.currentMode === 'split' ? 'preview' : 'split')
     },
     onEditorScroll(line: number) {
@@ -1177,6 +1208,14 @@ export default defineComponent({
         this.copyCodeBlock(copyBtn)
         return
       }
+      // 任务清单复选框：回改源码对应标记（分屏直接改，预览模式先确认）
+      const cb = target.closest('input.task-cb') as HTMLInputElement | null
+      if (cb) {
+        // 勾选态以源码渲染为准：阻止浏览器默认翻转，避免取消确认时 DOM 与源码不一致
+        e.preventDefault()
+        this.onPreviewTaskToggle(cb)
+        return
+      }
       const a = target.closest('a') as HTMLAnchorElement | null
       if (!a) return
       const raw = a.getAttribute('href') || ''
@@ -1190,6 +1229,53 @@ export default defineComponent({
         e.preventDefault()
         this.openRelativeLink(raw)
       }
+    },
+    /** 预览区任务清单复选框点击：按 DOM 顺序定位源码里第几个任务标记并翻转。
+     *  分屏模式直接写回页签正文（编辑器同步、记脏，保存走常规流程）；
+     *  预览模式先弹确认，确认后改源码并立即保存。 */
+    onPreviewTaskToggle(cb: HTMLInputElement) {
+      const f = this.activeFile
+      if (!f || f.locked) return
+      const md = cb.closest('.md')
+      if (!md) return
+      const idx = Array.prototype.indexOf.call(md.querySelectorAll('input.task-cb'), cb)
+      if (idx < 0) return
+      const next = this.toggleTaskMarker(f.content, idx)
+      if (next === null) return
+      if (this.currentMode === 'preview') {
+        this.pendingTaskSrc = next
+        // 取任务原文供弹窗展示（过长截断）；浏览器在 click 派发前已把 checked 预置为新态
+        // （preventDefault 会回滚），故 cb.checked 即用户意图，不能再取反
+        const raw = (cb.closest('li')?.textContent ?? '').replace(/\s+/g, ' ').trim()
+        this.pendingTaskText = raw.length > 40 ? raw.slice(0, 40) + '…' : raw
+        this.pendingTaskChecked = cb.checked
+        this.showTaskConfirm = true
+      } else {
+        this.setContentFor(f.path, next)
+      }
+    },
+    /** 翻转源码中第 idx 个（0 起、按源码顺序）任务清单标记：`[ ]`→`[x]`、`[x]`/`[X]`→`[ ]`；找不到返回 null。 */
+    toggleTaskMarker(src: string, idx: number): string | null {
+      const lines = src.split('\n')
+      let n = 0
+      for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(/^(\s*(?:[-*+]|\d{1,9}[.)])\s+\[)([ xX])(\].*)$/)
+        if (!m) continue
+        if (n === idx) {
+          lines[i] = m[1] + (m[2] === ' ' ? 'x' : ' ') + m[3]
+          return lines.join('\n')
+        }
+        n++
+      }
+      return null
+    },
+    /** 预览模式勾选确认弹窗的「修改并保存」：写回正文后立即落盘。 */
+    async submitTaskConfirm() {
+      this.showTaskConfirm = false
+      const f = this.activeFile
+      if (!f) return
+      this.setContentFor(f.path, this.pendingTaskSrc)
+      await this.saveActive()
     },
     /** 复制预览代码（代码块或行内代码）到剪贴板（去掉渲染器附带的首尾换行），成功后按钮短暂变对勾「已复制」。 */
     async copyCodeBlock(btn: HTMLElement) {
@@ -1681,8 +1767,22 @@ export default defineComponent({
       }
       this.openCloseConfirm({ kind: 'others', path, files: dirty })
     },
+    /** 撤销关闭：从最近关闭栈取最后一个页签重新打开（草稿直接恢复；文件走统一打开逻辑，含存在性校验与锁库跳转）。 */
+    async reopenLastClosed() {
+      const t = this.store.takeClosedTab()
+      if (!t) {
+        message.info('没有最近关闭的页签')
+        return
+      }
+      if (t.isNew) {
+        this.store.restoreDraftTab(t)
+        return
+      }
+      await this.recentOpenFile({ path: t.path, name: t.name, vaultId: t.vaultId, encrypted: t.encrypted })
+    },
     /** 无条件清空所有页签。 */
     forceCloseAll() {
+      this.store.noteClosedTabs(this.store.openFiles)
       this.store.openFiles = []
       this.store.activePath = ''
       this.store.activeVaultId = ''
@@ -1792,6 +1892,12 @@ export default defineComponent({
     },
     /** 关闭除「保留页签 + 未保存草稿」外的所有页签。 */
     closeKeepDirtyDrafts(op: { kind: 'one' | 'others' | 'all'; path?: string }) {
+      // 先入撤销栈：保留条件取反即被关闭的页签
+      this.store.noteClosedTabs(
+        this.store.openFiles.filter(
+          (f) => !((f.isNew && this.needsClose(f)) || (op.kind === 'others' && f.path === op.path)),
+        ),
+      )
       this.store.openFiles = this.store.openFiles.filter(
         (f) => (f.isNew && this.needsClose(f)) || (op.kind === 'others' && f.path === op.path),
       )
@@ -1861,6 +1967,7 @@ export default defineComponent({
         items = [
           { kind: 'item', label: '新建文件', sc: '⌘N', run: () => this.openNewDraft() },
           { kind: 'item', label: '打开文件…', sc: '⌘O', run: () => this.openFileAction() },
+          { kind: 'item', label: '撤销关闭页签', sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
           ...this.viewToggleItems(),
         ]
@@ -1873,6 +1980,7 @@ export default defineComponent({
           { kind: 'item', label: '关闭其它', run: () => this.closeOthers(p) },
           { kind: 'item', label: '关闭已保存', run: () => this.store.closeSaved() },
           { kind: 'item', label: '关闭全部', run: () => this.closeAllFiles() },
+          { kind: 'item', label: '撤销关闭页签', sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
           { kind: 'item', label: REVEAL_LABEL, disabled: !f || f.isNew, run: () => this.revealTab(p) },
           {
@@ -2008,11 +2116,14 @@ export default defineComponent({
     wdOpenNewFolder(dirNode: FsNode) {
       this.wdNewFolderAt(dirNode.path)
     },
-    /** 在工作目录内某个目录（绝对路径）下新建明文文件：右键菜单与分组标题栏按钮共用。 */
+    /** 在工作目录内某个目录（绝对路径）下新建文件：右键菜单与分组标题栏按钮共用，弹窗内可选普通 md / 加密。 */
     wdNewFileAt(dirPath: string) {
       this.wdOp = true
       this.wdDir = dirPath
       this.newFileName = ''
+      this.newFileType = 'plain'
+      this.newFilePwd = ''
+      this.newFileConfirm = ''
       this.showNewFile = true
     },
     /** 在工作目录内某个目录（绝对路径）下新建文件夹。 */
@@ -3312,6 +3423,7 @@ export default defineComponent({
       this.newFileVaultId = v.id
       this.newFileDir = dirNode ? this.relPathOf(dirNode) : ''
       this.newFileName = ''
+      this.newFileType = 'plain' // 库内新建恒为加密，类型选择仅工作目录生效
       this.showNewFile = true
     },
     /** 打开「新建文件夹」弹窗；dirNode 为空表示建在库根。 */
@@ -3344,19 +3456,10 @@ export default defineComponent({
       const name = this.newFileName.trim()
       if (!name) return
       if (this.wdOp) {
-        // 工作目录明文新建：无扩展名补 .md，创建后刷新父目录并打开
-        const fileName = /\.(md|markdown|mdown|mkd|txt)$/i.test(name) ? name : name + '.md'
-        const abs = this.joinPath(this.wdDir, fileName)
-        try {
-          await tauri.createPlainFile(abs, `# ${fileName.replace(/\.[^.]+$/, '')}\n`)
-          message.success('已创建')
-          this.showNewFile = false
-          this.newFileName = ''
-          await this.reloadWorkdirDir(this.wdDir)
-          await this.store.openPlainFile(abs, fileName)
-        } catch (e) {
-          message.error(String(e))
-        }
+        // 工作目录新建：按所选类型分流（普通 md / 独立加密文件 .mdl / 单文件库 .mdlb）
+        if (this.newFileType === 'plain') await this.wdCreatePlain(name)
+        else if (this.newFileType === 'encrypted') await this.wdCreateEncrypted(name)
+        else await this.wdCreateVaultFile(name)
         return
       }
       if (!this.newFileVaultId) return message.warning('请先解锁一个库')
@@ -3376,6 +3479,53 @@ export default defineComponent({
       } catch (e) {
         message.error(String(e))
       }
+    },
+    /** 工作目录新建普通 md：无扩展名补 .md，创建后刷新父目录并打开。 */
+    async wdCreatePlain(name: string) {
+      const fileName = /\.(md|markdown|mdown|mkd|txt)$/i.test(name) ? name : name + '.md'
+      const abs = this.joinPath(this.wdDir, fileName)
+      try {
+        await tauri.createPlainFile(abs, `# ${fileName.replace(/\.[^.]+$/, '')}\n`)
+        message.success('已创建')
+        this.showNewFile = false
+        this.newFileName = ''
+        await this.reloadWorkdirDir(this.wdDir)
+        await this.store.openPlainFile(abs, fileName)
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+    /** 工作目录新建独立加密文件 .mdl：自带独立密码，创建后刷新父目录并打开为锁定态页签（输入密码即解锁）。 */
+    async wdCreateEncrypted(name: string) {
+      const pwd = this.newFilePwd
+      if (pwd.length < 1) return message.warning('请设置密码（至少 1 位）')
+      if (pwd !== this.newFileConfirm) return message.warning('两次密码不一致')
+      const fileName = name.endsWith('.mdl') ? name : name + '.mdl'
+      const abs = this.joinPath(this.wdDir, fileName)
+      try {
+        await tauri.createFile(abs, pwd, `# ${fileName.replace(/\.[^.]+$/, '')}\n`)
+        message.success('已创建加密文件，输入密码即可解锁')
+        this.showNewFile = false
+        this.newFileName = ''
+        this.newFilePwd = ''
+        this.newFileConfirm = ''
+        await this.reloadWorkdirDir(this.wdDir)
+        this.store.openEncryptedFile(abs, fileName)
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+    /** 工作目录新建单文件库 .mdlb：复用「新建加密库」核心逻辑（登记 + 解锁 + 刷树），并刷新工作目录树。 */
+    async wdCreateVaultFile(name: string) {
+      // 先关新建弹窗，避免与 doCreateVault 可能弹出的新建库表单叠加
+      this.showNewFile = false
+      this.createVaultForm = { name, path: this.joinPath(this.wdDir, name), pwd: this.newFilePwd, confirm: this.newFileConfirm }
+      const created = await this.doCreateVault()
+      if (!created) return
+      this.newFileName = ''
+      this.newFilePwd = ''
+      this.newFileConfirm = ''
+      if (this.workdirRoot) await this.refreshWorkdir()
     },
     async submitNewFolder() {
       const name = this.newFolderName.trim()
@@ -3518,6 +3668,7 @@ export default defineComponent({
           message.success('已移入回收站')
           this.showDelete = false
           this.store.closeFile(target)
+          this.store.dropClosedTab(target)
           await this.reloadWorkdirDir(this.parentDir(target))
         } catch (e) {
           message.error(String(e))
@@ -3541,6 +3692,7 @@ export default defineComponent({
         const root = v?.path || ''
         const key = v?.isFileVault ? `${root}#${rel}` : (root ? `${root}/${rel}` : rel)
         this.store.closeFile(key)
+        this.store.dropClosedTab(key)
         if (v) await this.refreshVaultTree(v.id, v.path)
       } catch (e) {
         message.error(String(e))
@@ -3638,6 +3790,12 @@ export default defineComponent({
       }
       // 单文件 .mdl（非目录、非单文件库）：不作为库处理，直接开加密文件页签（内容区密码框）
       if (!v.isDir && !v.isFileVault) {
+        // 收藏/最近是快照，文件可能已被移动或删除：打开前先校验，失效则清理登记
+        if (!(await tauri.pathExists(v.path))) {
+          this.store.removeVault(v.id)
+          message.warning(`文件不存在（可能已被移动或删除），已从列表移除：${v.name}`)
+          return
+        }
         this.store.openEncryptedFile(v.path, v.name)
         return
       }
@@ -3674,6 +3832,18 @@ export default defineComponent({
 
     // ---------- 打开文件（从最近/收藏点击） ----------
     async recentOpenFile(f: { path: string; name: string; vaultId: string; encrypted: boolean }) {
+      // 收藏/最近是磁盘快照，文件可能已被移动或删除：
+      // 直接按路径打开的两类（单文件 .mdl / 明文）先校验存在性，失效则清理条目而不是报错；
+      // 库内文件的存在性由解锁页校验所属库，此处 path 可能是「库路径#相对路径」合成键，不能直接 stat。
+      if (!f.encrypted || f.vaultId === f.path) {
+        if (!(await tauri.pathExists(f.path))) {
+          const wasFav = this.store.isFavoriteFile(f.path)
+          if (wasFav) this.store.toggleFavoriteFile(f.path)
+          this.store.forgetFile(f.path)
+          message.warning(`文件不存在（可能已被移动或删除），已从${wasFav ? '收藏与最近' : '最近'}中移除：${f.name}`)
+          return
+        }
+      }
       if (f.encrypted) {
         // 单文件 .mdl（vaultId 即文件路径）：直接开页签，内容区显示密码框
         if (f.vaultId === f.path) {
@@ -4047,6 +4217,8 @@ export default defineComponent({
         __assetBaseDir = savedBase
       }
       body = body.replace(/<button[^>]*class="code-copy-btn"[\s\S]*?<\/button>/g, '')
+      // 预览里可点的任务复选框在离线页面无回写能力，补回 disabled 保持只读观感
+      body = body.replace(/<input type="checkbox" class="task-cb"/g, '<input type="checkbox" disabled="" class="task-cb"')
       // 本地资源（asset 协议 URL）：图片内联 data URL，其它文件复制到导出目录旁
       body = await this.inlineExportAssets(body, target)
       const html = this.buildStandaloneHtml(f.name, body)
@@ -4371,6 +4543,7 @@ ${bodyHtml}
             <div class="m-cap">打开</div>
             <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="ck"></span><span class="m-label">打开文件…</span><span class="kbd-hint">⌘O</span></div>
             <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>打开工作目录…</div>
+            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="ck"></span><span class="m-label">撤销关闭页签</span><span class="kbd-hint">⌘⇧T</span></div>
             <div class="m-sep"></div>
             <div class="m-item has-sub">
               <span class="ck"></span>导入导出<span class="sub-arrow">◂</span>
@@ -4516,7 +4689,7 @@ ${bodyHtml}
                     @delete-node="(n) => openDelete(v.id, n)"
                     @ctx-node="(p: any) => openVaultNodeMenu(p.e, v, p.node)"
                   />
-                  <div v-else class="empty-hint">库内暂无文件，点击上方「+」新建</div>
+                  <div v-else class="empty-hint" @click.stop="openContextMenu($event, 'vault', v.id)">库内暂无文件，可在「更多」菜单中新建</div>
                 </div>
               </div>
             </div>
@@ -5015,19 +5188,43 @@ ${bodyHtml}
       </div>
     </a-modal>
 
-    <!-- 新建文件（库内） -->
-    <a-modal v-model:open="showNewFile" title="新建文件" :width="420" :footer="null">
+    <!-- 新建文件（库内 / 工作目录，工作目录可选普通 md / 加密） -->
+    <a-modal v-model:open="showNewFile" title="新建文件" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
           <label>目标位置</label>
           <div class="saveas-hint">{{ wdOp ? (wdDir || '工作目录') : (newFileDir ? '库内 / ' + newFileDir : '库根目录') }}</div>
         </div>
+        <!-- 类型选择仅工作目录生效：库内新建天然跟随库主密码加密 -->
+        <div class="seg saveas-seg" v-if="wdOp">
+          <span :class="{ on: newFileType === 'plain' }" @click="newFileType = 'plain'">普通 md</span>
+          <span :class="{ on: newFileType === 'encrypted' }" @click="newFileType = 'encrypted'">加密文件 .mdl</span>
+          <span :class="{ on: newFileType === 'vault' }" @click="newFileType = 'vault'">加密库文件 .mdlb</span>
+        </div>
         <div class="saveas-field">
           <label>文件名</label>
           <input class="input" ref="newFileNameInput" v-model="newFileName" placeholder="如 会议纪要" @keyup.enter="submitNewFile" />
         </div>
+        <template v-if="wdOp && newFileType !== 'plain'">
+          <div class="saveas-field">
+            <label>主密码</label>
+            <input class="input" type="password" v-model="newFilePwd" :placeholder="newFileType === 'vault' ? '至少 1 位，用于加密库内所有文件' : '至少 1 位，用于加密该文件'" />
+            <div class="strength">
+              <i v-for="n in 4" :key="n" :class="'lv' + (newFileStrength >= n ? newFileStrength : '')"></i>
+              <em v-if="newFileStrength >= 4">强 · 建议使用密码管理器生成</em>
+              <em v-else-if="newFileStrength >= 3">中 · 建议混合符号</em>
+              <em v-else>弱 · 建议 12 位以上并混合符号</em>
+            </div>
+          </div>
+          <div class="saveas-field">
+            <label>确认密码</label>
+            <input class="input" type="password" v-model="newFileConfirm" placeholder="再次输入主密码" @keyup.enter="submitNewFile" />
+          </div>
+        </template>
         <div class="saveas-hint" v-if="!wdOp">文件将以库主密码加密存储，打开时无需再次输入密码。</div>
-        <div class="saveas-hint" v-else>将在工作目录创建明文文件（不加密），无扩展名时自动补 .md。</div>
+        <div class="saveas-hint" v-else-if="newFileType === 'plain'">将在工作目录创建明文文件（不加密），无扩展名时自动补 .md。</div>
+        <div class="saveas-hint" v-else-if="newFileType === 'encrypted'">创建独立的加密文件（.mdl），拥有独立密码，可单独移动/分享。</div>
+        <div class="saveas-hint" v-else>在当前目录创建单文件加密库（.mdlb）并自动解锁，创建后显示在侧边栏「加密库」分组。</div>
       </div>
       <div class="modal-foot">
         <button class="btn" @click="showNewFile = false">取消</button>
@@ -5318,6 +5515,17 @@ ${bodyHtml}
       <div class="modal-foot">
         <button class="btn" @click="showDelete = false">取消</button>
         <button :class="['btn', wdOp ? 'btn-primary' : 'btn-danger']" :disabled="deleting" @click="submitDelete">{{ wdOp ? (deleting ? '移入中…' : '移入回收站') : (deleting ? '删除中…' : '删除') }}</button>
+      </div>
+    </a-modal>
+
+    <!-- 预览模式勾选任务清单确认 -->
+    <a-modal v-model:open="showTaskConfirm" :title="pendingTaskChecked ? '勾选任务' : '取消勾选'" :width="440" :footer="null">
+      <div class="saveas">
+        <div class="saveas-hint" style="color:var(--text-2);">「{{ pendingTaskText }}」{{ pendingTaskChecked ? '该任务已完成' : '该任务设置为未完成' }}。</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="showTaskConfirm = false">取消</button>
+        <button class="btn btn-primary" @click="submitTaskConfirm">确定</button>
       </div>
     </a-modal>
 

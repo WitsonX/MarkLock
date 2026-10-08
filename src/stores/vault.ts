@@ -72,6 +72,19 @@ export interface RecentFile {
   lastOpened: number
 }
 
+/** 已关闭页签的快照（撤销重开用，仅会话内有效不持久化）。 */
+export interface ClosedTab {
+  path: string
+  name: string
+  vaultId: string
+  encrypted: boolean
+  /** 未落盘草稿：撤销时连同正文恢复 */
+  isNew: boolean
+  dirty: boolean
+  /** 仅草稿（isNew）保存正文，普通页签按路径重开即可 */
+  content: string
+}
+
 /** 库色板（循环使用） */
 const VAULT_COLORS = ['#1677ff', '#722ed1', '#13c2c2', '#fa8c16', '#eb2f96', '#52c41a']
 
@@ -328,6 +341,8 @@ export const useVaultStore = defineStore('vault', {
     favoriteFiles: loadFavoriteFiles() as RecentFile[],
     /** 侧边栏分组显示顺序（id 数组） */
     sectionOrder: loadSectionOrder() as string[],
+    /** 最近关闭的页签栈（撤销关闭用，最新关闭在前；仅会话内，上限 20 条） */
+    recentlyClosed: [] as ClosedTab[],
     /** 设置 */
     settings: loadSettings() as Settings,
   }),
@@ -924,6 +939,54 @@ export const useVaultStore = defineStore('vault', {
       localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(this.recentFiles))
     },
 
+    /** 从「最近打开」移除某个文件（文件被移动/删除后的失效清理）。 */
+    forgetFile(path: string) {
+      this.recentFiles = this.recentFiles.filter((f) => f.path !== path)
+      localStorage.setItem(RECENT_FILES_KEY, JSON.stringify(this.recentFiles))
+    },
+
+    // ---------- 撤销关闭（最近关闭页签栈） ----------
+    /** 把被关闭的页签记入撤销栈（最新关闭的排最前，批量关闭时栈内按页签条倒序）。 */
+    noteClosedTabs(files: OpenFile[]) {
+      if (!files.length) return
+      const snaps: ClosedTab[] = files.map((f) => ({
+        path: f.path,
+        name: f.name,
+        vaultId: f.vaultId,
+        encrypted: f.encrypted,
+        isNew: f.isNew,
+        dirty: f.dirty,
+        content: f.isNew ? f.content : '',
+      }))
+      this.recentlyClosed = [...snaps.reverse(), ...this.recentlyClosed].slice(0, 20)
+    },
+    /** 从撤销栈取出最近一个可重开的条目（路径已被打开页签占用的跳过）；无则返回 undefined。 */
+    takeClosedTab(): ClosedTab | undefined {
+      const i = this.recentlyClosed.findIndex((t) => !this.openFiles.some((f) => f.path === t.path))
+      return i < 0 ? undefined : this.recentlyClosed.splice(i, 1)[0]
+    },
+    /** 文件被磁盘删除时同步清掉撤销栈条目，避免撤销重开已不存在的文件。 */
+    dropClosedTab(path: string) {
+      this.recentlyClosed = this.recentlyClosed.filter((t) => t.path !== path)
+    },
+    /** 恢复一个未落盘草稿页签（连同关闭前的正文与脏标记）。 */
+    restoreDraftTab(t: ClosedTab) {
+      const file: OpenFile = {
+        path: t.path,
+        name: t.name,
+        vaultId: '',
+        encrypted: false,
+        isNew: true,
+        locked: false,
+        dirty: t.dirty,
+        content: t.content,
+        relPath: '',
+      }
+      this.openFiles.push(file)
+      this.activePath = file.path
+      this.activeVaultId = ''
+    },
+
     /** 清空「最近打开的文件」列表（收藏已自持快照，不受影响）。 */
     clearRecentFiles() {
       this.recentFiles = []
@@ -936,6 +999,7 @@ export const useVaultStore = defineStore('vault', {
     },
 
     closeFile(path: string) {
+      this.noteClosedTabs(this.openFiles.filter((f) => f.path === path))
       this.openFiles = this.openFiles.filter((f) => f.path !== path)
       if (this.activePath === path) {
         const next = this.openFiles[this.openFiles.length - 1]
@@ -947,6 +1011,7 @@ export const useVaultStore = defineStore('vault', {
 
     /** 关闭除指定页签外的其它所有页签。 */
     closeOthers(path: string) {
+      this.noteClosedTabs(this.openFiles.filter((f) => f.path !== path))
       this.openFiles = this.openFiles.filter((f) => f.path === path)
       const kept = this.openFiles[0]
       this.activePath = kept ? kept.path : ''
@@ -956,6 +1021,7 @@ export const useVaultStore = defineStore('vault', {
 
     /** 关闭所有已保存（无未保存修改）的页签，保留 dirty 项。 */
     closeSaved() {
+      this.noteClosedTabs(this.openFiles.filter((f) => !f.dirty))
       this.openFiles = this.openFiles.filter((f) => f.dirty)
       if (!this.openFiles.some((f) => f.path === this.activePath)) {
         const next = this.openFiles[this.openFiles.length - 1]
