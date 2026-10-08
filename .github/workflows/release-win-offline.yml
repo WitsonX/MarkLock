@@ -1,0 +1,53 @@
+name: Windows offline installer
+
+# Builds a second Windows installer with the WebView2 runtime embedded, for
+# machines where the default setup.exe cannot reach go.microsoft.com.
+# Kept out of release.yml so the three main assets stay untouched.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-offline:
+    name: Build Windows (x64, WebView2 bundled)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x86_64-pc-windows-msvc
+
+      - name: Add Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build installer with embedded WebView2
+        run: npx tauri build --target x86_64-pc-windows-msvc --bundles nsis --config src-tauri/tauri.win-offline.conf.json
+
+      - name: Attach to release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          out="src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+          asset="MarkLock_${version}_x64-setup-offline.exe"
+          mv "${out}/MarkLock_${version}_x64-setup.exe" "$asset"
+          ls -lh "$asset"
+          gh release upload "v${version}" "$asset" --clobber
