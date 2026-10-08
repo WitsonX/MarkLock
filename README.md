@@ -21,15 +21,17 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 
 ## 下载
 
-从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包；国内网络可改从 [Gitee 发行版](https://gitee.com/Witson/MarkLock/releases) 下载同一批文件：
+从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包；国内网络可改从 [Gitee 发行版](https://gitee.com/Witson/MarkLock/releases) 下载（三个常规包 Gitee 都有，离线包只在 GitHub）：
 
 | 平台 | 文件 |
 |---|---|
 | macOS（Apple Silicon / Intel） | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows（x64） | `MarkLock_<ver>_x64-setup.exe` |
-| Windows（x64，内嵌 WebView2） | `MarkLock_<ver>_x64-setup-offline.exe` |
+| Windows（x64，内嵌 WebView2，仅 GitHub） | `MarkLock_<ver>_x64-setup-offline.exe` |
 
 默认 Windows 包只有 3.5MB，WebView2 运行时是安装时联网下载的。如果那台机器既没有 WebView2 又连不上微软 CDN，安装会在中途报错退出 —— 这种情况改用 `*-setup-offline.exe`（约 209MB，运行时打进安装包，全程不需要网络）。Windows 11 以及更新过的 Windows 10 基本都自带运行时，用默认包就够。
+
+受 Gitee 附件单文件 100MB 上限限制（实测超限传不上去），离线包只在 GitHub 提供；Gitee 侧的机器可以先单独装微软官方 WebView2 运行时再装小包：https://go.microsoft.com/fwlink/?linkid=2124701
 
 > 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会提示「未打开 MarkLock —— Apple 无法验证…」（这是未公证的固定流程，不是检测到恶意软件）。放行只需一次：
 >

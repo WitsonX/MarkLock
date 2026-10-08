@@ -22,15 +22,17 @@ Every byte hits the disk already encrypted. **Keys never leave the device, never
 
 ## Download
 
-Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — the same files are also attached to the [Gitee release page](https://gitee.com/Witson/MarkLock/releases), which downloads faster from mainland China:
+Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — the three regular installers are also attached to the [Gitee release page](https://gitee.com/Witson/MarkLock/releases), which downloads faster from mainland China:
 
 | Platform | File |
 |---|---|
 | macOS (Apple Silicon / Intel) | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows (x64) | `MarkLock_<ver>_x64-setup.exe` |
-| Windows (x64, WebView2 bundled) | `MarkLock_<ver>_x64-setup-offline.exe` |
+| Windows (x64, WebView2 bundled — GitHub only) | `MarkLock_<ver>_x64-setup-offline.exe` |
 
 The default Windows build is only 3.5MB and downloads the WebView2 runtime while installing. If the target machine has no WebView2 and cannot reach Microsoft's CDN, the install aborts halfway — use `*-setup-offline.exe` there instead (about 209MB, the runtime ships inside it, no network needed). Windows 11 and updated Windows 10 already have the runtime, so the default build is fine.
+
+The offline build is hosted on GitHub only: Gitee caps release attachments at 100MB per file, so a 209MB asset cannot be uploaded there. On a machine pulled from Gitee, install the WebView2 runtime first — Microsoft's official 64-bit standalone installer is at https://go.microsoft.com/fwlink/?linkid=2124701 — then use the small build.
 
 > Installers carry an ad-hoc signature only — they are not notarized by Apple, so the first launch is blocked with "MarkLock cannot be opened because Apple cannot check it for malicious software". That is the standard un-notarized flow, not a malware finding. One-time bypass:
 >
