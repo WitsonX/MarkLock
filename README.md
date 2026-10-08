@@ -27,6 +27,9 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 |---|---|
 | macOS（Apple Silicon / Intel） | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
 | Windows（x64） | `MarkLock_<ver>_x64-setup.exe` |
+| Windows（x64，内嵌 WebView2） | `MarkLock_<ver>_x64-setup-offline.exe` |
+
+默认 Windows 包只有 3.5MB，WebView2 运行时是安装时联网下载的。如果那台机器既没有 WebView2 又连不上微软 CDN，安装会在中途报错退出 —— 这种情况改用 `*-setup-offline.exe`（约 209MB，运行时打进安装包，全程不需要网络）。Windows 11 以及更新过的 Windows 10 基本都自带运行时，用默认包就够。这个离线包只在 GitHub 提供 —— Gitee 发行版附件有单文件大小上限，放不下它。
 
 > 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会提示「未打开 MarkLock —— Apple 无法验证…」（这是未公证的固定流程，不是检测到恶意软件）。放行只需一次：
 >
