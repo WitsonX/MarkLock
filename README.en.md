@@ -22,7 +22,7 @@ Every byte hits the disk already encrypted. **Keys never leave the device, never
 
 ## Download
 
-Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest):
+Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — the same files are also attached to the [Gitee release page](https://gitee.com/Witson/MarkLock/releases), which downloads faster from mainland China:
 
 | Platform | File |
 |---|---|

@@ -21,7 +21,7 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 
 ## 下载
 
-从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包：
+从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包；国内网络可改从 [Gitee 发行版](https://gitee.com/Witson/MarkLock/releases) 下载同一批文件：
 
 | 平台 | 文件 |
 |---|---|
