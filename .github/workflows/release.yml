@@ -81,6 +81,9 @@ jobs:
             | macOS Apple Silicon | `*_aarch64.dmg` |
             | macOS Intel | `*_x64.dmg` |
             | Windows x64 | `*_x64-setup.exe` |
+            | Windows x64 (WebView2 bundled) | `*_x64-setup-offline.exe` |
+
+            缺 WebView2 运行时的机器请用离线包（约 209MB，安装过程不联网）；默认包在装不了微软 CDN 的机器上会中途报错退出。Machines without the WebView2 runtime need the offline build — the default installer aborts when it cannot download the runtime. Run the "Windows offline installer" workflow to (re)generate it; it is not built by this pipeline.
           releaseDraft: true
           prerelease: false
           includeUpdaterArtifacts: false
