@@ -133,6 +133,14 @@ export default defineComponent({
       moreOpen: false,
       // 自绘右键上下文菜单（标题栏/状态栏/页签栏/页签项/侧边栏共用）；title 仅部分菜单用（如状态栏字号/自动锁定）
       ctxMenu: { visible: false, x: 0, y: 0, items: [] as any[], title: '' },
+      // 右键菜单打开期间对被右键节点的临时高亮（菜单关闭即清除），避免切换激活页签的副作用
+      ctxSelPath: '',
+      // 侧边栏文件/文件夹拖拽（移动/复制）：源、命中的放置目标 key、跟随光标的浮层与 ⌥ 复制/移动态
+      fileDrag: { active: false, x: 0, y: 0, alt: false, verb: '', src: null as null | { kind: string; path: string; vault: string; name: string } },
+      dropKey: '',
+      // 拖拽落点重名冲突弹窗上下文（存待执行参数，选择后 resolve 继续）
+      showDragConflict: false,
+      dragConflict: null as null | { name: string; target: string; resolve: ((d: 'overwrite' | 'rename' | 'cancel') => void) | null },
       secClosed: {} as Record<string, boolean>,
       treeClosed: {} as Record<string, boolean>,
       wordWrap: true,
@@ -216,6 +224,8 @@ export default defineComponent({
       // 全局键盘监听清理句柄（Cmd/Ctrl+W 关闭页签）
       _onKeydown: null as ((e: KeyboardEvent) => void) | null,
       _onDocMousedown: null as ((e: MouseEvent) => void) | null,
+      // 侧边栏文件/文件夹拖拽：文档级 mousedown 委托（在捕获阶段识别带 data-drag-kind 的行）
+      _onFileDragDown: null as ((e: MouseEvent) => void) | null,
       _onWinReposition: null as (() => void) | null,
       _minimizeTimer: null as ReturnType<typeof setInterval> | null,
       _sleepTimer: null as ReturnType<typeof setInterval> | null,
@@ -915,6 +925,10 @@ export default defineComponent({
       this.searchIndex = -1
     }
     document.addEventListener('mousedown', this._onDocMousedown)
+    // 侧边栏文件/文件夹拖拽：委托式 document mousedown（捕获阶段），识别 data-drag-kind 行为拖拽源，
+    // 统一处理工作目录行与库树行（跨 VaultTreeNode 组件边界），无需逐行绑定。
+    this._onFileDragDown = (e: MouseEvent) => this.onFileNodeMouseDown(e)
+    document.addEventListener('mousedown', this._onFileDragDown, true)
     // 窗口尺寸变化 / 滚动时关闭右键菜单，避免位置错位
     this._onWinReposition = () => this.closeContextMenu()
     window.addEventListener('resize', this._onWinReposition)
@@ -950,6 +964,7 @@ export default defineComponent({
     if (this._unlistenFocus) this._unlistenFocus()
     if (this._onKeydown) window.removeEventListener('keydown', this._onKeydown)
     if (this._onDocMousedown) document.removeEventListener('mousedown', this._onDocMousedown)
+    if (this._onFileDragDown) document.removeEventListener('mousedown', this._onFileDragDown, true)
     if (this._onWinReposition) {
       window.removeEventListener('resize', this._onWinReposition)
       window.removeEventListener('scroll', this._onWinReposition, true)
@@ -1960,6 +1975,7 @@ export default defineComponent({
     /** 打开右键菜单：按类型构建菜单项并定位到光标处（夹取到视口内）。 */
     openContextMenu(e: MouseEvent, menu: 'view' | 'tabsbar' | 'tab' | 'sidebar' | 'vault' | 'favfile', path?: string) {
       e.preventDefault()
+      this.ctxSelPath = ''
       let items: any[] = []
       if (menu === 'view') {
         items = this.viewToggleItems()
@@ -2056,14 +2072,21 @@ export default defineComponent({
       }
       this.showCtxMenu(e, items)
     },
-    /** 库内节点（文件夹/文件）右键菜单：新建（仅文件夹）、重命名、删除。 */
+    /** 库内节点右键菜单：文件夹→新建（文件/文件夹）；文件→导出 HTML；均含重命名、删除。 */
     openVaultNodeMenu(e: MouseEvent, v: { id: string; name: string }, node: FsNode) {
       e.preventDefault()
+      this.ctxSelPath = node.path
       const items: any[] = []
       if (node.is_dir) {
         items.push(
           { kind: 'item', label: '新建文件', run: () => this.openNewFile(v, node) },
           { kind: 'item', label: '新建文件夹', run: () => this.openNewFolder(v, node) },
+          { kind: 'sep' },
+        )
+      } else {
+        // 库内文件：仅「导出 HTML」（内容已加密，转加密/复制到库不适用）；确保对应页签已打开后复用导出逻辑
+        items.push(
+          { kind: 'item', label: '导出 HTML…', run: () => this.exportNodeHtml(node, v.id) },
           { kind: 'sep' },
         )
       }
@@ -2091,15 +2114,25 @@ export default defineComponent({
     normPath(p: string) {
       return p.replace(/\\+/g, '/').replace(/\/+$/, '')
     },
-    /** 工作目录普通节点（目录/明文文件）右键菜单：新建（仅目录）/ 在访达中显示 / 重命名 / 删除。
+    /** 工作目录普通节点（目录/明文文件）右键菜单：新建（仅目录）/ 转为加密·添加到库·导出 HTML（仅明文文件）/ 在访达中显示 / 重命名 / 删除。
      *  库与加密文件节点（is_vault）不再单独出菜单，与普通文件一致（系统级路径操作）。 */
     openWorkdirNodeMenu(e: MouseEvent, node: FsNode) {
       e.preventDefault()
+      this.ctxSelPath = node.path
       const items: any[] = []
       if (node.is_dir && !node.is_vault) {
         items.push(
           { kind: 'item', label: '新建文件', run: () => this.wdOpenNewFile(node) },
           { kind: 'item', label: '新建文件夹', run: () => this.wdOpenNewFolder(node) },
+        )
+      }
+      // 工作目录明文文件（非目录、非库/加密节点）：转为加密 / 添加到加密库 / 导出 HTML
+      if (!node.is_dir && !node.is_vault) {
+        items.push(
+          { kind: 'item', label: '转为加密文件…', run: () => this.convertNodeToEncrypted(node) },
+          { kind: 'item', label: '添加到加密库…', run: () => this.copyNodeToVault(node) },
+          { kind: 'item', label: '导出 HTML…', run: () => this.exportNodeHtml(node) },
+          { kind: 'sep' },
         )
       }
       items.push(
@@ -2109,6 +2142,39 @@ export default defineComponent({
         { kind: 'item', label: '删除', run: () => this.wdOpenDelete(node) },
       )
       this.showCtxMenu(e, items)
+    },
+    /** 侧边栏节点右键操作前置：确保对应页签已打开（已打开则激活复用），返回页签路径；
+     *  库内单文件库页签路径为 `库id#相对路径`，目录库/工作目录明文为绝对 path。失败返回空串。 */
+    async ensureNodeTab(node: FsNode, vaultId?: string): Promise<string> {
+      const v = vaultId ? this.store.recent.find((x) => x.id === vaultId) : undefined
+      const tabPath = v?.isFileVault ? `${vaultId}#${node.path}` : node.path
+      if (this.openFiles.some((x) => x.path === tabPath)) return tabPath
+      if (vaultId) {
+        await this.openFileNode(node, vaultId) // 内部已捕获错误并提示
+      } else {
+        try {
+          await this.store.openPlainFile(node.path, node.name)
+        } catch (err) {
+          message.error(String(err))
+          return ''
+        }
+      }
+      return this.openFiles.some((x) => x.path === tabPath) ? tabPath : ''
+    },
+    /** 工作目录明文文件右键「转为加密文件…」：先打开页签再复用另存为转换弹窗。 */
+    async convertNodeToEncrypted(node: FsNode) {
+      const tp = await this.ensureNodeTab(node)
+      if (tp) this.openConvertDialog(tp)
+    },
+    /** 工作目录明文文件右键「添加到加密库…」：先打开页签再复用复制到库弹窗。 */
+    async copyNodeToVault(node: FsNode) {
+      const tp = await this.ensureNodeTab(node)
+      if (tp) this.openCopyToVault(tp)
+    },
+    /** 节点右键「导出 HTML…」：先打开页签（取内存正文）再导出；vaultId 为空表示工作目录明文文件。 */
+    async exportNodeHtml(node: FsNode, vaultId?: string) {
+      const tp = await this.ensureNodeTab(node, vaultId)
+      if (tp) this.exportHtml(tp)
     },
     wdOpenNewFile(dirNode: FsNode) {
       this.wdNewFileAt(dirNode.path)
@@ -2210,12 +2276,691 @@ export default defineComponent({
     },
     closeContextMenu() {
       this.ctxMenu.visible = false
+      this.ctxSelPath = ''
     },
     /** 执行菜单项：禁用项忽略；执行后关闭菜单。 */
     runCtxItem(it: any) {
       if (it.disabled) return
       it.run && it.run()
       this.closeContextMenu()
+    },
+
+    // ---------- 侧边栏文件/文件夹拖拽（移动 / 复制） ----------
+    /** 拖拽源：kind=wd-file|wd-dir|vlt-file|vlt-dir；path=行内 data-drag-path；vault=库 id（wd 为空）。 */
+    /** 拖拽目标：kind=wd-dir|wd-root|vlt-dir|vlt-root；path=目录定位；vault=目标库 id；label=展示名。 */
+    /** 委托式 mousedown（捕获阶段）：命中 data-drag-kind 行则准备拖拽，移动超阈值才真正进入拖拽态。 */
+    onFileNodeMouseDown(e: MouseEvent) {
+      if (e.button !== 0) return
+      if (this.showDragConflict) return
+      const t = e.target as HTMLElement | null
+      if (!t || !t.closest) return
+      // 行内按钮（更多操作 / 图标按钮）不触发拖拽
+      if (t.closest('.acts, .icon-btn')) return
+      const row = t.closest('[data-drag-kind]') as HTMLElement | null
+      if (!row) return
+      const kind = row.getAttribute('data-drag-kind') || ''
+      const path = row.getAttribute('data-drag-path') || ''
+      const vault = row.getAttribute('data-drag-vault') || ''
+      if (!kind || !path) return
+      const src = { kind, path, vault, name: this.fileName(path) }
+      const startX = e.clientX
+      const startY = e.clientY
+      let started = false
+      let cur: { kind: string; path: string; vault: string; label: string } | null = null
+      let expandTimer: ReturnType<typeof setTimeout> | null = null
+      let expandKey = ''
+
+      const applyTarget = () => {
+        const valid = !!(cur && this.isDragTargetValid(src, cur))
+        if (cur && valid) {
+          const key = this.dropKeyOf(cur)
+          this.dropKey = key
+          this.fileDrag.verb = this.verbFor(src, cur, this.fileDrag.alt)
+          // 悬停折叠目录 ~600ms 自动展开
+          if (key !== expandKey) {
+            expandKey = key
+            if (expandTimer) clearTimeout(expandTimer)
+            const c = cur
+            expandTimer = setTimeout(() => this.autoExpandDropTarget(c), 600)
+          }
+        } else {
+          this.dropKey = ''
+          this.fileDrag.verb = ''
+          if (expandTimer) {
+            clearTimeout(expandTimer)
+            expandTimer = null
+            expandKey = ''
+          }
+        }
+      }
+
+      const move = (ev: MouseEvent) => {
+        if (!started && Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < 4) return
+        started = true
+        if (!this.fileDrag.active) {
+          this.fileDrag.active = true
+          this.fileDrag.src = src
+        }
+        this.fileDrag.x = ev.clientX
+        this.fileDrag.y = ev.clientY
+        this.fileDrag.alt = ev.altKey
+        // 拖拽期间清除可能产生的文本选区
+        const sel = window.getSelection()
+        if (sel && sel.rangeCount > 0) sel.removeAllRanges()
+        // 命中最近的「可放置」祖先：文件行本身不可放，closest 会解析到其所在目录（.t-sub / sec-list），
+        // 从而支持把文件夹内的文件拖到上层文件 / 根区域以「移出」该文件夹；文件夹行/根行本身即目标。
+        const el = document.elementFromPoint(ev.clientX, ev.clientY)
+        const dropEl = el && el.closest ? (el.closest('[data-drop-kind]') as HTMLElement | null) : null
+        cur = dropEl ? this.readDropTarget(dropEl) : null
+        applyTarget()
+      }
+      // ⌥ 实时切换：按下 / 抬起修饰键时即使鼠标不动也刷新浮层文案与放置态（不依赖 mousemove 的 altKey）
+      const keyMod = (ev: KeyboardEvent) => {
+        if (!started) return
+        this.fileDrag.alt = ev.altKey
+        applyTarget()
+      }
+      const up = async () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        window.removeEventListener('keydown', keyMod, true)
+        window.removeEventListener('keyup', keyMod, true)
+        if (expandTimer) clearTimeout(expandTimer)
+        if (!started) {
+          this.resetFileDrag()
+          return
+        }
+        // 拖拽后吞掉紧随的 click，避免误触发文件夹展开 / 文件打开
+        this.suppressNextClick()
+        const target = cur && this.isDragTargetValid(src, cur) ? cur : null
+        // 以浮层当前展示的 ⌥ 态为准（鼠标与修饰键释放的先后不影响判定）
+        const alt = this.fileDrag.alt
+        this.resetFileDrag()
+        if (target) {
+          try {
+            await this.performNodeDragOperation(src, target, alt)
+          } catch (err) {
+            message.error(String(err))
+          }
+        }
+      }
+      window.addEventListener('mousemove', move)
+      window.addEventListener('mouseup', up)
+      window.addEventListener('keydown', keyMod, true)
+      window.addEventListener('keyup', keyMod, true)
+    },
+    /** 从放置行 / 容器 DOM 读取目标信息（label 由属性推导，不取后代 .fname 以免容器命中时取到子项名）。 */
+    readDropTarget(el: HTMLElement) {
+      const kind = el.getAttribute('data-drop-kind') || ''
+      const path = el.getAttribute('data-drop-path') || ''
+      const vault = el.getAttribute('data-drop-vault') || ''
+      let label = ''
+      if (path) label = this.fileName(path)
+      else if (kind === 'wd-root') label = this.workdirTitle
+      else if (kind === 'vlt-root') label = this.store.recent.find((x) => x.id === vault)?.name || '库'
+      return { kind, path, vault, label }
+    },
+    /** 目标 → 高亮 key（与模板 / VaultTreeNode 约定一致）。 */
+    dropKeyOf(cur: { kind: string; path: string; vault: string }): string {
+      switch (cur.kind) {
+        case 'wd-dir':
+          return `wddir:${cur.path}`
+        case 'wd-root':
+          return 'wroot'
+        case 'vlt-dir':
+          return `vltdir:${cur.vault}:${cur.path}`
+        case 'vlt-root':
+          return `vroot:${cur.vault}`
+        default:
+          return ''
+      }
+    },
+    /** 同域恒为移动；跨域（wd↔库）默认复制，⌥ 为移动。 */
+    isMoveOp(src: { kind: string }, cur: { kind: string }, alt: boolean): boolean {
+      const wdSrc = src.kind === 'wd-file' || src.kind === 'wd-dir'
+      const wdTarget = cur.kind === 'wd-dir' || cur.kind === 'wd-root'
+      if (wdSrc === wdTarget) return true
+      return alt
+    },
+    /** 浮层文案：移动/复制到 X。 */
+    verbFor(src: { kind: string }, cur: { kind: string; label: string }, alt: boolean): string {
+      const move = this.isMoveOp(src, cur, alt)
+      const where = cur.label || (cur.kind === 'wd-root' ? '工作目录' : cur.kind === 'vlt-root' ? '库' : '')
+      return (move ? '移动到 ' : '复制到 ') + where
+    },
+    /** 结构性目标有效性：目录不可放入自身/后代；非 Markdown 单文件不可入（库）。 */
+    isDragTargetValid(src: { kind: string; path: string; vault: string; name: string }, cur: { kind: string; path: string; vault: string }): boolean {
+      const wdSrc = src.kind === 'wd-file' || src.kind === 'wd-dir'
+      const wdTarget = cur.kind === 'wd-dir' || cur.kind === 'wd-root'
+      const srcIsDir = src.kind === 'wd-dir' || src.kind === 'vlt-dir'
+      // wd：目录放入自身/后代无效
+      if (srcIsDir && wdSrc && wdTarget && cur.kind === 'wd-dir') {
+        const ns = this.normPath(src.path)
+        const nd = this.normPath(cur.path)
+        if (nd === ns || nd.startsWith(ns + '/')) return false
+      }
+      // 库内（同库）：目录放入自身/后代无效
+      if (srcIsDir && !wdSrc && !wdTarget && src.vault === cur.vault && cur.kind === 'vlt-dir') {
+        const ns = this.normPath(src.path)
+        const nd = this.normPath(cur.path)
+        if (nd === ns || nd.startsWith(ns + '/')) return false
+      }
+      // wd 单文件 → 库：仅 Markdown 可入
+      if (wdSrc && !wdTarget && src.kind === 'wd-file' && !this.isMarkdownName(src.name)) return false
+      return true
+    },
+    /** 悬停折叠目录自动展开。 */
+    autoExpandDropTarget(cur: { kind: string; path: string }) {
+      if (cur.kind === 'wd-dir') {
+        const node = this.findWorkNodeByPath(cur.path)
+        if (node && !node.open) this.toggleWorkdirFolder(node)
+      } else if (cur.kind === 'vlt-dir') {
+        if (this.treeClosed[cur.path]) this.treeClosed[cur.path] = false
+      }
+    },
+    resetFileDrag() {
+      this.fileDrag.active = false
+      this.fileDrag.src = null
+      this.fileDrag.verb = ''
+      this.fileDrag.alt = false
+      this.dropKey = ''
+    },
+    /** 拖拽结束后一次性吞掉紧随的 click（捕获阶段），避免误触发点击。 */
+    suppressNextClick() {
+      const swallow = (ev: MouseEvent) => {
+        ev.stopPropagation()
+        ev.preventDefault()
+        window.removeEventListener('click', swallow, true)
+      }
+      window.addEventListener('click', swallow, true)
+      setTimeout(() => window.removeEventListener('click', swallow, true), 350)
+    },
+    /** 仅 .md / .markdown 视为可入库的 Markdown 文件。 */
+    isMarkdownName(name: string): boolean {
+      return /\.(md|markdown)$/i.test(name)
+    },
+    /** 名称递增（保留扩展名）：a.md → a 2.md；无扩展名按目录处理：a → a 2。 */
+    incrementName(base: string, n: number): string {
+      const m = base.match(/^(.*?)(\.[^./]+)$/)
+      return m ? `${m[1]} ${n}${m[2]}` : `${base} ${n}`
+    },
+    /** 依据存在性判定生成不冲突的名称（首个不冲突即用）。 */
+    makeUniqueName(base: string, exists: (nm: string) => boolean): string {
+      if (!exists(base)) return base
+      let n = 2
+      let nm = this.incrementName(base, n)
+      while (exists(nm)) {
+        n++
+        nm = this.incrementName(base, n)
+      }
+      return nm
+    },
+    /** 工作目录目标下的不冲突名称（异步探测 pathExists）。 */
+    async uniqueWdName(targetDir: string, base: string): Promise<string> {
+      if (!(await tauri.pathExists(this.joinPath(targetDir, base)))) return base
+      let n = 2
+      let nm = this.incrementName(base, n)
+      while (await tauri.pathExists(this.joinPath(targetDir, nm))) {
+        n++
+        nm = this.incrementName(base, n)
+      }
+      return nm
+    },
+    /** 按路径在工作目录懒加载树中查找目录节点。 */
+    findWorkNodeByPath(path: string): WorkNode | null {
+      const norm = this.normPath(path)
+      const walk = (list: WorkNode[]): WorkNode | null => {
+        for (const n of list) {
+          if (!n.is_dir) continue
+          if (this.normPath(n.path) === norm) return n
+          const r = n.children ? walk(n.children as WorkNode[]) : null
+          if (r) return r
+        }
+        return null
+      }
+      return walk(this.workdir)
+    },
+    /** 在库内存树中按节点路径查找（目录库绝对路径 / 单文件库相对路径）。 */
+    findVaultTreeNode(vaultId: string, nodePath: string): FsNode | null {
+      const norm = this.normPath(nodePath)
+      const rec = (list: FsNode[]): FsNode | null => {
+        for (const n of list) {
+          if (this.normPath(n.path) === norm) return n
+          if (n.is_dir) {
+            const r = n.children ? rec(n.children) : null
+            if (r) return r
+          }
+        }
+        return null
+      }
+      return rec(this.vaultTrees[vaultId] || [])
+    },
+    /** 目标库目录下的直接子节点列表（vlt-root = 树顶层）。 */
+    vaultDirChildren(vaultId: string, cur: { kind: string; path: string }): FsNode[] {
+      if (cur.kind === 'vlt-root') return this.vaultTrees[vaultId] || []
+      const node = this.findVaultTreeNode(vaultId, cur.path)
+      return (node && node.children) || []
+    },
+    /** 目标库目录是否已存在同名子项。 */
+    vaultHasChild(vaultId: string, cur: { kind: string; path: string }, name: string): boolean {
+      return this.vaultDirChildren(vaultId, cur).some((c) => c.name === name)
+    },
+    /** 读取库内一个条目的正文（按目录库 / 单文件库分流）。 */
+    async readVaultEntryContent(vaultId: string, rel: string): Promise<string> {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) throw new Error('库不存在或未登记')
+      if (v.isFileVault) return await tauri.readFileVault(vaultId, v.path, rel)
+      return await tauri.readFile(vaultId, `${v.path}/${rel}`)
+    },
+    /** 写入库内一个文件（createInVault 覆盖同名；createInFileVault 建到 .mdlb）。 */
+    async writeEntryToVault(vaultId: string, rel: string, content: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) throw new Error('库不存在或未登记')
+      if (v.isFileVault) await tauri.createInFileVault(vaultId, v.path, rel, content)
+      else await tauri.createInVault(vaultId, rel, content)
+    },
+    /** 在库内创建空目录（若为单文件库走对应命令）。 */
+    async createFolderEntry(vaultId: string, rel: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) return
+      if (v.isFileVault) await tauri.createFolderInFileVault(vaultId, v.path, rel)
+      else await tauri.createFolderInVault(vaultId, rel)
+    },
+    /** 删除库内一个条目。 */
+    async deleteEntryInVault(vaultId: string, rel: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) return
+      if (v.isFileVault) await tauri.deleteInFileVault(vaultId, v.path, rel)
+      else await tauri.deleteInVault(vaultId, rel)
+    },
+    /** 重命名 / 移动库内一个条目。 */
+    async renameInVaultFor(vaultId: string, oldRel: string, newRel: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) throw new Error('库不存在或未登记')
+      if (v.isFileVault) await tauri.renameInFileVault(vaultId, v.path, oldRel, newRel)
+      else await tauri.renameInVault(vaultId, oldRel, newRel)
+    },
+
+    // ---------- 拖拽执行分派 ----------
+    /** 依源/目标域判定 5 类操作之一并执行。 */
+    async performNodeDragOperation(
+      src: { kind: string; path: string; vault: string; name: string },
+      target: { kind: string; path: string; vault: string; label: string },
+      alt: boolean,
+    ) {
+      const wdSrc = src.kind === 'wd-file' || src.kind === 'wd-dir'
+      const wdTarget = target.kind === 'wd-dir' || target.kind === 'wd-root'
+      const srcIsDir = src.kind === 'wd-dir' || src.kind === 'vlt-dir'
+      // 二次守卫：目录放入自身/后代
+      if (srcIsDir) {
+        if (wdSrc && wdTarget && target.kind === 'wd-dir') {
+          const ns = this.normPath(src.path)
+          const nd = this.normPath(target.path)
+          if (nd === ns || nd.startsWith(ns + '/')) return message.warning('不能把文件夹放入其自身或子目录')
+        }
+        if (!wdSrc && !wdTarget && src.vault === target.vault && target.kind === 'vlt-dir') {
+          const ns = this.normPath(src.path)
+          const nd = this.normPath(target.path)
+          if (nd === ns || nd.startsWith(ns + '/')) return message.warning('不能把文件夹放入其自身或子目录')
+        }
+      }
+      const isMove = this.isMoveOp(src, target, alt)
+      if (wdSrc && wdTarget) return this.moveWdToWd(src, target)
+      if (!wdSrc && !wdTarget) {
+        if (src.vault === target.vault) return this.moveVaultWithin(src, target)
+        return this.moveVaultAcross(src, target)
+      }
+      if (wdSrc && !wdTarget) return this.copyWdToVault(src, target, isMove)
+      return this.copyVaultToWd(src, target, isMove)
+    },
+    /** 工作目录 → 工作目录：移动（renamePath）。 */
+    async moveWdToWd(
+      src: { kind: string; path: string; name: string },
+      target: { kind: string; path: string; label: string },
+    ) {
+      const targetDir = target.kind === 'wd-root' ? this.workdirRoot : target.path
+      const base = src.name
+      let dest = this.joinPath(targetDir, base)
+      if (this.normPath(dest) === this.normPath(src.path)) return
+      if (await tauri.pathExists(dest)) {
+        const d = await this.askDragConflict(base, targetDir)
+        if (d === 'cancel') return
+        if (d === 'overwrite') await tauri.deletePath(dest)
+        else dest = this.joinPath(targetDir, await this.uniqueWdName(targetDir, base))
+      }
+      await tauri.renamePath(src.path, dest)
+      message.success(`已移动到 ${target.label || '目标'}（${this.fileName(dest)}）`)
+      this.syncWdTabAfterMove(src.path, dest, src.kind === 'wd-dir')
+      await this.reloadWorkdirDir(this.parentDir(src.path))
+      await this.reloadWorkdirDir(targetDir)
+    },
+    /** 库内（同库）→ 文件夹 / 库根：移动（renameInVault）。 */
+    async moveVaultWithin(
+      src: { kind: string; path: string; vault: string; name: string },
+      target: { kind: string; path: string; label: string },
+    ) {
+      const vaultId = src.vault
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) return
+      const srcIsDir = src.kind === 'vlt-dir'
+      const srcRel = this.relPathInVault(src.path, vaultId)
+      const base = src.name
+      const dstDirRel = target.kind === 'vlt-root' ? '' : this.relPathInVault(target.path, vaultId)
+      let newRel = dstDirRel ? `${dstDirRel}/${base}` : base
+      if (newRel === srcRel) return
+      if (this.vaultHasChild(vaultId, target, base)) {
+        const d = await this.askDragConflict(base, target.label || '库')
+        if (d === 'cancel') return
+        if (d === 'overwrite') await this.deleteEntryInVault(vaultId, newRel)
+        else {
+          const nm = this.makeUniqueName(base, (x) => this.vaultHasChild(vaultId, target, x))
+          newRel = dstDirRel ? `${dstDirRel}/${nm}` : nm
+        }
+      }
+      await this.renameInVaultFor(vaultId, srcRel, newRel)
+      message.success(`已移动到 ${target.label || '库'}（${this.fileName(newRel)}）`)
+      if (srcIsDir) this.dropVaultTabsUnder(vaultId, srcRel)
+      else this.syncVaultFileTab(vaultId, srcRel, newRel)
+      await this.refreshVaultTree(vaultId, v.path)
+    },
+    /** 库 A → 库 B：移动（前端遍历源子树读解密 → 写入 B → 删 A 源）。 */
+    async moveVaultAcross(
+      src: { kind: string; path: string; vault: string; name: string },
+      target: { kind: string; path: string; vault: string; label: string },
+    ) {
+      const A = src.vault
+      const B = target.vault
+      const vB = this.store.recent.find((x) => x.id === B)
+      if (!vB) return
+      const srcNode = this.findVaultTreeNode(A, src.path)
+      if (!srcNode) return
+      const base = src.name
+      const dstDirRel = target.kind === 'vlt-root' ? '' : this.relPathInVault(target.path, B)
+      let finalName = base
+      if (this.vaultHasChild(B, target, base)) {
+        const d = await this.askDragConflict(base, target.label || '库')
+        if (d === 'cancel') return
+        if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
+        else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
+      }
+      const dstBase = (dstDirRel ? `${dstDirRel}/` : '') + finalName
+      const srcRel = this.relPathInVault(src.path, A)
+      await this.copyVaultSubtreeTo(A, srcNode, B, dstBase)
+      await this.deleteEntryInVault(A, srcRel)
+      message.success(`已移动到 ${target.label || '库'}（${finalName}）`)
+      this.dropVaultTabsUnder(A, srcRel)
+      const vA = this.store.recent.find((x) => x.id === A)
+      if (vA) await this.refreshVaultTree(A, vA.path)
+      await this.refreshVaultTree(B, vB.path)
+    },
+    /** 工作目录 → 库：复制（⌥ 移动）。 */
+    async copyWdToVault(
+      src: { kind: string; path: string; name: string },
+      target: { kind: string; path: string; vault: string; label: string },
+      isMove: boolean,
+    ) {
+      const B = target.vault
+      const vB = this.store.recent.find((x) => x.id === B)
+      if (!vB) return
+      const dstDirRel = target.kind === 'vlt-root' ? '' : this.relPathInVault(target.path, B)
+      const base = src.name
+      if (src.kind === 'wd-file') {
+        if (!this.isMarkdownName(base)) return message.warning('只能将 Markdown（.md/.markdown）文件放入加密库')
+        const content = await tauri.readPlainFile(src.path)
+        let finalName = base
+        if (this.vaultHasChild(B, target, base)) {
+          const d = await this.askDragConflict(base, target.label || '库')
+          if (d === 'cancel') return
+          if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
+          else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
+        }
+        const dstRel = (dstDirRel ? `${dstDirRel}/` : '') + finalName
+        await this.writeEntryToVault(B, dstRel, content)
+        if (isMove) {
+          await tauri.deletePath(src.path)
+          this.closeWdTab(src.path)
+          await this.reloadWorkdirDir(this.parentDir(src.path))
+        }
+        message.success(`${isMove ? '已移动到' : '已复制到'} ${target.label || '库'}（${finalName}）`)
+        await this.refreshVaultTree(B, vB.path)
+        return
+      }
+      // 文件夹：仅收集 Markdown，保留目录结构落到目标下的同名文件夹
+      const { items, skipped } = await this.collectWdMarkdownFiles(src.path)
+      if (!items.length) return message.warning('该文件夹内没有可导入的 Markdown 文件')
+      let finalName = base
+      if (this.vaultHasChild(B, target, base)) {
+        const d = await this.askDragConflict(base, target.label || '库')
+        if (d === 'cancel') return
+        if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
+        else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
+      }
+      const dstBase = (dstDirRel ? `${dstDirRel}/` : '') + finalName
+      let fail = 0
+      for (const f of items) {
+        try {
+          const c = await tauri.readPlainFile(f.abs)
+          await this.writeEntryToVault(B, `${dstBase}/${f.withinRel}`, c)
+        } catch {
+          fail++
+        }
+      }
+      if (isMove) {
+        await tauri.deletePath(src.path)
+        this.closeWdTabUnder(src.path)
+        await this.reloadWorkdirDir(this.parentDir(src.path))
+      }
+      message.success(
+        `${isMove ? '已移动到' : '已复制到'} ${target.label || '库'}（导入 ${items.length} 个${fail ? `，失败 ${fail}` : ''}${skipped ? `，跳过非 Markdown ${skipped}` : ''}）`,
+      )
+      await this.refreshVaultTree(B, vB.path)
+    },
+    /** 库 → 工作目录：复制（⌥ 移动）。 */
+    async copyVaultToWd(
+      src: { kind: string; path: string; vault: string; name: string },
+      target: { kind: string; path: string; label: string },
+      isMove: boolean,
+    ) {
+      const A = src.vault
+      const vA = this.store.recent.find((x) => x.id === A)
+      if (!vA) return
+      const targetDir = target.kind === 'wd-root' ? this.workdirRoot : target.path
+      const base = src.name
+      if (src.kind === 'vlt-file') {
+        const srcRel = this.relPathInVault(src.path, A)
+        const content = await this.readVaultEntryContent(A, srcRel)
+        let dest = this.joinPath(targetDir, base)
+        if (await tauri.pathExists(dest)) {
+          const d = await this.askDragConflict(base, target.label || '工作目录')
+          if (d === 'cancel') return
+          if (d === 'overwrite') await tauri.deletePath(dest)
+          else dest = this.joinPath(targetDir, await this.uniqueWdName(targetDir, base))
+        }
+        await tauri.createPlainFile(dest, content)
+        if (isMove) {
+          await this.deleteEntryInVault(A, srcRel)
+          this.dropVaultTabsUnder(A, srcRel)
+          await this.refreshVaultTree(A, vA.path)
+        }
+        message.success(`${isMove ? '已移动到' : '已复制到'} ${target.label || '工作目录'}（${this.fileName(dest)}）`)
+        await this.reloadWorkdirDir(targetDir)
+        return
+      }
+      // 文件夹：递归导出库子树为明文文件（createPlainFile 自动建父目录）
+      const srcNode = this.findVaultTreeNode(A, src.path)
+      if (!srcNode) return
+      const srcRel = this.relPathInVault(src.path, A)
+      const items = this.collectVaultFilesUnder(srcNode, A)
+      if (!items.length) return message.warning('该文件夹内没有可导出的文件')
+      let finalName = base
+      if (await tauri.pathExists(this.joinPath(targetDir, base))) {
+        const d = await this.askDragConflict(base, target.label || '工作目录')
+        if (d === 'cancel') return
+        if (d === 'overwrite') await tauri.deletePath(this.joinPath(targetDir, base))
+        else finalName = await this.uniqueWdName(targetDir, base)
+      }
+      const dstBaseDir = this.joinPath(targetDir, finalName)
+      let fail = 0
+      for (const it of items) {
+        try {
+          const c = await this.readVaultEntryContent(A, it.readRel)
+          await tauri.createPlainFile(this.joinPath(dstBaseDir, it.withinRel), c)
+        } catch {
+          fail++
+        }
+      }
+      if (isMove) {
+        await this.deleteEntryInVault(A, srcRel)
+        this.dropVaultTabsUnder(A, srcRel)
+        await this.refreshVaultTree(A, vA.path)
+      }
+      message.success(
+        `${isMove ? '已移动到' : '已复制到'} ${target.label || '工作目录'}（导出 ${items.length} 个${fail ? `，失败 ${fail}` : ''}）`,
+      )
+      await this.reloadWorkdirDir(targetDir)
+    },
+    /** 递归读解密源子树并逐文件写入目标库（dest 为目标库内的相对基路径）。 */
+    async copyVaultSubtreeTo(A: string, srcNode: FsNode, B: string, dstBase: string) {
+      const items: { readRel: string; dest: string }[] = []
+      const normSrc = this.normPath(srcNode.path)
+      if (!srcNode.is_dir) {
+        items.push({ readRel: this.relPathInVault(srcNode.path, A), dest: dstBase })
+      } else {
+        const walk = (list: FsNode[]) => {
+          for (const n of list) {
+            if (n.is_dir) walk(n.children || [])
+            else {
+              const within = this.normPath(n.path).slice(normSrc.length).replace(/^[\/]+/, '')
+              items.push({ readRel: this.relPathInVault(n.path, A), dest: within ? `${dstBase}/${within}` : dstBase })
+            }
+          }
+        }
+        walk(srcNode.children || [])
+        if (!items.length) {
+          // 空目录：仅在目标建一个同名空目录
+          await this.createFolderEntry(B, dstBase)
+          return
+        }
+      }
+      for (const it of items) {
+        const content = await this.readVaultEntryContent(A, it.readRel)
+        await this.writeEntryToVault(B, it.dest, content)
+      }
+    },
+    /** 收集工作目录子树里的 Markdown 文件（跳过库 / 非 Markdown）。 */
+    async collectWdMarkdownFiles(dirAbs: string): Promise<{ items: { abs: string; withinRel: string }[]; skipped: number }> {
+      const out: { abs: string; withinRel: string }[] = []
+      let skipped = 0
+      const walk = async (dir: string, prefix: string) => {
+        const children = await tauri.listDir(dir)
+        for (const c of children) {
+          if (c.is_dir) {
+            if (c.is_vault) continue
+            await walk(c.path, prefix ? `${prefix}/${c.name}` : c.name)
+          } else if (c.is_vault) {
+            skipped++
+          } else if (this.isMarkdownName(c.name)) {
+            out.push({ abs: c.path, withinRel: prefix ? `${prefix}/${c.name}` : c.name })
+          } else {
+            skipped++
+          }
+        }
+      }
+      await walk(dirAbs, '')
+      return { items: out, skipped }
+    },
+    /** 收集库子树里的全部文件项（withinRel 相对 srcNode）。 */
+    collectVaultFilesUnder(srcNode: FsNode, vaultId: string): { readRel: string; withinRel: string }[] {
+      const out: { readRel: string; withinRel: string }[] = []
+      const walk = (n: FsNode, prefix: string) => {
+        const relPath = prefix ? `${prefix}/${n.name}` : n.name
+        if (n.is_dir) (n.children || []).forEach((c) => walk(c, relPath))
+        else out.push({ readRel: this.relPathInVault(n.path, vaultId), withinRel: relPath })
+      }
+      ;(srcNode.children || []).forEach((c) => walk(c, ''))
+      return out
+    },
+
+    // ---------- 页签同步 ----------
+    /** 工作目录移动后同步页签：文件改指针，目录关闭其下页签。 */
+    syncWdTabAfterMove(oldAbs: string, newAbs: string, isDir: boolean) {
+      if (isDir) {
+        this.closeWdTabUnder(oldAbs)
+        return
+      }
+      const f = this.openFiles.find((x) => x.path === oldAbs)
+      if (f) {
+        f.path = newAbs
+        f.name = this.fileName(newAbs)
+        if (this.store.activePath === oldAbs) this.store.activePath = newAbs
+        this.store.persistOpenFiles()
+      }
+    },
+    closeWdTab(path: string) {
+      this.store.closeFile(path)
+      this.store.dropClosedTab(path)
+    },
+    closeWdTabUnder(absDir: string) {
+      const nd = this.normPath(absDir)
+      this.openFiles.slice().forEach((f) => {
+        const nf = this.normPath(f.path)
+        if (nf === nd || nf.startsWith(nd + '/')) this.closeWdTab(f.path)
+      })
+    },
+    /** 库内单文件移动后同步其已开页签指针。 */
+    syncVaultFileTab(vaultId: string, oldRel: string, newRel: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) return
+      const root = v.path
+      const oldKey = v.isFileVault ? `${root}#${oldRel}` : root ? `${root}/${oldRel}` : oldRel
+      const newKey = v.isFileVault ? `${root}#${newRel}` : root ? `${root}/${newRel}` : newRel
+      const f = this.store.openFiles.find((x) => x.path === oldKey)
+      if (f) {
+        f.path = newKey
+        f.name = this.fileName(newRel)
+        f.relPath = newRel
+        if (this.store.activePath === oldKey) this.store.activePath = newKey
+        this.store.persistOpenFiles()
+      }
+    },
+    /** 关闭库内某条目（文件 / 目录子树）对应的所有已开页签（源已不存在）。 */
+    dropVaultTabsUnder(vaultId: string, rel: string) {
+      const v = this.store.recent.find((x) => x.id === vaultId)
+      if (!v) return
+      const root = v.path
+      const normRel = this.normPath(rel).replace(/^\/+/, '')
+      const dirAbs = root ? `${root}/${rel}` : rel
+      const normDirAbs = this.normPath(dirAbs)
+      this.store.openFiles.slice().forEach((f) => {
+        if (v.isFileVault) {
+          const r = f.path.includes('#') ? this.normPath(f.path.split('#').slice(1).join('#')) : ''
+          if (r === normRel || r.startsWith(normRel + '/')) {
+            this.store.closeFile(f.path)
+            this.store.dropClosedTab(f.path)
+          }
+        } else {
+          const nf = this.normPath(f.path)
+          if (nf === normDirAbs || nf.startsWith(normDirAbs + '/')) {
+            this.store.closeFile(f.path)
+            this.store.dropClosedTab(f.path)
+          }
+        }
+      })
+    },
+
+    // ---------- 重名冲突弹窗 ----------
+    /** 打开重名冲突询问，等待用户选择（覆盖 / 保留两者 / 取消）。 */
+    askDragConflict(name: string, target: string): Promise<'overwrite' | 'rename' | 'cancel'> {
+      return new Promise((resolve) => {
+        this.dragConflict = { name, target, resolve }
+        this.showDragConflict = true
+      })
+    },
+    onDragConflict(choice: 'overwrite' | 'rename' | 'cancel') {
+      const ctx = this.dragConflict
+      this.dragConflict = null
+      this.showDragConflict = false
+      ctx && ctx.resolve && ctx.resolve(choice)
     },
     // ---------- 系统文件类型关联（首次使用询问） ----------
     /** 启动后探测一次：未询问过且非默认打开程序时弹窗；已是默认或平台不支持则静默标记已问过。 */
@@ -4496,6 +5241,13 @@ ${bodyHtml}
       </div>
     </transition>
 
+    <!-- 侧边栏文件拖拽：跟随光标的浮层提示（pointer-events:none 不拦截命中测试） -->
+    <div
+      v-if="fileDrag.active"
+      class="file-drag-tip"
+      :style="{ left: fileDrag.x + 12 + 'px', top: fileDrag.y + 14 + 'px' }"
+    >{{ fileDrag.verb || (fileDrag.src ? fileDrag.src.name : '') }}</div>
+
     <!-- ======== 标题栏（macOS 红绿灯叠加在左侧空白处） ======== -->
     <div class="titlebar" data-tauri-drag-region="deep" @contextmenu="openContextMenu($event, 'view')">
       <span class="icon-btn" data-tauri-drag-region="false" :title="store.settings.showSidebar ? '隐藏侧边栏' : '显示侧边栏'" @click="toggleSidebar">
@@ -4658,7 +5410,9 @@ ${bodyHtml}
                 <div
                   class="t-item vault-row"
                   :dragable="'vault:' + v.id"
-                  :class="{ dragging: dragKey === 'vault:' + v.id, dragover: dragOverKey === 'vault:' + v.id }"
+                  :class="{ dragging: dragKey === 'vault:' + v.id, dragover: dragOverKey === 'vault:' + v.id, 'drop-into': fileDrag.active && dropKey === 'vroot:' + v.id }"
+                  data-drop-kind="vlt-root"
+                  :data-drop-vault="v.id"
                   v-tip="v.path"
                   @mousedown="onItemMouseDown('vault:' + v.id, $event)"
                   @click="onVaultRowClick(v)"
@@ -4674,12 +5428,16 @@ ${bodyHtml}
                   <span v-if="v.unlocked" class="icon-btn" title="锁定该库" @click.stop="lockVault(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
                   <span v-else class="icon-btn locked" title="点击解锁并打开" @click.stop="onVaultRowClick(v)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
                 </div>
-                <div class="t-sub" v-show="v.unlocked && !isTreeClosed('v-' + v.id)">
+                <div class="t-sub" v-show="v.unlocked && !isTreeClosed('v-' + v.id)" data-drop-kind="vlt-root" :data-drop-vault="v.id">
                   <VaultTreeNode
                     v-if="vaultTrees[v.id] && vaultTrees[v.id].length"
                     :nodes="vaultTrees[v.id]"
+                    :vault-id="v.id"
+                    :drop-key="dropKey"
+                    :dragging="fileDrag.active"
                     :color="v.color"
                     :active-path="activePath"
+                    :highlight="ctxSelPath"
                     :closed="treeClosed"
                     :base="17"
                     @open-file="(n) => openFileNode(n, v.id)"
@@ -4806,7 +5564,7 @@ ${bodyHtml}
                 </template>
               </span>
             </div>
-            <div class="sec-list" v-show="!isSecClosed('workdir')">
+            <div class="sec-list" :class="{ 'drop-into': fileDrag.active && dropKey === 'wroot' }" data-drop-kind="wd-root" v-show="!isSecClosed('workdir')">
               <div v-if="!workdirRoot" class="empty-hint" @click="chooseWorkdir()">
                 点击选择要挂载的系统目录
               </div>
@@ -4815,7 +5573,7 @@ ${bodyHtml}
               </div>
               <template v-else v-for="node in workdir" :key="node.path">
                 <template v-if="node.is_dir && !node.is_vault">
-                  <div class="t-item" v-tip="node.path" @click="toggleWorkdirFolder(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
+                  <div class="t-item" :class="{ 'ctx-on': ctxSelPath === node.path, 'drop-into': fileDrag.active && dropKey === 'wddir:' + node.path }" data-drag-kind="wd-dir" :data-drag-path="node.path" data-drop-kind="wd-dir" :data-drop-path="node.path" v-tip="node.path" @click="toggleWorkdirFolder(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
                     <svg class="lead chev-i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="2" stroke-linecap="round" :style="!node.open ? 'transform:rotate(-90deg)' : ''"><path d="M6 9l6 6 6-6" /></svg>
                     <svg class="lead" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="#faad14" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /></svg>
                     <span class="fname">{{ node.name }}</span>
@@ -4823,9 +5581,9 @@ ${bodyHtml}
                       <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, node)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
                     </span>
                   </div>
-                  <div class="t-sub" v-show="node.open">
+                  <div class="t-sub" v-show="node.open" data-drop-kind="wd-dir" :data-drop-path="node.path">
                     <template v-for="c in node.children" :key="c.path">
-                      <div v-if="c.is_vault" class="t-item" :class="{ on: activePath === c.path }" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenVault(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
+                      <div v-if="c.is_vault" class="t-item" :class="{ on: activePath === c.path, 'ctx-on': ctxSelPath === c.path && activePath !== c.path }" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenVault(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
                         <span style="width:13px;flex:0 0 13px;"></span>
                         <EncIcon v-if="c.is_dir" class="lead" type="vault" color="#1677ff" :size="14" />
                         <EncIcon v-else-if="c.name.endsWith('.mdlb')" class="lead" type="vault" color="#1677ff" :size="14" />
@@ -4835,7 +5593,7 @@ ${bodyHtml}
                           <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, c)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
                         </span>
                       </div>
-                      <div v-else-if="c.is_dir" class="t-item" v-tip="c.path" @click="toggleWorkdirFolder(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
+                      <div v-else-if="c.is_dir" class="t-item" :class="{ 'ctx-on': ctxSelPath === c.path, 'drop-into': fileDrag.active && dropKey === 'wddir:' + c.path }" data-drag-kind="wd-dir" :data-drag-path="c.path" data-drop-kind="wd-dir" :data-drop-path="c.path" v-tip="c.path" @click="toggleWorkdirFolder(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
                         <span style="width:13px;flex:0 0 13px;"></span>
                         <svg class="lead" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="#faad14" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /></svg>
                         <span class="fname">{{ c.name }}</span>
@@ -4843,7 +5601,7 @@ ${bodyHtml}
                           <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, c)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
                         </span>
                       </div>
-                      <div v-else class="t-item" :class="{ on: activePath === c.path }" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenPlain(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
+                      <div v-else class="t-item" :class="{ on: activePath === c.path, 'ctx-on': ctxSelPath === c.path && activePath !== c.path }" data-drag-kind="wd-file" :data-drag-path="c.path" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenPlain(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
                         <span style="width:13px;flex:0 0 13px;"></span>
                         <EncIcon class="lead" type="plain" color="#8a919e" :size="14" />
                         <span class="fname">{{ c.name }}</span>
@@ -4854,7 +5612,7 @@ ${bodyHtml}
                     </template>
                   </div>
                 </template>
-                <div v-else-if="node.is_vault" class="t-item" :class="{ on: activePath === node.path }" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenVault(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
+                <div v-else-if="node.is_vault" class="t-item" :class="{ on: activePath === node.path, 'ctx-on': ctxSelPath === node.path && activePath !== node.path }" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenVault(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
                   <span style="width:14px;flex:0 0 14px;"></span>
                   <EncIcon v-if="node.is_dir" class="lead" type="vault" color="#1677ff" :size="14" />
                   <EncIcon v-else-if="node.name.endsWith('.mdlb')" class="lead" type="vault" color="#1677ff" :size="14" />
@@ -4864,7 +5622,7 @@ ${bodyHtml}
                     <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, node)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
                   </span>
                 </div>
-                <div v-else class="t-item" :class="{ on: activePath === node.path }" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenPlain(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
+                <div v-else class="t-item" :class="{ on: activePath === node.path, 'ctx-on': ctxSelPath === node.path && activePath !== node.path }" data-drag-kind="wd-file" :data-drag-path="node.path" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenPlain(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
                   <span style="width:14px;flex:0 0 14px;"></span>
                   <EncIcon class="lead" type="plain" color="#8a919e" :size="14" />
                   <span class="fname">{{ node.name }}</span>
@@ -5184,6 +5942,19 @@ ${bodyHtml}
         <div class="modal-foot">
           <button class="btn" @click="onConvertPrompt('keep')">保留原文件</button>
           <button class="btn btn-danger" @click="onConvertPrompt('delete')">删除原文件</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 拖拽落点重名冲突：取消 / 保留两者 / 覆盖 -->
+    <a-modal v-model:open="showDragConflict" title="目标已存在同名项" :width="440" :footer="null" :closable="false" :mask-closable="false">
+      <div class="saveas">
+        <div class="convert-msg">目标位置已存在名为「{{ dragConflict && dragConflict.name }}」的项。选择「覆盖」将先删除同名项再写入（目录则整棵替换），不可恢复。</div>
+        <div class="convert-path" v-tip="dragConflict ? dragConflict.target : ''">{{ dragConflict ? dragConflict.target : '' }}</div>
+        <div class="modal-foot">
+          <button class="btn" @click="onDragConflict('cancel')">取消</button>
+          <button class="btn" @click="onDragConflict('rename')">保留两者</button>
+          <button class="btn btn-danger" @click="onDragConflict('overwrite')">覆盖</button>
         </div>
       </div>
     </a-modal>
@@ -5609,6 +6380,14 @@ ${bodyHtml}
   backdrop-filter: blur(1px);
   pointer-events: none;
 }
+/* 侧边栏拖拽跟随光标的浮层：高 z-index + pointer-events:none，不拦截 elementFromPoint 命中 */
+.file-drag-tip {
+  position: fixed; z-index: 9999; pointer-events: none;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 3px 9px; border-radius: 6px;
+  background: var(--primary); color: #fff; font-size: 12px; line-height: 1.4;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
 .drop-card {
   display: flex; flex-direction: column; align-items: center; gap: 14px;
   padding: 28px 44px;
@@ -5882,6 +6661,11 @@ ${bodyHtml}
 }
 .t-item:hover { background: var(--hover); }
 .t-item.on { background: var(--primary-bg); color: var(--primary-active); font-weight: 500; }
+/* 右键菜单临时选中（非当前激活页签）：中性灰底，不抢激活页签的蓝色 */
+.t-item.ctx-on { background: var(--hover); }
+/* 文件拖拽命中放置目标：整行主色底 + 内描边（vault-row 复用 .t-item） */
+.t-item.drop-into { background: var(--primary-bg); box-shadow: inset 0 0 0 1.5px var(--primary); }
+.sec-list.drop-into { background: var(--primary-bg); box-shadow: inset 0 0 0 1.5px var(--primary); border-radius: 6px; }
 .t-item.dragging { opacity: 0.4; }
 .t-item.dragover { box-shadow: inset 0 2px 0 var(--primary); background: var(--primary-bg); }
 .t-item .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
