@@ -11,6 +11,7 @@ import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import VaultTreeNode from '../components/VaultTreeNode.vue'
+import WorkdirNode from '../components/WorkdirNode.vue'
 import EncIcon from '../components/EncIcon.vue'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
 import { marked } from 'marked'
@@ -126,7 +127,7 @@ const REVEAL_LABEL = (() => {
 
 export default defineComponent({
   name: 'EditorView',
-  components: { VaultTreeNode, CodeMirrorEditor, EncIcon },
+  components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, EncIcon },
   data() {
     return {
       currentMode: 'split' as 'edit' | 'split' | 'preview',
@@ -138,9 +139,15 @@ export default defineComponent({
       // 侧边栏文件/文件夹拖拽（移动/复制）：源、命中的放置目标 key、跟随光标的浮层与 ⌥ 复制/移动态
       fileDrag: { active: false, x: 0, y: 0, alt: false, verb: '', src: null as null | { kind: string; path: string; vault: string; name: string } },
       dropKey: '',
+      // 外部（系统文件管理器）拖入落在侧边栏目标时的高亮态与暂存目标
+      extDragActive: false,
+      extDropTarget: null as null | { kind: string; path: string; vault: string; label: string },
       // 拖拽落点重名冲突弹窗上下文（存待执行参数，选择后 resolve 继续）
       showDragConflict: false,
       dragConflict: null as null | { name: string; target: string; resolve: ((d: 'overwrite' | 'rename' | 'cancel') => void) | null },
+      // 外部拖入单个目录到工作目录：询问「复制进来」还是「打开为工作目录」
+      showWdDirDropPrompt: false,
+      wdDirDrop: null as null | { path: string; targetDir: string; label: string },
       secClosed: {} as Record<string, boolean>,
       treeClosed: {} as Record<string, boolean>,
       wordWrap: true,
@@ -740,20 +747,44 @@ export default defineComponent({
     setInterval(() => this.reapExpired(), 30 * 1000)
     // 文件/目录拖放：用 Tauri 内置拖放事件（payload 为 {type,paths,position}，
     // enter/over 显示高亮，drop 路由处理，leave 取消高亮）。
-    // 外部拖入只在右侧主面板触发「打开」；侧边栏区域留给列表项拖放排序。
+    // 外部拖入：落在右侧主面板走「打开」；落在侧边栏的库/目录行则导入到该位置。
     getCurrentWebviewWindow()
       .onDragDropEvent((evt) => {
         const payload = evt.payload as { type: string; paths?: string[]; position?: { x: number; y: number } }
         const pos = payload.position
-        // 侧边栏可见且鼠标落在侧边栏内：外部拖入不响应（交给列表排序）
-        const inSidebar = this.store.settings.showSidebar && pos && pos.x < this.sidebarWidth
+        // Tauri onDragDropEvent 的 position 已是 CSS/逻辑像素（与 elementFromPoint / sidebarWidth 同系），直接用
+        const cx = pos ? pos.x : -1
+        const cy = pos ? pos.y : -1
+        const inSidebar = !!(this.store.settings.showSidebar && pos && cx < this.sidebarWidth)
         if (payload.type === 'enter' || payload.type === 'over') {
-          this.dragOver = !inSidebar
+          if (inSidebar) {
+            // 命中侧边栏可放置目标（closest 解析到库/目录行或容器）→ 复用 drop-into 高亮
+            const el = document.elementFromPoint(cx, cy)
+            const dropEl = el && el.closest ? (el.closest('[data-drop-kind]') as HTMLElement | null) : null
+            const t = dropEl ? this.readDropTarget(dropEl) : null
+            this.extDropTarget = t
+            this.extDragActive = !!t
+            this.dropKey = t ? this.dropKeyOf(t) : ''
+            this.dragOver = false
+          } else {
+            this.extDragActive = false
+            this.extDropTarget = null
+            this.dropKey = ''
+            this.dragOver = true
+          }
         } else if (payload.type === 'drop') {
           this.dragOver = false
-          if (!inSidebar && payload.paths && payload.paths.length) this.routeDroppedPaths(payload.paths)
+          const target = this.extDropTarget
+          this.extDragActive = false
+          this.extDropTarget = null
+          this.dropKey = ''
+          if (target && payload.paths && payload.paths.length) this.handleExternalDrop(payload.paths, target)
+          else if (!inSidebar && payload.paths && payload.paths.length) this.routeDroppedPaths(payload.paths)
         } else {
           this.dragOver = false
+          this.extDragActive = false
+          this.extDropTarget = null
+          this.dropKey = ''
         }
       })
       .then((un) => {
@@ -1134,6 +1165,7 @@ export default defineComponent({
           if (this.workdirRoot) this.closeWorkdir(); else this.chooseWorkdir()
           break
         case 'menu:lock-all': this.lockAll(); break
+        // 帮助菜单（GitHub/Gitee 主页、检查更新、反馈）由 App.vue 全局处理，此处不再分派，避免重复打开。
       }
     },
     /** 把当前视图勾选态 + 库/工作目录状态推送到 macOS 原生菜单（后端据此回写勾选与开关项标题；非 macOS 为空操作）。 */
@@ -1660,6 +1692,10 @@ export default defineComponent({
           message.error(String(e))
         }
       }
+    },
+    /** WorkdirNode 上抛的右键 / 更多操作事件：转接到现有 openWorkdirNodeMenu。 */
+    onWorkdirNodeCtx(payload: { node: FsNode; e: MouseEvent }) {
+      this.openWorkdirNodeMenu(payload.e, payload.node)
     },
     /** 折叠工作目录树里所有已展开的文件夹（含库目录下的文件夹）；只收起显示，已加载的子项与懒加载标记都保留。 */
     collapseWorkdirFolders() {
@@ -4734,6 +4770,74 @@ export default defineComponent({
       }
     },
 
+    // ---------- 外部拖入侧边栏目标（系统文件 → 库 / 工作目录） ----------
+    /** 把外部拖入的路径导入到侧边栏命中的目标：库→仅 .md 入库（复制），目录→复制文件/文件夹。 */
+    async handleExternalDrop(paths: string[], target: { kind: string; path: string; vault: string; label: string }) {
+      const isVault = target.kind === 'vlt-root' || target.kind === 'vlt-dir'
+      if (isVault) {
+        const v = this.store.recent.find((x) => x.id === target.vault)
+        if (!v) return
+        if (!v.unlocked) return message.warning('请先解锁目标加密库，再拖入文件')
+        for (const p of paths) {
+          try {
+            const info = await tauri.inspectPath(p)
+            // 复用「工作目录 → 库」逻辑：isMove=false 保留外部源（仅 .md/.markdown 可入）
+            await this.copyWdToVault({ kind: info.is_dir ? 'wd-dir' : 'wd-file', path: p, name: this.fileName(p) }, target, false)
+          } catch (e) {
+            message.error(String(e))
+          }
+        }
+        return
+      }
+      // 工作目录根 / 子目录：文件直接复制；单个目录则询问「复制进来」还是「打开为工作目录」
+      const targetDir = target.kind === 'wd-root' ? this.workdirRoot : target.path
+      if (!targetDir) return message.warning('请先设置工作目录')
+      if (paths.length === 1) {
+        try {
+          const info = await tauri.inspectPath(paths[0])
+          if (info.is_dir) {
+            this.wdDirDrop = { path: paths[0], targetDir, label: target.label || '工作目录' }
+            this.showWdDirDropPrompt = true
+            return
+          }
+        } catch (e) {
+          return message.error(String(e))
+        }
+      }
+      let n = 0
+      for (const p of paths) {
+        try {
+          await tauri.copyAsset(targetDir, p)
+          n++
+        } catch (e) {
+          message.error(String(e))
+        }
+      }
+      if (n) {
+        message.success(`已复制 ${n} 项到 ${target.label || '工作目录'}`)
+        await this.reloadWorkdirDir(targetDir)
+      }
+    },
+    /** 外部拖入单个目录到工作目录的选择：copy=复制进目标目录；open=将该目录挂载为工作目录根。 */
+    async onWdDirDrop(choice: 'copy' | 'open') {
+      const ctx = this.wdDirDrop
+      this.showWdDirDropPrompt = false
+      this.wdDirDrop = null
+      if (!ctx) return
+      if (choice === 'open') {
+        await this.setWorkdir(ctx.path)
+        message.success(`已打开为工作目录：${this.fileName(ctx.path)}`)
+        return
+      }
+      try {
+        await tauri.copyAsset(ctx.targetDir, ctx.path)
+        message.success(`已复制「${this.fileName(ctx.path)}」到 ${ctx.label}`)
+        await this.reloadWorkdirDir(ctx.targetDir)
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+
     // ---------- 图片/文件资源：粘贴与拖入（落进同级 `.dat` 目录） ----------
     /** 是否可接收资源：已落盘、未锁定的页签（草稿尚无落点，锁定页无明文可写）。 */
     isAssetTarget(f: OpenFile | undefined): f is OpenFile {
@@ -5331,6 +5435,7 @@ ${bodyHtml}
             </div>
             <div class="m-sep"></div>
             <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>偏好设置…</div>
+            <div class="m-item" @click="$router.push({ path: '/settings', query: { tab: 'about' } }); moreOpen = false"><span class="ck"></span>关于</div>
           </div>
         </span>
       </div>
@@ -5410,7 +5515,7 @@ ${bodyHtml}
                 <div
                   class="t-item vault-row"
                   :dragable="'vault:' + v.id"
-                  :class="{ dragging: dragKey === 'vault:' + v.id, dragover: dragOverKey === 'vault:' + v.id, 'drop-into': fileDrag.active && dropKey === 'vroot:' + v.id }"
+                  :class="{ dragging: dragKey === 'vault:' + v.id, dragover: dragOverKey === 'vault:' + v.id, 'drop-into': (fileDrag.active || extDragActive) && dropKey === 'vroot:' + v.id }"
                   data-drop-kind="vlt-root"
                   :data-drop-vault="v.id"
                   v-tip="v.path"
@@ -5434,7 +5539,7 @@ ${bodyHtml}
                     :nodes="vaultTrees[v.id]"
                     :vault-id="v.id"
                     :drop-key="dropKey"
-                    :dragging="fileDrag.active"
+                    :dragging="fileDrag.active || extDragActive"
                     :color="v.color"
                     :active-path="activePath"
                     :highlight="ctxSelPath"
@@ -5564,73 +5669,25 @@ ${bodyHtml}
                 </template>
               </span>
             </div>
-            <div class="sec-list" :class="{ 'drop-into': fileDrag.active && dropKey === 'wroot' }" data-drop-kind="wd-root" v-show="!isSecClosed('workdir')">
+            <div class="sec-list" :class="{ 'drop-into': (fileDrag.active || extDragActive) && dropKey === 'wroot' }" data-drop-kind="wd-root" v-show="!isSecClosed('workdir')">
               <div v-if="!workdirRoot" class="empty-hint" @click="chooseWorkdir()">
                 点击选择要挂载的系统目录
               </div>
               <div v-else-if="!workdir.length" class="empty-hint" @click="wdNewFileAt(workdirRoot)">
                 目录为空，点击新建文件<br>（或在「更多」菜单里新建）
               </div>
-              <template v-else v-for="node in workdir" :key="node.path">
-                <template v-if="node.is_dir && !node.is_vault">
-                  <div class="t-item" :class="{ 'ctx-on': ctxSelPath === node.path, 'drop-into': fileDrag.active && dropKey === 'wddir:' + node.path }" data-drag-kind="wd-dir" :data-drag-path="node.path" data-drop-kind="wd-dir" :data-drop-path="node.path" v-tip="node.path" @click="toggleWorkdirFolder(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
-                    <svg class="lead chev-i" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="2" stroke-linecap="round" :style="!node.open ? 'transform:rotate(-90deg)' : ''"><path d="M6 9l6 6 6-6" /></svg>
-                    <svg class="lead" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="#faad14" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /></svg>
-                    <span class="fname">{{ node.name }}</span>
-                    <span class="acts">
-                      <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, node)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                    </span>
-                  </div>
-                  <div class="t-sub" v-show="node.open" data-drop-kind="wd-dir" :data-drop-path="node.path">
-                    <template v-for="c in node.children" :key="c.path">
-                      <div v-if="c.is_vault" class="t-item" :class="{ on: activePath === c.path, 'ctx-on': ctxSelPath === c.path && activePath !== c.path }" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenVault(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
-                        <span style="width:13px;flex:0 0 13px;"></span>
-                        <EncIcon v-if="c.is_dir" class="lead" type="vault" color="#1677ff" :size="14" />
-                        <EncIcon v-else-if="c.name.endsWith('.mdlb')" class="lead" type="vault" color="#1677ff" :size="14" />
-                        <EncIcon v-else class="lead" type="file" color="#1677ff" :size="14" />
-                        <span class="fname">{{ c.name }}</span>
-                        <span class="acts">
-                          <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, c)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                        </span>
-                      </div>
-                      <div v-else-if="c.is_dir" class="t-item" :class="{ 'ctx-on': ctxSelPath === c.path, 'drop-into': fileDrag.active && dropKey === 'wddir:' + c.path }" data-drag-kind="wd-dir" :data-drag-path="c.path" data-drop-kind="wd-dir" :data-drop-path="c.path" v-tip="c.path" @click="toggleWorkdirFolder(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
-                        <span style="width:13px;flex:0 0 13px;"></span>
-                        <svg class="lead" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="#faad14" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /></svg>
-                        <span class="fname">{{ c.name }}</span>
-                        <span class="acts">
-                          <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, c)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                        </span>
-                      </div>
-                      <div v-else class="t-item" :class="{ on: activePath === c.path, 'ctx-on': ctxSelPath === c.path && activePath !== c.path }" data-drag-kind="wd-file" :data-drag-path="c.path" :data-wpath="c.path" v-tip="c.path" @click="workdirOpenPlain(c)" @contextmenu.stop="openWorkdirNodeMenu($event, c)">
-                        <span style="width:13px;flex:0 0 13px;"></span>
-                        <EncIcon class="lead" type="plain" color="#8a919e" :size="14" />
-                        <span class="fname">{{ c.name }}</span>
-                        <span class="acts">
-                          <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, c)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                        </span>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-                <div v-else-if="node.is_vault" class="t-item" :class="{ on: activePath === node.path, 'ctx-on': ctxSelPath === node.path && activePath !== node.path }" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenVault(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
-                  <span style="width:14px;flex:0 0 14px;"></span>
-                  <EncIcon v-if="node.is_dir" class="lead" type="vault" color="#1677ff" :size="14" />
-                  <EncIcon v-else-if="node.name.endsWith('.mdlb')" class="lead" type="vault" color="#1677ff" :size="14" />
-                  <EncIcon v-else class="lead" type="file" color="#1677ff" :size="14" />
-                  <span class="fname">{{ node.name }}</span>
-                  <span class="acts">
-                    <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, node)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                  </span>
-                </div>
-                <div v-else class="t-item" :class="{ on: activePath === node.path, 'ctx-on': ctxSelPath === node.path && activePath !== node.path }" data-drag-kind="wd-file" :data-drag-path="node.path" :data-wpath="node.path" v-tip="node.path" @click="workdirOpenPlain(node)" @contextmenu.stop="openWorkdirNodeMenu($event, node)">
-                  <span style="width:14px;flex:0 0 14px;"></span>
-                  <EncIcon class="lead" type="plain" color="#8a919e" :size="14" />
-                  <span class="fname">{{ node.name }}</span>
-                  <span class="acts">
-                    <span class="icon-btn" title="更多操作" @click.stop="openWorkdirNodeMenu($event, node)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                  </span>
-                </div>
-              </template>
+              <WorkdirNode
+                v-else
+                :nodes="workdir"
+                :active-path="activePath"
+                :highlight="ctxSelPath"
+                :drop-key="dropKey"
+                :dragging="fileDrag.active || extDragActive"
+                @toggle="toggleWorkdirFolder"
+                @open-file="workdirOpenPlain"
+                @open-vault="workdirOpenVault"
+                @ctx-node="onWorkdirNodeCtx"
+              />
             </div>
           </div>
           </template>
@@ -5955,6 +6012,19 @@ ${bodyHtml}
           <button class="btn" @click="onDragConflict('cancel')">取消</button>
           <button class="btn" @click="onDragConflict('rename')">保留两者</button>
           <button class="btn btn-danger" @click="onDragConflict('overwrite')">覆盖</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 外部拖入单个目录到工作目录：复制进来 / 打开为工作目录 -->
+    <a-modal v-model:open="showWdDirDropPrompt" title="拖入文件夹到工作目录" :width="440" :footer="null" :closable="false" :mask-closable="false">
+      <div class="saveas">
+        <div class="convert-msg">检测到拖入的是一个文件夹。要将其复制到当前工作目录下，还是直接打开该文件夹作为工作目录？</div>
+        <div class="convert-path" v-tip="wdDirDrop ? wdDirDrop.path : ''">{{ wdDirDrop ? wdDirDrop.path : '' }}</div>
+        <div class="modal-foot">
+          <button class="btn" @click="showWdDirDropPrompt = false">取消</button>
+          <button class="btn" @click="onWdDirDrop('copy')">复制到工作目录</button>
+          <button class="btn btn-primary" @click="onWdDirDrop('open')">打开为工作目录</button>
         </div>
       </div>
     </a-modal>

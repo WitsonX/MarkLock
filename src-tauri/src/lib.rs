@@ -1369,6 +1369,19 @@ pub fn run() {
                     .fullscreen_with_text("全屏")
                     .build()?;
 
+                // 帮助：项目主页（GitHub / Gitee）+ 检查更新（跳发布页）+ 反馈（跳 Issue 页）。
+                // Gitee 为国内镜像；具体链接见前端 src/lib/links.ts，点击后由 App.vue 走 open_url 用系统浏览器打开（全局生效，不依赖当前路由）。
+                let help_submenu = SubmenuBuilder::new(handle, "帮助")
+                    .text("menu:help-github", "GitHub 主页")
+                    .text("menu:help-gitee", "Gitee 主页（国内镜像）")
+                    .separator()
+                    .text("menu:check-update", "检查更新（GitHub）")
+                    .text("menu:check-update-gitee", "检查更新（Gitee 国内镜像）")
+                    .separator()
+                    .text("menu:feedback", "反馈与建议（GitHub）")
+                    .text("menu:feedback-gitee", "反馈与建议（Gitee 国内镜像）")
+                    .build()?;
+
                 let menu = MenuBuilder::new(handle)
                     .items(&[
                         &app_submenu,
@@ -1377,6 +1390,7 @@ pub fn run() {
                         &format_submenu,
                         &view_submenu,
                         &window_submenu,
+                        &help_submenu,
                     ])
                     .build()?;
                 app.set_menu(menu)?;

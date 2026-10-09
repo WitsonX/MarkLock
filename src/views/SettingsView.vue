@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import TitleBar from '../components/TitleBar.vue'
 import { useVaultStore } from '../stores/vault'
 import * as tauri from '../lib/tauri'
+import { LINKS } from '../lib/links'
 import hljs from 'highlight.js'
 // 关于页品牌 logo：与 Dock 图标同一光栅化流程生成的白底版（主图标源文件保持 #EAF2FE 不动）
 import aboutIcon from '../assets/about-icon.png'
@@ -91,6 +92,10 @@ export default defineComponent({
     unlockedVaultCount() {
       return this.store.recent.filter((v) => v.unlocked).length
     },
+    /** 关于页展示与跳转的项目链接 */
+    links() {
+      return LINKS
+    },
     /** 预览代码高亮 HTML（用制表符缩进，tab-size 才能生效） */
     previewCodeHtml() {
       const code = `function greet(name) {
@@ -130,6 +135,10 @@ greet('MarkLock');`
     },
   },
   methods: {
+    /** 关于页外部链接：用系统浏览器打开（链接集中定义于 src/lib/links.ts）。 */
+    openLink(url: string) {
+      tauri.openUrl(url).catch((err) => message.error(String(err)))
+    },
     /** 从 DOM 收集全部设置行，构建搜索索引（标题/描述/关键词/分组/分类） */
     buildSearchIndex() {
       const rows = Array.from(document.querySelectorAll('.s-pane .row[data-key]'))
@@ -611,10 +620,28 @@ greet('MarkLock');`
               </div>
             </div>
             <div class="about-actions">
-              <button class="about-btn" disabled>检查更新</button>
-              <button class="about-btn" disabled>开源许可</button>
-              <button class="about-btn" disabled>加密格式说明</button>
+              <div class="about-link-group">
+                <span class="about-link-label">检查更新</span>
+                <button class="about-link" @click="openLink(links.release)">GitHub</button>
+                <span class="about-dot">·</span>
+                <button class="about-link" @click="openLink(links.giteeRelease)">Gitee 镜像</button>
+              </div>
+              <span class="about-sep"></span>
+              <div class="about-link-group">
+                <span class="about-link-label">项目主页</span>
+                <button class="about-link" @click="openLink(links.github)">GitHub</button>
+                <span class="about-dot">·</span>
+                <button class="about-link" @click="openLink(links.gitee)">Gitee 镜像</button>
+              </div>
+              <span class="about-sep"></span>
+              <div class="about-link-group">
+                <span class="about-link-label">反馈建议</span>
+                <button class="about-link" @click="openLink(links.feedback)">GitHub</button>
+                <span class="about-dot">·</span>
+                <button class="about-link" @click="openLink(links.giteeFeedback)">Gitee 镜像</button>
+              </div>
             </div>
+            <div class="about-links-note">Gitee 为国内镜像站，国内网络访问更快</div>
           </div>
         </div>
       </div>
@@ -781,14 +808,19 @@ greet('MarkLock');`
 .about-feat svg { color: var(--primary); }
 .about-feat .ft { font-size: 12.5px; font-weight: 600; color: var(--text); }
 .about-feat .fd { font-size: 11px; color: var(--text-3); }
-.about-actions { display: flex; gap: 8px; justify-content: center; }
-.about-btn {
-  font-size: 12px; padding: 6px 16px; border-radius: var(--radius);
-  border: 1px solid var(--border); background: transparent; color: var(--text-2);
-  cursor: pointer; transition: border-color 0.15s, color 0.15s;
+.about-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 14px; }
+.about-link-group { display: inline-flex; align-items: center; gap: 5px; }
+.about-link-label { font-size: 12px; color: var(--text-3); }
+.about-link {
+  font-size: 12px; padding: 0; border: none; background: transparent;
+  color: var(--primary); cursor: pointer; text-decoration: none;
+  transition: color 0.15s;
 }
-.about-btn:not(:disabled):hover { border-color: var(--primary); color: var(--primary); }
-.about-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.about-link:not(:disabled):hover { color: var(--primary-hover); text-decoration: underline; }
+.about-link:disabled { opacity: 0.55; cursor: not-allowed; }
+.about-dot { font-size: 12px; color: var(--text-4); user-select: none; }
+.about-sep { width: 1px; height: 12px; background: var(--border); }
+.about-links-note { margin-top: 12px; text-align: center; font-size: 11.5px; color: var(--text-4); }
 
 /* 搜索命中行高亮 / 未命中行淡化 / 跳转定位闪烁 */
 .row.hit { background: var(--primary-bg); }
