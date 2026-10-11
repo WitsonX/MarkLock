@@ -74,16 +74,43 @@ jobs:
           tagName: v__VERSION__
           releaseName: 'MarkLock v__VERSION__'
           releaseBody: |
-            本地加密 Markdown 查看 / 编辑器。Builds are ad-hoc signed but not notarized — see the README's download section for first-launch steps if Gatekeeper or SmartScreen complains.
+            本地加密 Markdown 查看 / 编辑器。密钥全程只驻留内存，不写磁盘、不上传。
 
-            | 平台 / Platform | 文件 / File |
-            |---|---|
-            | macOS Apple Silicon | `*_aarch64.dmg` |
-            | macOS Intel | `*_x64.dmg` |
+            Local-first encrypted Markdown viewer / editor. Keys stay in memory — never written to disk, never uploaded.
+
+            ## 下载对应平台 / Pick your platform
+
+            | 平台 | 文件 |
+            | --- | --- |
+            | macOS（Apple Silicon，M 系列芯片） | `*_aarch64.dmg` |
+            | macOS（Intel 芯片） | `*_x64.dmg` |
             | Windows x64 | `*_x64-setup.exe` |
-            | Windows x64 (WebView2 bundled) | `*_x64-setup-offline.exe` |
+            | Windows x64（内嵌 WebView2 运行时） | `*_x64-setup-offline.exe` |
 
-            缺 WebView2 运行时的机器请用离线包（约 209MB，安装过程不联网）；默认包在装不了微软 CDN 的机器上会中途报错退出。Machines without the WebView2 runtime need the offline build — the default installer aborts when it cannot download the runtime. Run the "Windows offline installer" workflow to (re)generate it; it is not built by this pipeline.
+            ## 装 Windows 时提示缺 WebView2 / When Windows complains about WebView2
+
+            默认安装包只有约 3.5MB，WebView2 运行时是安装过程中联网下载的。精简版、离线环境或较老的 Windows 10 没有这个运行时，安装会在中途失败。两种解决办法：
+
+            1. **先装运行时**（推荐，只需一次）：微软官方 WebView2 运行时 64 位独立安装包 https://go.microsoft.com/fwlink/?linkid=2124701 ，装完再装 MarkLock；
+            2. **换离线安装包**：`*_x64-setup-offline.exe` 约 210MB，运行时打包在里面，安装全程不联网。
+
+            Windows 11 和打过近期更新的 Windows 10 一般自带运行时，直接用上面那个小包就行。
+
+            The default installer is only ~3.5MB and pulls the WebView2 runtime during setup, so it aborts halfway on stripped, offline, or older Windows 10 machines. Either install Microsoft's standalone x64 runtime once (link above) and then MarkLock, or use the ~210MB `*_x64-setup-offline.exe`, which embeds the runtime and never touches the network. Windows 11 and updated Windows 10 already ship the runtime, so the small build is normally the right one. That offline build is not produced by this pipeline — run the "Windows offline installer" workflow to (re)generate it.
+
+            ## macOS 首次打开 / First launch on macOS
+
+            安装包只做本地 ad-hoc 签名、未走 Apple 公证，第一次打开会提示「Apple 无法验证 MarkLock」——这是未公证的固定流程，不是检测到恶意软件。放行只需一次：
+
+            1. 在那个弹窗点「完成」；
+            2. 打开「系统设置 → 隐私与安全性」，滚到「安全性」一节，点「已阻止 MarkLock」右侧的**仍要打开**；
+            3. 输入密码确认，之后同一安装位置不再询问。
+
+            Builds are ad-hoc signed and never notarized, so Gatekeeper blocks the first launch — that is the standard path for an un-notarized app, not a malware finding. Windows installers are unsigned as well: at the SmartScreen prompt choose "More info → Run anyway"（更多信息 → 仍要运行）.
+
+            ## Gitee 镜像 / Gitee mirror
+
+            国内可直接从 Gitee 发行版下载三个常规包：https://gitee.com/Witson/MarkLock/releases 。约 210MB 的离线包超过 Gitee 单附件 100MB 的上限，只放在 GitHub。
           releaseDraft: true
           prerelease: false
           includeUpdaterArtifacts: false
