@@ -553,13 +553,239 @@ fn sync_native_menu(
             let _ = state.vault_close.set_enabled(has_vaults);
             let _ = state
                 .workdir_toggle
-                .set_text(if has_workdir { "关闭工作目录" } else { "打开工作目录" });
+                .set_text(if has_workdir {
+                    ml("关闭工作目录", "Close Working Directory")
+                } else {
+                    ml("打开工作目录", "Open Working Directory")
+                });
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, checks, has_vaults, has_workdir);
     }
+}
+
+/// 原生菜单语言标志：0=中文，1=英文。前端切换语言时经 set_native_menu_lang 更新并重建 macOS 菜单。
+#[allow(dead_code)]
+static MENU_LANG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// 当前原生菜单是否为英文（仅 macOS 原生菜单使用）。
+#[cfg(target_os = "macos")]
+#[inline]
+fn menu_is_en() -> bool {
+    MENU_LANG.load(std::sync::atomic::Ordering::Relaxed) == 1
+}
+
+/// 按当前原生菜单语言在中/英文案间选择。
+#[cfg(target_os = "macos")]
+fn ml(zh: &str, en: &str) -> String {
+    if menu_is_en() {
+        en.to_string()
+    } else {
+        zh.to_string()
+    }
+}
+
+/// 前端切换界面语言时同步 macOS 原生菜单语言：更新语言标志并重建菜单。
+/// 非 macOS 平台无原生菜单，仅更新标志（无害）。
+#[tauri::command]
+fn set_native_menu_lang(app: tauri::AppHandle, lang: String) {
+    MENU_LANG.store(if lang == "en" { 1 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = install_native_menu(&app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+    }
+}
+
+/// 构建并安装 macOS 原生菜单（文案按 MENU_LANG 取中/英）。
+/// 语言切换时前端调用 set_native_menu_lang 会再次执行本函数重建菜单，并重新登记 MenuDyn 句柄。
+#[cfg(target_os = "macos")]
+fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    // App 菜单「MarkLock」：关于 + 偏好设置(⌘,) + 隐藏/显示全部 + 自定义退出(⌘Q)。
+    // 退出仍用自定义 quit-app 项（不用预定义 quit，避免系统直接 terminate）。
+    // 「关于」不用预定义 about（会弹系统 About 面板），改为自定义项路由到应用内「关于」页。
+    let about = MenuItemBuilder::with_id("menu:about", ml("关于 MarkLock", "About MarkLock")).build(handle)?;
+    let prefs = MenuItemBuilder::with_id("menu:prefs", ml("偏好设置…", "Preferences…"))
+        .accelerator("Cmd+,")
+        .build(handle)?;
+    let quit = MenuItemBuilder::with_id("quit-app", ml("退出 MarkLock", "Quit MarkLock"))
+        .accelerator("Cmd+Q")
+        .build(handle)?;
+    let app_submenu = SubmenuBuilder::new(handle, "MarkLock")
+        .item(&about)
+        .separator()
+        .item(&prefs)
+        .separator()
+        .hide_with_text(ml("隐藏 MarkLock", "Hide MarkLock"))
+        .separator()
+        .item(&quit)
+        .build()?;
+
+    // 文件：整合应用内「主菜单」+ 库/工作目录开关（后两者按状态动态改标题，见 sync_native_menu）。
+    // 带 ⌘ 的项用 MenuItemBuilder 显式声明 accelerator；macOS 上原生菜单在 AppKit 层拦截按键，
+    // 不会与前端全局 keydown / CodeMirror keymap 双触发（前端处理器仍服务 Windows/Linux）。
+    let new_file = MenuItemBuilder::with_id("menu:new-file", ml("新建文件", "New File")).accelerator("Cmd+N").build(handle)?;
+    let open_file = MenuItemBuilder::with_id("menu:open-file", ml("打开文件…", "Open File…")).accelerator("Cmd+O").build(handle)?;
+    let vault_open = MenuItemBuilder::with_id("menu:vault-open", ml("打开库", "Open Vault")).build(handle)?;
+    let vault_close = MenuItemBuilder::with_id("menu:vault-close", ml("关闭所有库", "Close All Vaults")).enabled(false).build(handle)?;
+    let workdir_toggle = MenuItemBuilder::with_id("menu:workdir-toggle", ml("打开工作目录", "Open Working Directory")).build(handle)?;
+    let save = MenuItemBuilder::with_id("menu:save", ml("保存", "Save")).accelerator("Cmd+S").build(handle)?;
+    let close_tab = MenuItemBuilder::with_id("menu:close-tab", ml("关闭页签", "Close Tab")).accelerator("Cmd+W").build(handle)?;
+    let file_submenu = SubmenuBuilder::new(handle, ml("文件", "File"))
+        .item(&new_file)
+        .text("menu:new-vault", ml("新建加密库", "New Encrypted Vault"))
+        .separator()
+        .item(&open_file)
+        .item(&vault_open)
+        .item(&vault_close)
+        .item(&workdir_toggle)
+        .separator()
+        .item(&save)
+        .item(&close_tab)
+        .separator()
+        .text("menu:batch-encrypt", ml("批量加密文件…", "Batch Encrypt Files…"))
+        .text("menu:import-dir", ml("导入目录到库…", "Import Directory to Vault…"))
+        .text("menu:export-html", ml("导出 HTML…", "Export HTML…"))
+        .build()?;
+
+    // 编辑：保留系统剪贴板预定义项（⌘C/⌘V 等），否则覆盖默认菜单后这些快捷键失效。
+    // 用 *_with_text 显式给出中文标题，避免预定义项按系统语言显示英文。
+    let find = MenuItemBuilder::with_id("menu:find", ml("编辑器内搜索", "Find in Editor")).accelerator("Cmd+F").build(handle)?;
+    let find_global = MenuItemBuilder::with_id("menu:find-global", ml("全局搜索", "Search Everywhere")).accelerator("Cmd+Shift+F").build(handle)?;
+    let edit_submenu = SubmenuBuilder::new(handle, ml("编辑", "Edit"))
+        .undo_with_text(ml("撤销", "Undo"))
+        .redo_with_text(ml("重做", "Redo"))
+        .separator()
+        .cut_with_text(ml("剪切", "Cut"))
+        .copy_with_text(ml("复制", "Copy"))
+        .paste_with_text(ml("粘贴", "Paste"))
+        .select_all_with_text(ml("全选", "Select All"))
+        .separator()
+        .item(&find)
+        .item(&find_global)
+        .build()?;
+
+    let bold = MenuItemBuilder::with_id("menu:bold", ml("加粗", "Bold")).accelerator("Cmd+B").build(handle)?;
+    let italic = MenuItemBuilder::with_id("menu:italic", ml("斜体", "Italic")).accelerator("Cmd+I").build(handle)?;
+    let link = MenuItemBuilder::with_id("menu:link", ml("链接", "Link")).accelerator("Cmd+K").build(handle)?;
+    let format_submenu = SubmenuBuilder::new(handle, ml("格式", "Format"))
+        .text("menu:h1", ml("标题 1", "Heading 1"))
+        .text("menu:h2", ml("标题 2", "Heading 2"))
+        .text("menu:h3", ml("标题 3", "Heading 3"))
+        .separator()
+        .item(&bold)
+        .item(&italic)
+        .text("menu:strike", ml("删除线", "Strikethrough"))
+        .text("menu:code", ml("行内代码", "Inline Code"))
+        .text("menu:codeblock", ml("代码块", "Code Block"))
+        .separator()
+        .text("menu:quote", ml("引用", "Quote"))
+        .text("menu:ul", ml("无序列表", "Bulleted List"))
+        .text("menu:task", ml("任务列表", "Task List"))
+        .text("menu:table", ml("表格", "Table"))
+        .separator()
+        .item(&link)
+        .text("menu:image", ml("图片", "Image"))
+        .text("menu:hr", ml("分割线", "Horizontal Line"))
+        .build()?;
+
+    // 视图：模式（单选勾选）+ 显示开关（勾选）用 CheckMenuItem，勾选态由前端 sync_native_menu 回写。
+    let mk_check = |id: &str, text: String| -> tauri::Result<CheckMenuItem<tauri::Wry>> {
+        CheckMenuItem::with_id(handle, id, text, true, false, None::<&str>)
+    };
+    let m_edit = mk_check("menu:mode-edit", ml("编辑模式", "Edit Mode"))?;
+    let m_split = mk_check("menu:mode-split", ml("分屏", "Split"))?;
+    let m_preview = mk_check("menu:mode-preview", ml("预览模式", "Preview Mode"))?;
+    let c_tabs = mk_check("menu:toggle-tabs", ml("顶部页签", "Top Tabs"))?;
+    let c_toolbar = mk_check("menu:toggle-toolbar", ml("格式工具栏", "Formatting Toolbar"))?;
+    let c_statusbar = mk_check("menu:toggle-statusbar", ml("状态栏", "Status Bar"))?;
+    let c_sidebar = CheckMenuItem::with_id(handle, "menu:toggle-sidebar", ml("显示侧边栏", "Show Sidebar"), true, false, Some("Cmd+J"))?;
+    let c_openfiles = mk_check("menu:sec-open-files", ml("打开的文件", "Open Files"))?;
+    let c_vaults = mk_check("menu:sec-vaults", ml("加密库", "Vaults"))?;
+    let c_workdir = mk_check("menu:sec-workdir", ml("工作目录", "Working Directory"))?;
+    let c_favorites = mk_check("menu:sec-favorites", ml("收藏", "Favorites"))?;
+    let c_recent = mk_check("menu:sec-recent", ml("最近打开", "Recent"))?;
+    let c_outline = mk_check("menu:sec-outline", ml("大纲", "Outline"))?;
+    // 侧边栏子菜单：显示开关 + 各分组开关（库/工作目录开关已移到「文件」菜单）。
+    let sidebar_submenu = SubmenuBuilder::new(handle, ml("侧边栏", "Sidebar"))
+        .item(&c_sidebar)
+        .separator()
+        .item(&c_openfiles)
+        .item(&c_vaults)
+        .item(&c_workdir)
+        .item(&c_favorites)
+        .item(&c_recent)
+        .item(&c_outline)
+        .build()?;
+    let lock_all = MenuItemBuilder::with_id("menu:lock-all", ml("全部锁定", "Lock All")).accelerator("Cmd+L").build(handle)?;
+    let view_submenu = SubmenuBuilder::new(handle, ml("视图", "View"))
+        .item(&m_edit)
+        .item(&m_split)
+        .item(&m_preview)
+        .separator()
+        .item(&c_tabs)
+        .item(&c_toolbar)
+        .item(&c_statusbar)
+        .item(&sidebar_submenu)
+        .separator()
+        .item(&lock_all)
+        .build()?;
+
+    let window_submenu = SubmenuBuilder::new(handle, ml("窗口", "Window"))
+        .minimize_with_text(ml("最小化", "Minimize"))
+        .fullscreen_with_text(ml("全屏", "Full Screen"))
+        .build()?;
+
+    // 帮助：项目主页（GitHub / Gitee）+ 检查更新（跳发布页）+ 反馈（跳 Issue 页）。
+    // Gitee 为国内镜像；具体链接见前端 src/lib/links.ts，点击后由 App.vue 走 open_url 用系统浏览器打开（全局生效，不依赖当前路由）。
+    let help_submenu = SubmenuBuilder::new(handle, ml("帮助", "Help"))
+        .text("menu:help-github", ml("GitHub 主页", "GitHub Home"))
+        .text("menu:help-gitee", ml("Gitee 主页（国内镜像）", "Gitee Home (Chinese mirror)"))
+        .separator()
+        .text("menu:check-update", ml("检查更新（GitHub）", "Check for Updates (GitHub)"))
+        .text("menu:check-update-gitee", ml("检查更新（Gitee 国内镜像）", "Check for Updates (Gitee Chinese mirror)"))
+        .separator()
+        .text("menu:feedback", ml("反馈与建议（GitHub）", "Feedback (GitHub)"))
+        .text("menu:feedback-gitee", ml("反馈与建议（Gitee 国内镜像）", "Feedback (Gitee Chinese mirror)"))
+        .build()?;
+
+    let menu = MenuBuilder::new(handle)
+        .items(&[
+            &app_submenu,
+            &file_submenu,
+            &edit_submenu,
+            &format_submenu,
+            &view_submenu,
+            &window_submenu,
+            &help_submenu,
+        ])
+        .build()?;
+    handle.set_menu(menu)?;
+
+    // 登记可勾选项句柄，供前端按当前设置/模式同步勾选态。
+    let mut checks = std::collections::HashMap::new();
+    checks.insert("menu:mode-edit".to_string(), m_edit);
+    checks.insert("menu:mode-split".to_string(), m_split);
+    checks.insert("menu:mode-preview".to_string(), m_preview);
+    checks.insert("menu:toggle-tabs".to_string(), c_tabs);
+    checks.insert("menu:toggle-toolbar".to_string(), c_toolbar);
+    checks.insert("menu:toggle-statusbar".to_string(), c_statusbar);
+    checks.insert("menu:toggle-sidebar".to_string(), c_sidebar);
+    checks.insert("menu:sec-open-files".to_string(), c_openfiles);
+    checks.insert("menu:sec-vaults".to_string(), c_vaults);
+    checks.insert("menu:sec-workdir".to_string(), c_workdir);
+    checks.insert("menu:sec-favorites".to_string(), c_favorites);
+    checks.insert("menu:sec-recent".to_string(), c_recent);
+    checks.insert("menu:sec-outline".to_string(), c_outline);
+    handle.manage(MenuDyn { checks, vault_close, workdir_toggle });
+    Ok(())
 }
 
 /// 读取并解密一个已解锁文件的正文。
@@ -686,6 +912,7 @@ fn delete_path(path: String) -> Result<(), crypto::CryptoError> {
         .output();
     #[cfg(target_os = "windows")]
     let out = {
+        use std::os::windows::process::CommandExt;
         // PowerShell 单引号字符串内以两个单引号转义，避免路径含引号时命令注入/语法错误。
         let escaped = path.replace('\'', "''");
         let verb = if is_dir { "DeleteDirectory" } else { "DeleteFile" };
@@ -699,6 +926,9 @@ fn delete_path(path: String) -> Result<(), crypto::CryptoError> {
                     verb, escaped
                 ),
             ])
+            // CREATE_NO_WINDOW：powershell 是控制台子系统程序，从本 GUI 进程 spawn 时默认会
+            // 新建控制台窗口（.output() 仅重定向流、不抑制窗口），加此标志消除删除时的闪框。
+            .creation_flags(0x0800_0000)
             .output()
     };
     #[cfg(target_os = "linux")]
@@ -782,8 +1012,14 @@ fn open_url(url: String) -> Result<(), crypto::CryptoError> {
 /// 返回码非 0 但进程正常退出，须以 status 而非 spawn 结果判断是否回退。
 #[cfg(target_os = "windows")]
 fn windows_assoc_progId(ext: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
     let read = |args: &[&str]| -> Option<String> {
-        let output = std::process::Command::new("reg").args(args).output().ok()?;
+        // reg.exe 是控制台子系统程序，加 CREATE_NO_WINDOW 避免查询关联时闪出控制台窗口。
+        let output = std::process::Command::new("reg")
+            .args(args)
+            .creation_flags(0x0800_0000)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -850,6 +1086,7 @@ fn windows_icon_for_ext(app: &tauri::AppHandle, ext: &str) -> Option<String> {
 /// 写入仍会成功但双击仍走 UserChoice——由调用方回读校验后决定是否提示手动步骤。
 #[cfg(target_os = "windows")]
 fn windows_register_associations(app: &tauri::AppHandle, exe_path: &str) -> bool {
+    use std::os::windows::process::CommandExt;
     const EXTS: [&str; 4] = ["md", "markdown", "mdl", "mdlb"];
     let open_cmd = format!("\"{exe_path}\" \"%1\"");
     let exe_icon = format!("\"{exe_path}\",0");
@@ -870,8 +1107,10 @@ fn windows_register_associations(app: &tauri::AppHandle, exe_path: &str) -> bool
             vec!["add".into(), format!("{ext_key}\\OpenWithProgids"), "/v".into(), prog_id.clone(), "/t".into(), "REG_NONE".into(), "/f".into()],
         ];
         for args in writes {
+            // reg.exe 是控制台子系统程序，加 CREATE_NO_WINDOW 避免注册关联时闪出控制台窗口。
             let ok = std::process::Command::new("reg")
                 .args(&args)
+                .creation_flags(0x0800_0000)
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
@@ -1197,7 +1436,8 @@ pub fn run() {
             copy_asset,
             write_asset_bytes,
             read_asset_data_url,
-            sync_native_menu
+            sync_native_menu,
+            set_native_menu_lang
         ])
         .setup(|app| {
             // Windows 冷启动：把命令行里的文件路径暂存，前端 mounted 后拉取打开。
@@ -1231,187 +1471,7 @@ pub fn run() {
             // 改为通知前端弹「未保存确认」，确认后由 quit_app 退出。
             // 同时保留标准「编辑/窗口」子菜单，否则 ⌘C/⌘V 等剪贴板快捷键会失效。
             #[cfg(target_os = "macos")]
-            {
-                use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
-
-                // App 菜单「MarkLock」：关于 + 偏好设置(⌘,) + 隐藏/显示全部 + 自定义退出(⌘Q)。
-                // 退出仍用自定义 quit-app 项（不用预定义 quit，避免系统直接 terminate）。
-                // 「关于」不用预定义 about（会弹系统 About 面板），改为自定义项路由到应用内「关于」页。
-                let about = MenuItemBuilder::with_id("menu:about", "关于 MarkLock").build(handle)?;
-                let prefs = MenuItemBuilder::with_id("menu:prefs", "偏好设置…")
-                    .accelerator("Cmd+,")
-                    .build(handle)?;
-                let quit = MenuItemBuilder::with_id("quit-app", "退出 MarkLock")
-                    .accelerator("Cmd+Q")
-                    .build(handle)?;
-                let app_submenu = SubmenuBuilder::new(handle, "MarkLock")
-                    .item(&about)
-                    .separator()
-                    .item(&prefs)
-                    .separator()
-                    .hide_with_text("隐藏 MarkLock")
-                    .separator()
-                    .item(&quit)
-                    .build()?;
-
-                // 文件：整合应用内「主菜单」+ 库/工作目录开关（后两者按状态动态改标题，见 sync_native_menu）。
-                // 带 ⌘ 的项用 MenuItemBuilder 显式声明 accelerator；macOS 上原生菜单在 AppKit 层拦截按键，
-                // 不会与前端全局 keydown / CodeMirror keymap 双触发（前端处理器仍服务 Windows/Linux）。
-                let new_file = MenuItemBuilder::with_id("menu:new-file", "新建文件").accelerator("Cmd+N").build(handle)?;
-                let open_file = MenuItemBuilder::with_id("menu:open-file", "打开文件…").accelerator("Cmd+O").build(handle)?;
-                let vault_open = MenuItemBuilder::with_id("menu:vault-open", "打开库").build(handle)?;
-                let vault_close = MenuItemBuilder::with_id("menu:vault-close", "关闭所有库").enabled(false).build(handle)?;
-                let workdir_toggle = MenuItemBuilder::with_id("menu:workdir-toggle", "打开工作目录").build(handle)?;
-                let save = MenuItemBuilder::with_id("menu:save", "保存").accelerator("Cmd+S").build(handle)?;
-                let close_tab = MenuItemBuilder::with_id("menu:close-tab", "关闭页签").accelerator("Cmd+W").build(handle)?;
-                let file_submenu = SubmenuBuilder::new(handle, "文件")
-                    .item(&new_file)
-                    .text("menu:new-vault", "新建加密库")
-                    .separator()
-                    .item(&open_file)
-                    .item(&vault_open)
-                    .item(&vault_close)
-                    .item(&workdir_toggle)
-                    .separator()
-                    .item(&save)
-                    .item(&close_tab)
-                    .separator()
-                    .text("menu:batch-encrypt", "批量加密文件…")
-                    .text("menu:import-dir", "导入目录到库…")
-                    .text("menu:export-html", "导出 HTML…")
-                    .build()?;
-
-                // 编辑：保留系统剪贴板预定义项（⌘C/⌘V 等），否则覆盖默认菜单后这些快捷键失效。
-                // 用 *_with_text 显式给出中文标题，避免预定义项按系统语言显示英文。
-                let find = MenuItemBuilder::with_id("menu:find", "编辑器内搜索").accelerator("Cmd+F").build(handle)?;
-                let find_global = MenuItemBuilder::with_id("menu:find-global", "全局搜索").accelerator("Cmd+Shift+F").build(handle)?;
-                let edit_submenu = SubmenuBuilder::new(handle, "编辑")
-                    .undo_with_text("撤销")
-                    .redo_with_text("重做")
-                    .separator()
-                    .cut_with_text("剪切")
-                    .copy_with_text("复制")
-                    .paste_with_text("粘贴")
-                    .select_all_with_text("全选")
-                    .separator()
-                    .item(&find)
-                    .item(&find_global)
-                    .build()?;
-
-                let bold = MenuItemBuilder::with_id("menu:bold", "加粗").accelerator("Cmd+B").build(handle)?;
-                let italic = MenuItemBuilder::with_id("menu:italic", "斜体").accelerator("Cmd+I").build(handle)?;
-                let link = MenuItemBuilder::with_id("menu:link", "链接").accelerator("Cmd+K").build(handle)?;
-                let format_submenu = SubmenuBuilder::new(handle, "格式")
-                    .text("menu:h1", "标题 1")
-                    .text("menu:h2", "标题 2")
-                    .text("menu:h3", "标题 3")
-                    .separator()
-                    .item(&bold)
-                    .item(&italic)
-                    .text("menu:strike", "删除线")
-                    .text("menu:code", "行内代码")
-                    .text("menu:codeblock", "代码块")
-                    .separator()
-                    .text("menu:quote", "引用")
-                    .text("menu:ul", "无序列表")
-                    .text("menu:task", "任务列表")
-                    .text("menu:table", "表格")
-                    .separator()
-                    .item(&link)
-                    .text("menu:image", "图片")
-                    .text("menu:hr", "分割线")
-                    .build()?;
-
-                // 视图：模式（单选勾选）+ 显示开关（勾选）用 CheckMenuItem，勾选态由前端 sync_native_menu 回写。
-                let mk_check = |id: &str, text: &str| -> tauri::Result<CheckMenuItem<tauri::Wry>> {
-                    CheckMenuItem::with_id(handle, id, text, true, false, None::<&str>)
-                };
-                let m_edit = mk_check("menu:mode-edit", "编辑模式")?;
-                let m_split = mk_check("menu:mode-split", "分屏")?;
-                let m_preview = mk_check("menu:mode-preview", "预览模式")?;
-                let c_tabs = mk_check("menu:toggle-tabs", "顶部页签")?;
-                let c_toolbar = mk_check("menu:toggle-toolbar", "格式工具栏")?;
-                let c_statusbar = mk_check("menu:toggle-statusbar", "状态栏")?;
-                let c_sidebar = CheckMenuItem::with_id(handle, "menu:toggle-sidebar", "显示侧边栏", true, false, Some("Cmd+J"))?;
-                let c_openfiles = mk_check("menu:sec-open-files", "打开的文件")?;
-                let c_vaults = mk_check("menu:sec-vaults", "加密库")?;
-                let c_workdir = mk_check("menu:sec-workdir", "工作目录")?;
-                let c_favorites = mk_check("menu:sec-favorites", "收藏")?;
-                let c_recent = mk_check("menu:sec-recent", "最近打开")?;
-                let c_outline = mk_check("menu:sec-outline", "大纲")?;
-                // 侧边栏子菜单：显示开关 + 各分组开关（库/工作目录开关已移到「文件」菜单）。
-                let sidebar_submenu = SubmenuBuilder::new(handle, "侧边栏")
-                    .item(&c_sidebar)
-                    .separator()
-                    .item(&c_openfiles)
-                    .item(&c_vaults)
-                    .item(&c_workdir)
-                    .item(&c_favorites)
-                    .item(&c_recent)
-                    .item(&c_outline)
-                    .build()?;
-                let lock_all = MenuItemBuilder::with_id("menu:lock-all", "全部锁定").accelerator("Cmd+L").build(handle)?;
-                let view_submenu = SubmenuBuilder::new(handle, "视图")
-                    .item(&m_edit)
-                    .item(&m_split)
-                    .item(&m_preview)
-                    .separator()
-                    .item(&c_tabs)
-                    .item(&c_toolbar)
-                    .item(&c_statusbar)
-                    .item(&sidebar_submenu)
-                    .separator()
-                    .item(&lock_all)
-                    .build()?;
-
-                let window_submenu = SubmenuBuilder::new(handle, "窗口")
-                    .minimize_with_text("最小化")
-                    .fullscreen_with_text("全屏")
-                    .build()?;
-
-                // 帮助：项目主页（GitHub / Gitee）+ 检查更新（跳发布页）+ 反馈（跳 Issue 页）。
-                // Gitee 为国内镜像；具体链接见前端 src/lib/links.ts，点击后由 App.vue 走 open_url 用系统浏览器打开（全局生效，不依赖当前路由）。
-                let help_submenu = SubmenuBuilder::new(handle, "帮助")
-                    .text("menu:help-github", "GitHub 主页")
-                    .text("menu:help-gitee", "Gitee 主页（国内镜像）")
-                    .separator()
-                    .text("menu:check-update", "检查更新（GitHub）")
-                    .text("menu:check-update-gitee", "检查更新（Gitee 国内镜像）")
-                    .separator()
-                    .text("menu:feedback", "反馈与建议（GitHub）")
-                    .text("menu:feedback-gitee", "反馈与建议（Gitee 国内镜像）")
-                    .build()?;
-
-                let menu = MenuBuilder::new(handle)
-                    .items(&[
-                        &app_submenu,
-                        &file_submenu,
-                        &edit_submenu,
-                        &format_submenu,
-                        &view_submenu,
-                        &window_submenu,
-                        &help_submenu,
-                    ])
-                    .build()?;
-                app.set_menu(menu)?;
-
-                // 登记可勾选项句柄，供前端按当前设置/模式同步勾选态。
-                let mut checks = std::collections::HashMap::new();
-                checks.insert("menu:mode-edit".to_string(), m_edit);
-                checks.insert("menu:mode-split".to_string(), m_split);
-                checks.insert("menu:mode-preview".to_string(), m_preview);
-                checks.insert("menu:toggle-tabs".to_string(), c_tabs);
-                checks.insert("menu:toggle-toolbar".to_string(), c_toolbar);
-                checks.insert("menu:toggle-statusbar".to_string(), c_statusbar);
-                checks.insert("menu:toggle-sidebar".to_string(), c_sidebar);
-                checks.insert("menu:sec-open-files".to_string(), c_openfiles);
-                checks.insert("menu:sec-vaults".to_string(), c_vaults);
-                checks.insert("menu:sec-workdir".to_string(), c_workdir);
-                checks.insert("menu:sec-favorites".to_string(), c_favorites);
-                checks.insert("menu:sec-recent".to_string(), c_recent);
-                checks.insert("menu:sec-outline".to_string(), c_outline);
-                handle.manage(MenuDyn { checks, vault_close, workdir_toggle });
-            }
+            install_native_menu(handle)?;
 
             // macOS：每秒轮询会话字典的 CGSSessionScreenIsLocked，锁屏（未锁 → 已锁）时
             // 发事件给前端；前端按「系统休眠 / 锁屏时锁定」开关决定是否全部锁定。

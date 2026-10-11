@@ -81,7 +81,7 @@ export default defineComponent({
           <svg class="lead" style="width:16px;height:16px" viewBox="0 0 24 24" fill="none" stroke="#faad14" stroke-width="1.8" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /></svg>
           <span class="fname">{{ node.name }}</span>
           <span class="acts">
-            <span class="icon-btn" title="更多操作" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+            <span class="icon-btn" :title="$t('common.more')" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
           </span>
         </div>
         <div class="wdn-sub" v-show="node.open" data-drop-kind="wd-dir" :data-drop-path="node.path">
@@ -98,7 +98,7 @@ export default defineComponent({
             @open-vault="(n: any) => $emit('open-vault', n)"
             @ctx-node="(p: any) => $emit('ctx-node', p)"
           />
-          <div v-else-if="node.loaded" class="wdn-empty" :style="{ paddingLeft: 12 + (depth + 1) * 16 + 'px' }">空文件夹</div>
+          <div v-else-if="node.loaded" class="wdn-empty" :style="{ paddingLeft: 12 + (depth + 1) * 16 + 'px' }">{{ $t('common.emptyFolder') }}</div>
         </div>
       </template>
 
@@ -119,7 +119,7 @@ export default defineComponent({
         <EncIcon v-else class="lead" type="file" color="#1677ff" :size="14" />
         <span class="fname">{{ node.name }}</span>
         <span class="acts">
-          <span class="icon-btn" title="更多操作" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+          <span class="icon-btn" :title="$t('common.more')" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
         </span>
       </div>
 
@@ -140,7 +140,7 @@ export default defineComponent({
         <EncIcon class="lead" type="plain" color="#8a919e" :size="14" />
         <span class="fname">{{ node.name }}</span>
         <span class="acts">
-          <span class="icon-btn" title="更多操作" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+          <span class="icon-btn" :title="$t('common.more')" @click.stop="onCtx(node, $event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
         </span>
       </div>
     </template>

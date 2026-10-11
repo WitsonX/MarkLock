@@ -2,8 +2,11 @@
 import { defineComponent } from 'vue'
 import { storeToRefs } from 'pinia'
 import { listen } from '@tauri-apps/api/event'
+import zhCN from 'ant-design-vue/es/locale/zh_CN'
+import enUS from 'ant-design-vue/es/locale/en_US'
 import router from './router'
 import { useVaultStore } from './stores/vault'
+import { setLang, resolveLang, lang } from './locales'
 import * as tauri from './lib/tauri'
 import { LINKS } from './lib/links'
 
@@ -40,6 +43,13 @@ export default defineComponent({
     apply()
     getSysMedia()?.addEventListener('change', apply)
 
+    // 把「跟随系统」解析成实际的 zh/en，写入 lang ref + <html lang>，并同步 macOS 原生菜单语言
+    const applyLang = () => {
+      setLang(resolveLang(settings.value.language))
+      tauri.setNativeMenuLang(lang.value).catch(() => {})
+    }
+    applyLang()
+
     // 退出（点红叉 / Cmd+Q）兜底：后端 prevent_close 后广播 close-requested。
     // 原先只有 EditorView 监听，切到设置/解锁页后组件卸载、无人响应导致无法退出。
     // 非编辑器页不能直接退出（可能仍有未保存文件），而是暂存退出请求并跳回编辑器，
@@ -64,16 +74,27 @@ export default defineComponent({
       if (url) tauri.openUrl(url).catch(() => {})
     }).catch(() => {})
 
-    return { settings, apply }
+    return { settings, apply, applyLang }
+  },
+  computed: {
+    // Ant Design 内置组件文案（空状态/分页等）跟随当前语言
+    antdLocale() {
+      return lang.value === 'en' ? enUS : zhCN
+    },
   },
   watch: {
     'settings.theme'() {
       this.apply()
+    },
+    'settings.language'() {
+      this.applyLang()
     },
   },
 })
 </script>
 
 <template>
-  <router-view />
+  <a-config-provider :locale="antdLocale">
+    <router-view />
+  </a-config-provider>
 </template>

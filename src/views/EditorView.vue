@@ -9,6 +9,7 @@ import type { OpenFile } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
+import { t as translate, lang } from '../locales'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import VaultTreeNode from '../components/VaultTreeNode.vue'
 import WorkdirNode from '../components/WorkdirNode.vue'
@@ -34,11 +35,11 @@ function highlightCode(text: string, lang: string): string {
 
 /** 预览代码块右上角复制按钮：图标内联 SVG（双矩形「复制」+ 对勾「已复制」），
  *  文字/状态切换由 CSS 与 .copied 类驱动；绝对定位不参与 pre 文本流，textContent 复制不受影响。 */
-const CODE_COPY_BTN = `<button type="button" class="code-copy-btn" aria-label="复制代码" title="复制"><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">复制</span></button>`
+const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = translate('editor.copyCodeAria')) => `<button type="button" class="code-copy-btn" aria-label="${aria}" title="${txt}"><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">${txt}</span></button>`
 
 /** 行内代码复制按钮：复用 .code-copy-btn 状态类（.cc-txt 由 CSS 隐藏只留图标），
  *  与 code 同为 .codespan-wrap 的兄弟节点，选中 code 文本时不会带入按钮文字。 */
-const INLINE_COPY_BTN = CODE_COPY_BTN.replace('aria-label="复制代码"', 'aria-label="复制行内代码"')
+const INLINE_COPY_BTN = () => CODE_COPY_BTN(translate('common.copy'), translate('editor.copyInlineAria'))
 
 /** 模块级：当前预览文件所在目录（解析正文里相对图片路径的基准）。
  *  renderMarkdown 每次渲染前按 activeFile 写入，image 渲染器读取它拼绝对路径再转 asset URL。 */
@@ -88,14 +89,14 @@ marked.use({
       const name = (lang || '').trim().split(/\s+/)[0]
       // 围栏信息串要进 class 属性，限定为语言名常见字符，避免引号/尖括号提前闭合属性破坏标签
       const safe = /^[\w+.-]+$/.test(name) ? name : ''
-      return `<pre>${CODE_COPY_BTN}<code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></pre>\n`
+      return `<pre>${CODE_COPY_BTN()}<code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></pre>\n`
     },
     // 行内代码：code 后跟复制按钮，外包 inline 容器供 CSS 悬停显现与事件定位；
     // 必须自己转义：marked 只在「默认 renderer」里对 codespan 做 escapeHtml，token.text 是原始文本，
     // 覆写 renderer 后不转义会让 `<script>` 这类内容输出成真标签，无闭合时浏览器把后续整篇吞进脚本。
     // 导出 HTML 时按钮会被现有正则一并剔除。
     codespan({ text }: { text: string }) {
-      return `<span class="codespan-wrap"><code>${escapeCode(text)}</code>${INLINE_COPY_BTN}</span>`
+      return `<span class="codespan-wrap"><code>${escapeCode(text)}</code>${INLINE_COPY_BTN()}</span>`
     },
     // 本地图片：相对/绝对磁盘路径经 asset 协议在应用内加载（http/data 原样交给 WKWebView）
     image({ href, title, text }: { href: string; title?: string | null; text: string }) {
@@ -118,12 +119,12 @@ interface WorkNode extends FsNode {
 
 /** 「定位文件到系统文件管理器」菜单项文案：按平台区分（macOS 访达 /
  *  Windows 资源管理器 / 其它 文件管理器），避免在 Windows 上仍写「访达」。检测与 main.ts 一致。 */
-const REVEAL_LABEL = (() => {
+const revealLabel = () => {
   const ua = navigator.userAgent.toLowerCase()
-  if (ua.includes('mac os') || (navigator.platform || '').toLowerCase().includes('mac')) return '在访达中显示'
-  if (ua.includes('windows')) return '在资源管理器中显示'
-  return '在文件管理器中显示'
-})()
+  if (ua.includes('mac os') || (navigator.platform || '').toLowerCase().includes('mac')) return translate('editor.revealFinder')
+  if (ua.includes('windows')) return translate('editor.revealExplorer')
+  return translate('editor.revealFiles')
+}
 
 export default defineComponent({
   name: 'EditorView',
@@ -295,9 +296,9 @@ export default defineComponent({
       // 关闭未保存文件的确认弹窗
       showCloseConfirm: false,
       closeConfirmText: '',
-      closeConfirmTitle: '未保存的修改',
-      closeConfirmDiscard: '不保存',
-      closeConfirmSave: '保存',
+      closeConfirmTitle: translate('editor.closeUnsavedTitle'),
+      closeConfirmDiscard: translate('editor.discard'),
+      closeConfirmSave: translate('editor.save'),
       pendingClose: null as null | { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[] },
       // 当前确认弹窗是针对“退出应用”而非“关闭页签”
       pendingQuit: false,
@@ -390,7 +391,7 @@ export default defineComponent({
     },
     /** 工作目录分组标题：已挂载目录时显示目录名（悬停看完整路径），未挂载时仍显示「工作目录」。 */
     workdirTitle() {
-      if (!this.workdirRoot) return '工作目录'
+      if (!this.workdirRoot) return this.$t('sidebar.workdir')
       // 兼容 Windows 反斜杠：去掉尾部分隔符后取最后一段
       const segs = this.workdirRoot.replace(/[\\/]+$/, '').split(/[\\/]/)
       // 盘符根（C:\）等去分隔符后只剩盘符或为空，直接回退显示原路径
@@ -414,12 +415,12 @@ export default defineComponent({
         if (fence) continue
         const m = raw.match(/^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/)
         if (!m) continue
-        out.push({ level: m[1].length, text: (m[2] || '').trim() || '（无标题）', line: i + 1 })
+        out.push({ level: m[1].length, text: (m[2] || '').trim() || this.$t('editor.noHeading'), line: i + 1 })
       }
       return out
     },
     activeFileName() {
-      return this.activeFile?.name || '未打开文件'
+      return this.activeFile?.name || this.$t('editor.noFileOpen')
     },
     /** 当前文件是否因库锁定而不可读（仅库内文件；单文件 .mdl 走页签内密码框，不走这里） */
     isActiveLocked() {
@@ -465,14 +466,16 @@ export default defineComponent({
       return this.activeFile ? this.activeFile.content.split('\n').length : 1
     },
     renderedPreview() {
+      // 依赖当前语言：切语言时重渲染预览（代码复制按钮等 marked 内文案随之更新）
+      void lang.value
       return this.renderMarkdown(this.activeFile?.content ?? '')
     },
     autoLockLabel() {
       const s = this.store.settings.autoLockSecs
-      if (s <= 0) return '已关闭'
+      if (s <= 0) return this.$t('editor.lockOff')
       const m = Math.floor(s / 60)
       const sec = s % 60
-      return m > 0 ? `${m} 分钟` : `${sec} 秒`
+      return m > 0 ? this.$t('editor.minN', { n: m }) : this.$t('editor.secN', { n: sec })
     },
     /** 另存为密码强度（4 格） */
     saveAsStrength(): number {
@@ -880,6 +883,28 @@ export default defineComponent({
         e.preventDefault()
         this.reopenLastClosed()
       }
+      // Cmd+Opt+←/→（Win/Linux：Ctrl+Alt+←/→）：上一个 / 下一个页签，首尾循环。
+      // 带 Meta 不会撞上 CodeMirror 的 Alt-ArrowLeft/Right（按词移动），故事件能冒泡到这里。
+      if ((e.metaKey || e.ctrlKey) && e.altKey && !e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        if (this.openFiles.length > 1) {
+          e.preventDefault()
+          this.switchTab(e.key === 'ArrowRight' ? 1 : -1)
+        }
+      }
+      // Ctrl+Tab / Ctrl+Shift+Tab：下一个 / 上一个页签（macOS 上 ⌃⇥ / ⌃⇧⇥ 同样走这条）
+      if (e.ctrlKey && !e.metaKey && e.key === 'Tab') {
+        if (this.openFiles.length > 1) {
+          e.preventDefault()
+          this.switchTab(e.shiftKey ? -1 : 1)
+        }
+      }
+      // Cmd+1…8 定位第 N 个页签，Cmd+9 定位最后一个（与主流浏览器一致）
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
+        if (this.openFiles.length > 0) {
+          e.preventDefault()
+          this.switchTabTo(e.key === '9' ? -1 : Number(e.key) - 1)
+        }
+      }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
         // 切换到编辑或分屏模式，确保编辑器可见
@@ -1085,7 +1110,7 @@ export default defineComponent({
       this.activeEditor()?.toggleLinePrefix(prefix)
     },
     fmtTable() {
-      this.activeEditor()?.insertBlock('| 列 1 | 列 2 | 列 3 |\n| --- | --- | --- |\n|  |  |  |')
+      this.activeEditor()?.insertBlock(this.$t('editor.tableMarkdown'))
     },
     fmtHr() {
       this.activeEditor()?.insertBlock('---')
@@ -1133,9 +1158,9 @@ export default defineComponent({
         case 'menu:h1': this.fmtHeading(1); break
         case 'menu:h2': this.fmtHeading(2); break
         case 'menu:h3': this.fmtHeading(3); break
-        case 'menu:bold': this.fmtWrap('**', '**', '加粗'); break
-        case 'menu:italic': this.fmtWrap('*', '*', '斜体'); break
-        case 'menu:strike': this.fmtWrap('~~', '~~', '删除'); break
+        case 'menu:bold': this.fmtWrap('**', '**', this.$t('editor.fmtBold')); break
+        case 'menu:italic': this.fmtWrap('*', '*', this.$t('editor.fmtItalic')); break
+        case 'menu:strike': this.fmtWrap('~~', '~~', this.$t('editor.fmtStrike')); break
         case 'menu:code': this.fmtWrap('`', '`', 'code'); break
         case 'menu:codeblock': this.fmtCodeBlock(); break
         case 'menu:quote': this.fmtPrefix('> '); break
@@ -1333,14 +1358,14 @@ export default defineComponent({
       try {
         await navigator.clipboard.writeText(text)
       } catch {
-        return message.error('复制失败')
+        return message.error(this.$t('toast.copyFailed'))
       }
       btn.classList.add('copied')
       const txt = btn.querySelector('.cc-txt')
-      if (txt) txt.textContent = '已复制'
+      if (txt) txt.textContent = this.$t('common.copied')
       window.setTimeout(() => {
         btn.classList.remove('copied')
-        if (txt) txt.textContent = '复制'
+        if (txt) txt.textContent = this.$t('common.copy')
       }, 1400)
     },
     /** 把预览区相对链接解析成绝对路径并打开（参考基：当前文件所在目录，其次工作目录根）。 */
@@ -1353,7 +1378,7 @@ export default defineComponent({
       const f = this.activeFile
       if (f && !f.encrypted && f.path && !f.isNew) base = this.parentDir(f.path)
       if (!base && this.workdirRoot) base = this.workdirRoot
-      if (!base) return message.warning('无法确定相对路径的基准目录，请从侧边栏打开该文件')
+      if (!base) return message.warning(this.$t('toast.noPathBase'))
       // 绝对路径直接使用；相对路径基于 base 解析并折叠 `.` / `..`
       const joined = /^([a-zA-Z]:[\\/]|[\\/])/.test(clean) ? clean : this.joinPath(base, clean)
       const segs: string[] = []
@@ -1365,7 +1390,7 @@ export default defineComponent({
       const abs = (joined.startsWith(sep) || /^[a-zA-Z]:[\\/]/.test(joined) ? (joined.match(/^([a-zA-Z]:)?[\\/]/)?.[0] ?? '') : '') + segs.join(sep)
       try {
         const info = await tauri.inspectPath(abs)
-        if (info.is_dir) return message.info('暂不支持在预览中打开目录链接')
+        if (info.is_dir) return message.info(this.$t('toast.noDirLink'))
         if (/\.(mdl|mdlb)$/i.test(abs)) {
           // 加密目标：沿用拖放路由的解锁流程，不能明文打开
           if (/\.mdlb$/i.test(abs)) {
@@ -1600,14 +1625,14 @@ export default defineComponent({
       this.workdir = []
       localStorage.removeItem('marklock.workdir')
       workdirChanges.reset([])
-      message.info('已关闭工作目录')
+      message.info(this.$t('toast.wdClosed'))
     },
     /** 关闭所有库：先全部锁定（清零内存密钥）再从登记列表移除全部库（不删磁盘文件，收藏不受影响）。 */
     async closeAllVaults() {
       await this.store.lockAll()
       this.store.clearRecentVaults()
       this.vaultTrees = {}
-      message.info('已关闭所有库')
+      message.info(this.$t('toast.vaultsClosed'))
     },
     /** 把某个系统目录挂载为工作目录（拖放/选择共用入口）；挂载后展开侧边栏与该分组，避免用户误以为无响应。 */
     async setWorkdir(dir: string) {
@@ -1713,23 +1738,23 @@ export default defineComponent({
       e.preventDefault()
       if (!this.workdirRoot) return
       this.showCtxMenu(e, [
-        { kind: 'item', label: '在根目录新建文件', run: () => this.wdNewFileAt(this.workdirRoot) },
-        { kind: 'item', label: '在根目录新建文件夹', run: () => this.wdNewFolderAt(this.workdirRoot) },
-        { kind: 'item', label: '刷新目录', run: () => this.refreshWorkdir() },
-        { kind: 'item', label: '选择工作目录…', run: () => this.chooseWorkdir() },
+        { kind: 'item', label: this.$t('menu.newFileAtRoot'), run: () => this.wdNewFileAt(this.workdirRoot) },
+        { kind: 'item', label: this.$t('menu.newFolderAtRoot'), run: () => this.wdNewFolderAt(this.workdirRoot) },
+        { kind: 'item', label: this.$t('menu.refreshDir'), run: () => this.refreshWorkdir() },
+        { kind: 'item', label: this.$t('menu.chooseWorkdirDots'), run: () => this.chooseWorkdir() },
         { kind: 'sep' },
-        { kind: 'item', label: '关闭工作目录', run: () => this.closeWorkdir() },
+        { kind: 'item', label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() },
       ])
     },
     /** 加密库标题栏「更多」菜单：标题栏只留「锁定所有库」，新建/打开/关闭所有库收进这里（无登记库时不出关闭项）。 */
     openVaultsMoreMenu(e: MouseEvent) {
       e.preventDefault()
       const items: any[] = [
-        { kind: 'item', label: '新建库', run: () => this.openCreateVault() },
-        { kind: 'item', label: '打开库', run: () => this.openVaultAction() },
+        { kind: 'item', label: this.$t('menu.newVault'), run: () => this.openCreateVault() },
+        { kind: 'item', label: this.$t('menu.openVault'), run: () => this.openVaultAction() },
       ]
       if (this.registeredVaults.length) {
-        items.push({ kind: 'sep' }, { kind: 'item', label: '关闭所有库', run: () => this.closeAllVaults() })
+        items.push({ kind: 'sep' }, { kind: 'item', label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() })
       }
       this.showCtxMenu(e, items)
     },
@@ -1785,6 +1810,34 @@ export default defineComponent({
         this.store.activeVaultId = f.vaultId
       }
     },
+    /** 快捷键切换页签：按偏移激活相邻页签，越界首尾循环（与 Ctrl+Tab 的习惯一致）。 */
+    switchTab(offset: number) {
+      const files = this.openFiles
+      if (files.length < 2) return
+      // 没有激活项（理论上只在刚关闭页签的瞬间出现）时从最后一个接着数
+      const cur = files.findIndex((f) => f.path === this.store.activePath)
+      const from = cur >= 0 ? cur : files.length - 1
+      this.switchTabTo((from + offset + files.length) % files.length)
+    },
+    /** 激活第 index 个页签；index 为 -1 表示最后一个（⌘9 语义）；越界不响应。 */
+    switchTabTo(index: number) {
+      const files = this.openFiles
+      const f = files[index < 0 ? files.length - 1 : index]
+      if (!f) return
+      this.activateFile(f.path)
+      this._scrollActiveTabIntoView()
+    },
+    /** 把激活页签滚入视口：优先顶部页签栏（横向滚动），页签栏隐藏时回退侧边栏「已打开」列表。 */
+    _scrollActiveTabIntoView() {
+      if (!this.store.settings.showTabs) {
+        this._scrollSidebarRowIntoView('.t-item.on')
+        return
+      }
+      nextTick(() => {
+        const el = document.querySelector('.tabsbar .tab.on') as HTMLElement | null
+        if (el) el.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      })
+    },
     /** 判断页签关闭前是否需要提醒：有未保存修改，且不是「空内容的新建草稿」。 */
     needsClose(f: OpenFile): boolean {
       if (!f.dirty) return false
@@ -1822,7 +1875,7 @@ export default defineComponent({
     async reopenLastClosed() {
       const t = this.store.takeClosedTab()
       if (!t) {
-        message.info('没有最近关闭的页签')
+        message.info(this.$t('toast.noRecentClosed'))
         return
       }
       if (t.isNew) {
@@ -1845,14 +1898,14 @@ export default defineComponent({
     openCloseConfirm(op: { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[] }, quitting = false) {
       this.pendingClose = op
       this.pendingQuit = quitting
-      const verb = quitting ? '退出前' : '关闭前'
-      this.closeConfirmTitle = quitting ? '退出前保存' : '未保存的修改'
-      this.closeConfirmDiscard = quitting ? '不保存并退出' : '不保存'
-      this.closeConfirmSave = quitting ? '保存并退出' : '保存'
+      const verb = quitting ? this.$t('editor.verbBeforeQuit') : this.$t('editor.verbBeforeClose')
+      this.closeConfirmTitle = quitting ? this.$t('editor.saveBeforeQuit') : this.$t('editor.closeUnsavedTitle')
+      this.closeConfirmDiscard = quitting ? this.$t('editor.discardQuit') : this.$t('editor.discard')
+      this.closeConfirmSave = quitting ? this.$t('editor.saveQuit') : this.$t('editor.save')
       this.closeConfirmText =
         op.files.length === 1
-          ? `「${op.files[0].name}」有未保存的修改，${verb}是否保存？`
-          : `有 ${op.files.length} 个文件存在未保存的修改，${verb}是否保存？`
+          ? this.$t('editor.confirmSaveOne', { name: op.files[0].name, verb })
+          : this.$t('editor.confirmSaveMany', { count: op.files.length, verb })
       this.showCloseConfirm = true
     },
     /** 取消（关闭弹窗；退出场景下中止退出，窗口保持打开）。 */
@@ -1885,7 +1938,7 @@ export default defineComponent({
         try {
           await this.store.saveFile(f.path, f.content)
         } catch (e) {
-          message.error('保存失败：' + String(e))
+          message.error(this.$t('toast.saveFailedPrefix') + String(e))
           return
         }
       }
@@ -1900,7 +1953,7 @@ export default defineComponent({
           this.doQuit()
           return
         }
-        message.info('存在未保存的草稿，已保存其余文件；请为草稿另存为后再退出')
+        message.info(this.$t('toast.draftsRemainQuit'))
         await this.activateFile(drafts[0].path)
         this.openSaveAs()
         return
@@ -1917,7 +1970,7 @@ export default defineComponent({
       }
       // 多个：关闭已保存部分，保留草稿页签并提示手动另存为
       this.closeKeepDirtyDrafts(op)
-      message.info(`${drafts.length} 个草稿尚未保存，已保留页签，请另存为`)
+      message.info(this.$t('toast.draftsNotSaved', { count: drafts.length }))
       await this.activateFile(drafts[0].path)
     },
     /** 处理后端发来的退出（关窗）请求：有未保存则弹窗确认，否则直接退出。 */
@@ -1978,34 +2031,34 @@ export default defineComponent({
     viewToggleItems() {
       const s = this.store.settings
       return [
-        { kind: 'item', label: '页签', checked: s.showTabs, run: () => this.store.updateSettings({ showTabs: !this.store.settings.showTabs }) },
-        { kind: 'item', label: '工具栏', checked: s.showToolbar, run: () => this.store.updateSettings({ showToolbar: !this.store.settings.showToolbar }) },
-        { kind: 'item', label: '状态栏', checked: s.showStatusbar, run: () => this.store.updateSettings({ showStatusbar: !this.store.settings.showStatusbar }) },
-        { kind: 'item', label: '侧边栏', sc: '⌘J', checked: s.showSidebar, run: () => this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar }) },
+        { kind: 'item', label: this.$t('menu.viewTabs'), checked: s.showTabs, run: () => this.store.updateSettings({ showTabs: !this.store.settings.showTabs }) },
+        { kind: 'item', label: this.$t('menu.viewToolbar'), checked: s.showToolbar, run: () => this.store.updateSettings({ showToolbar: !this.store.settings.showToolbar }) },
+        { kind: 'item', label: this.$t('menu.viewStatusbar'), checked: s.showStatusbar, run: () => this.store.updateSettings({ showStatusbar: !this.store.settings.showStatusbar }) },
+        { kind: 'item', label: this.$t('menu.viewSidebar'), sc: '⌘J', checked: s.showSidebar, run: () => this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar }) },
       ]
     },
     /** 侧边栏分组开关菜单项（与主菜单侧边栏子菜单一致）。 */
     sidebarToggleItems() {
       const s = this.store.settings
       return [
-        { kind: 'item', label: '显示侧边栏', sc: '⌘J', checked: s.showSidebar, run: () => this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar }) },
+        { kind: 'item', label: this.$t('menu.showSidebar'), sc: '⌘J', checked: s.showSidebar, run: () => this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar }) },
         { kind: 'sep' },
-        { kind: 'item', label: '打开的文件', checked: s.showOpenFiles, run: () => this.store.updateSettings({ showOpenFiles: !this.store.settings.showOpenFiles }) },
-        { kind: 'item', label: '加密库', checked: s.showUnlockedVaults, run: () => this.store.updateSettings({ showUnlockedVaults: !this.store.settings.showUnlockedVaults }) },
-        { kind: 'item', label: '工作目录', checked: s.showWorkdir, run: () => this.store.updateSettings({ showWorkdir: !this.store.settings.showWorkdir }) },
-        { kind: 'item', label: '收藏', checked: s.showFavorites, run: () => this.store.updateSettings({ showFavorites: !this.store.settings.showFavorites }) },
-        { kind: 'item', label: '最近打开', checked: s.showRecent, run: () => this.store.updateSettings({ showRecent: !this.store.settings.showRecent }) },
-        { kind: 'item', label: '大纲', checked: s.showOutline, run: () => this.store.updateSettings({ showOutline: !this.store.settings.showOutline }) },
+        { kind: 'item', label: this.$t('sidebar.openFiles'), checked: s.showOpenFiles, run: () => this.store.updateSettings({ showOpenFiles: !this.store.settings.showOpenFiles }) },
+        { kind: 'item', label: this.$t('sidebar.vaults'), checked: s.showUnlockedVaults, run: () => this.store.updateSettings({ showUnlockedVaults: !this.store.settings.showUnlockedVaults }) },
+        { kind: 'item', label: this.$t('sidebar.workdir'), checked: s.showWorkdir, run: () => this.store.updateSettings({ showWorkdir: !this.store.settings.showWorkdir }) },
+        { kind: 'item', label: this.$t('sidebar.favorites'), checked: s.showFavorites, run: () => this.store.updateSettings({ showFavorites: !this.store.settings.showFavorites }) },
+        { kind: 'item', label: this.$t('sidebar.recent'), checked: s.showRecent, run: () => this.store.updateSettings({ showRecent: !this.store.settings.showRecent }) },
+        { kind: 'item', label: this.$t('sidebar.outline'), checked: s.showOutline, run: () => this.store.updateSettings({ showOutline: !this.store.settings.showOutline }) },
         { kind: 'sep' },
         // 「打开库」常驻（可同时打开多个库）；仅当有已登记库时才追加「关闭所有库」。
-        { kind: 'item', label: '打开库', run: () => this.openVaultAction() },
+        { kind: 'item', label: this.$t('menu.openVault'), run: () => this.openVaultAction() },
         ...(this.registeredVaults.length
-          ? [{ kind: 'item', label: '关闭所有库', run: () => this.closeAllVaults() }]
+          ? [{ kind: 'item', label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() }]
           : []),
         // 未挂载工作目录时变为「打开工作目录」；已挂载时为「关闭工作目录」
         this.workdirRoot
-          ? { kind: 'item', label: '关闭工作目录', run: () => this.closeWorkdir() }
-          : { kind: 'item', label: '打开工作目录', run: () => this.chooseWorkdir() },
+          ? { kind: 'item', label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() }
+          : { kind: 'item', label: this.$t('menu.openWorkdir'), run: () => this.chooseWorkdir() },
       ]
     },
     /** 打开右键菜单：按类型构建菜单项并定位到光标处（夹取到视口内）。 */
@@ -2017,9 +2070,9 @@ export default defineComponent({
         items = this.viewToggleItems()
       } else if (menu === 'tabsbar') {
         items = [
-          { kind: 'item', label: '新建文件', sc: '⌘N', run: () => this.openNewDraft() },
-          { kind: 'item', label: '打开文件…', sc: '⌘O', run: () => this.openFileAction() },
-          { kind: 'item', label: '撤销关闭页签', sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
+          { kind: 'item', label: this.$t('menu.newFile'), sc: '⌘N', run: () => this.openNewDraft() },
+          { kind: 'item', label: this.$t('menu.openFile'), sc: '⌘O', run: () => this.openFileAction() },
+          { kind: 'item', label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
           ...this.viewToggleItems(),
         ]
@@ -2028,40 +2081,40 @@ export default defineComponent({
         const f = this.openFiles.find((x) => x.path === p)
         const isMdl = p.endsWith('.mdl')
         items = [
-          { kind: 'item', label: '关闭', sc: '⌘W', run: () => this.closeFile(p) },
-          { kind: 'item', label: '关闭其它', run: () => this.closeOthers(p) },
-          { kind: 'item', label: '关闭已保存', run: () => this.store.closeSaved() },
-          { kind: 'item', label: '关闭全部', run: () => this.closeAllFiles() },
-          { kind: 'item', label: '撤销关闭页签', sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
+          { kind: 'item', label: this.$t('menu.close'), sc: '⌘W', run: () => this.closeFile(p) },
+          { kind: 'item', label: this.$t('menu.closeOthers'), run: () => this.closeOthers(p) },
+          { kind: 'item', label: this.$t('menu.closeSaved'), run: () => this.store.closeSaved() },
+          { kind: 'item', label: this.$t('menu.closeAll'), run: () => this.closeAllFiles() },
+          { kind: 'item', label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
-          { kind: 'item', label: REVEAL_LABEL, disabled: !f || f.isNew, run: () => this.revealTab(p) },
+          { kind: 'item', label: revealLabel(), disabled: !f || f.isNew, run: () => this.revealTab(p) },
           {
             kind: 'item' as const,
-            label: f?.external === 'modified' ? '重新加载磁盘版本（外部已修改）' : '重新加载磁盘版本',
+            label: f?.external === 'modified' ? this.$t('menu.reloadDiskExt') : this.$t('menu.reloadDisk'),
             // 草稿未落盘 / 页签或所属库锁定时无磁盘明文可读
             disabled: !f || f.isNew || f.locked || this.isVaultFileLocked(f),
             run: () => this.reloadTab(p),
           },
           ...(isMdl && f && !f.isNew
-            ? [{ kind: 'item' as const, label: '修改密码…', run: () => this.openChangePwd({ id: p, path: p }) }]
+            ? [{ kind: 'item' as const, label: this.$t('menu.changePwd'), run: () => this.openChangePwd({ id: p, path: p }) }]
             : []),
           { kind: 'sep' },
           {
             kind: 'item' as const,
             // 草稿未落盘没有可收藏的真实路径；收藏按 path 记录，与侧边栏星标同一入口
-            label: this.store.isFavoriteFile(p) ? '取消收藏' : '加入收藏',
+            label: this.store.isFavoriteFile(p) ? this.$t('menu.unfav') : this.$t('menu.starFile'),
             disabled: !f || f.isNew,
             run: () => this.store.toggleFavoriteFile(p),
           },
           ...(f && !f.isNew && !f.encrypted && !f.locked
             ? [
-                { kind: 'item' as const, label: '转为加密文件…', run: () => this.openConvertDialog(p) },
-                { kind: 'item' as const, label: '添加到加密库…', run: () => this.openCopyToVault(p) },
+                { kind: 'item' as const, label: this.$t('menu.convertEnc'), run: () => this.openConvertDialog(p) },
+                { kind: 'item' as const, label: this.$t('menu.addToVault'), run: () => this.openCopyToVault(p) },
               ]
             : []),
           {
             kind: 'item' as const,
-            label: '导出 HTML…',
+            label: this.$t('menu.exportHtml'),
             // 锁定（本页签或所属库）时无明文可渲染；草稿有内存正文仍可导出
             disabled: !f || f.locked || this.isVaultFileLocked(f),
             run: () => this.exportHtml(p),
@@ -2074,10 +2127,10 @@ export default defineComponent({
         const p = path
         const f = this.favoriteFileList.find((x) => x.path === p)
         items = [
-          { kind: 'item', label: '打开', disabled: !f, run: () => f && this.recentOpenFile(f) },
-          { kind: 'item', label: '取消收藏', run: () => this.store.toggleFavoriteFile(p) },
+          { kind: 'item', label: this.$t('menu.open'), disabled: !f, run: () => f && this.recentOpenFile(f) },
+          { kind: 'item', label: this.$t('menu.unfav'), run: () => this.store.toggleFavoriteFile(p) },
           { kind: 'sep' },
-          { kind: 'item', label: REVEAL_LABEL, run: () => this.revealTab(p) },
+          { kind: 'item', label: revealLabel(), run: () => this.revealTab(p) },
         ]
       } else if (menu === 'vault' && path) {
         const id = path
@@ -2088,22 +2141,22 @@ export default defineComponent({
         items = [
           ...(canCreate
             ? [
-                { kind: 'item' as const, label: '新建文件', run: () => this.openNewFile({ id: v!.id, name: v!.name }, null) },
-                { kind: 'item' as const, label: '新建文件夹', run: () => this.openNewFolder({ id: v!.id, name: v!.name }, null) },
+                { kind: 'item' as const, label: this.$t('menu.newFile'), run: () => this.openNewFile({ id: v!.id, name: v!.name }, null) },
+                { kind: 'item' as const, label: this.$t('menu.newFolder'), run: () => this.openNewFolder({ id: v!.id, name: v!.name }, null) },
                 { kind: 'sep' as const },
               ]
             : []),
-          { kind: 'item', label: this.store.isFavorite(id) ? '取消收藏' : '收藏', run: () => this.store.toggleFavorite(id) },
-          { kind: 'item', label: isMdl ? '修改密码…' : '修改主密码…', run: () => this.openChangePwd({ id, path: v?.path || id, name: v?.name, isFileVault: v?.isFileVault }) },
-          { kind: 'item', label: REVEAL_LABEL, run: () => this.revealTab(v?.path || id) },
+          { kind: 'item', label: this.store.isFavorite(id) ? this.$t('menu.unfav') : this.$t('menu.fav'), run: () => this.store.toggleFavorite(id) },
+          { kind: 'item', label: isMdl ? this.$t('menu.changePwd') : this.$t('menu.changeMasterPwd'), run: () => this.openChangePwd({ id, path: v?.path || id, name: v?.name, isFileVault: v?.isFileVault }) },
+          { kind: 'item', label: revealLabel(), run: () => this.revealTab(v?.path || id) },
           { kind: 'sep' },
           // 锁定态：提供「解锁并打开」（跳解锁页）；已解锁：提供「锁定该库」
           ...(v?.unlocked
-            ? [{ kind: 'item' as const, label: '锁定该库', run: () => this.lockVault(id) }]
-            : [{ kind: 'item' as const, label: '解锁并打开', run: () => this.recentOpenVault(id) }]),
+            ? [{ kind: 'item' as const, label: this.$t('menu.lockVault'), run: () => this.lockVault(id) }]
+            : [{ kind: 'item' as const, label: this.$t('menu.unlockOpen'), run: () => this.recentOpenVault(id) }]),
           { kind: 'sep' },
           // 关闭库：从侧边栏列表取消登记（不删除磁盘文件）；若已解锁先锁定再移除
-          { kind: 'item', label: '关闭库', run: () => this.removeVaultFromList(id) },
+          { kind: 'item', label: this.$t('menu.closeVault'), run: () => this.removeVaultFromList(id) },
         ]
       }
       this.showCtxMenu(e, items)
@@ -2115,20 +2168,20 @@ export default defineComponent({
       const items: any[] = []
       if (node.is_dir) {
         items.push(
-          { kind: 'item', label: '新建文件', run: () => this.openNewFile(v, node) },
-          { kind: 'item', label: '新建文件夹', run: () => this.openNewFolder(v, node) },
+          { kind: 'item', label: this.$t('menu.newFile'), run: () => this.openNewFile(v, node) },
+          { kind: 'item', label: this.$t('menu.newFolder'), run: () => this.openNewFolder(v, node) },
           { kind: 'sep' },
         )
       } else {
         // 库内文件：仅「导出 HTML」（内容已加密，转加密/复制到库不适用）；确保对应页签已打开后复用导出逻辑
         items.push(
-          { kind: 'item', label: '导出 HTML…', run: () => this.exportNodeHtml(node, v.id) },
+          { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node, v.id) },
           { kind: 'sep' },
         )
       }
       items.push(
-        { kind: 'item', label: '重命名 / 移动', run: () => this.openRename(v.id, node) },
-        { kind: 'item', label: '删除', run: () => this.openDelete(v.id, node) },
+        { kind: 'item', label: this.$t('menu.renameMove'), run: () => this.openRename(v.id, node) },
+        { kind: 'item', label: this.$t('menu.delete'), run: () => this.openDelete(v.id, node) },
       )
       this.showCtxMenu(e, items)
     },
@@ -2158,24 +2211,24 @@ export default defineComponent({
       const items: any[] = []
       if (node.is_dir && !node.is_vault) {
         items.push(
-          { kind: 'item', label: '新建文件', run: () => this.wdOpenNewFile(node) },
-          { kind: 'item', label: '新建文件夹', run: () => this.wdOpenNewFolder(node) },
+          { kind: 'item', label: this.$t('menu.newFile'), run: () => this.wdOpenNewFile(node) },
+          { kind: 'item', label: this.$t('menu.newFolder'), run: () => this.wdOpenNewFolder(node) },
         )
       }
       // 工作目录明文文件（非目录、非库/加密节点）：转为加密 / 添加到加密库 / 导出 HTML
       if (!node.is_dir && !node.is_vault) {
         items.push(
-          { kind: 'item', label: '转为加密文件…', run: () => this.convertNodeToEncrypted(node) },
-          { kind: 'item', label: '添加到加密库…', run: () => this.copyNodeToVault(node) },
-          { kind: 'item', label: '导出 HTML…', run: () => this.exportNodeHtml(node) },
+          { kind: 'item', label: this.$t('menu.convertEnc'), run: () => this.convertNodeToEncrypted(node) },
+          { kind: 'item', label: this.$t('menu.addToVault'), run: () => this.copyNodeToVault(node) },
+          { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node) },
           { kind: 'sep' },
         )
       }
       items.push(
-        { kind: 'item', label: REVEAL_LABEL, run: () => this.revealTab(node.path) },
+        { kind: 'item', label: revealLabel(), run: () => this.revealTab(node.path) },
         { kind: 'sep' },
-        { kind: 'item', label: '重命名', run: () => this.wdOpenRename(node) },
-        { kind: 'item', label: '删除', run: () => this.wdOpenDelete(node) },
+        { kind: 'item', label: this.$t('menu.rename'), run: () => this.wdOpenRename(node) },
+        { kind: 'item', label: this.$t('menu.delete'), run: () => this.wdOpenDelete(node) },
       )
       this.showCtxMenu(e, items)
     },
@@ -2433,7 +2486,7 @@ export default defineComponent({
       let label = ''
       if (path) label = this.fileName(path)
       else if (kind === 'wd-root') label = this.workdirTitle
-      else if (kind === 'vlt-root') label = this.store.recent.find((x) => x.id === vault)?.name || '库'
+      else if (kind === 'vlt-root') label = this.store.recent.find((x) => x.id === vault)?.name || this.$t('editor.vaultFallback')
       return { kind, path, vault, label }
     },
     /** 目标 → 高亮 key（与模板 / VaultTreeNode 约定一致）。 */
@@ -2461,8 +2514,8 @@ export default defineComponent({
     /** 浮层文案：移动/复制到 X。 */
     verbFor(src: { kind: string }, cur: { kind: string; label: string }, alt: boolean): string {
       const move = this.isMoveOp(src, cur, alt)
-      const where = cur.label || (cur.kind === 'wd-root' ? '工作目录' : cur.kind === 'vlt-root' ? '库' : '')
-      return (move ? '移动到 ' : '复制到 ') + where
+      const where = cur.label || (cur.kind === 'wd-root' ? this.$t('sidebar.workdir') : cur.kind === 'vlt-root' ? this.$t('editor.vaultFallback') : '')
+      return move ? this.$t('editor.dragMove', { where }) : this.$t('editor.dragCopy', { where })
     },
     /** 结构性目标有效性：目录不可放入自身/后代；非 Markdown 单文件不可入（库）。 */
     isDragTargetValid(src: { kind: string; path: string; vault: string; name: string }, cur: { kind: string; path: string; vault: string }): boolean {
@@ -2584,14 +2637,14 @@ export default defineComponent({
     /** 读取库内一个条目的正文（按目录库 / 单文件库分流）。 */
     async readVaultEntryContent(vaultId: string, rel: string): Promise<string> {
       const v = this.store.recent.find((x) => x.id === vaultId)
-      if (!v) throw new Error('库不存在或未登记')
+      if (!v) throw new Error(this.$t('editor.vaultNotRegistered'))
       if (v.isFileVault) return await tauri.readFileVault(vaultId, v.path, rel)
       return await tauri.readFile(vaultId, `${v.path}/${rel}`)
     },
     /** 写入库内一个文件（createInVault 覆盖同名；createInFileVault 建到 .mdlb）。 */
     async writeEntryToVault(vaultId: string, rel: string, content: string) {
       const v = this.store.recent.find((x) => x.id === vaultId)
-      if (!v) throw new Error('库不存在或未登记')
+      if (!v) throw new Error(this.$t('editor.vaultNotRegistered'))
       if (v.isFileVault) await tauri.createInFileVault(vaultId, v.path, rel, content)
       else await tauri.createInVault(vaultId, rel, content)
     },
@@ -2612,7 +2665,7 @@ export default defineComponent({
     /** 重命名 / 移动库内一个条目。 */
     async renameInVaultFor(vaultId: string, oldRel: string, newRel: string) {
       const v = this.store.recent.find((x) => x.id === vaultId)
-      if (!v) throw new Error('库不存在或未登记')
+      if (!v) throw new Error(this.$t('editor.vaultNotRegistered'))
       if (v.isFileVault) await tauri.renameInFileVault(vaultId, v.path, oldRel, newRel)
       else await tauri.renameInVault(vaultId, oldRel, newRel)
     },
@@ -2632,12 +2685,12 @@ export default defineComponent({
         if (wdSrc && wdTarget && target.kind === 'wd-dir') {
           const ns = this.normPath(src.path)
           const nd = this.normPath(target.path)
-          if (nd === ns || nd.startsWith(ns + '/')) return message.warning('不能把文件夹放入其自身或子目录')
+          if (nd === ns || nd.startsWith(ns + '/')) return message.warning(this.$t('toast.noFolderIntoSelf'))
         }
         if (!wdSrc && !wdTarget && src.vault === target.vault && target.kind === 'vlt-dir') {
           const ns = this.normPath(src.path)
           const nd = this.normPath(target.path)
-          if (nd === ns || nd.startsWith(ns + '/')) return message.warning('不能把文件夹放入其自身或子目录')
+          if (nd === ns || nd.startsWith(ns + '/')) return message.warning(this.$t('toast.noFolderIntoSelf'))
         }
       }
       const isMove = this.isMoveOp(src, target, alt)
@@ -2665,7 +2718,7 @@ export default defineComponent({
         else dest = this.joinPath(targetDir, await this.uniqueWdName(targetDir, base))
       }
       await tauri.renamePath(src.path, dest)
-      message.success(`已移动到 ${target.label || '目标'}（${this.fileName(dest)}）`)
+      message.success(this.$t('toast.movedToName', { where: target.label || this.$t('editor.targetFallback'), name: this.fileName(dest) }))
       this.syncWdTabAfterMove(src.path, dest, src.kind === 'wd-dir')
       await this.reloadWorkdirDir(this.parentDir(src.path))
       await this.reloadWorkdirDir(targetDir)
@@ -2685,7 +2738,7 @@ export default defineComponent({
       let newRel = dstDirRel ? `${dstDirRel}/${base}` : base
       if (newRel === srcRel) return
       if (this.vaultHasChild(vaultId, target, base)) {
-        const d = await this.askDragConflict(base, target.label || '库')
+        const d = await this.askDragConflict(base, target.label || this.$t('editor.vaultFallback'))
         if (d === 'cancel') return
         if (d === 'overwrite') await this.deleteEntryInVault(vaultId, newRel)
         else {
@@ -2694,7 +2747,7 @@ export default defineComponent({
         }
       }
       await this.renameInVaultFor(vaultId, srcRel, newRel)
-      message.success(`已移动到 ${target.label || '库'}（${this.fileName(newRel)}）`)
+      message.success(this.$t('toast.movedToName', { where: target.label || this.$t('editor.vaultFallback'), name: this.fileName(newRel) }))
       if (srcIsDir) this.dropVaultTabsUnder(vaultId, srcRel)
       else this.syncVaultFileTab(vaultId, srcRel, newRel)
       await this.refreshVaultTree(vaultId, v.path)
@@ -2714,7 +2767,7 @@ export default defineComponent({
       const dstDirRel = target.kind === 'vlt-root' ? '' : this.relPathInVault(target.path, B)
       let finalName = base
       if (this.vaultHasChild(B, target, base)) {
-        const d = await this.askDragConflict(base, target.label || '库')
+        const d = await this.askDragConflict(base, target.label || this.$t('editor.vaultFallback'))
         if (d === 'cancel') return
         if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
         else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
@@ -2723,7 +2776,7 @@ export default defineComponent({
       const srcRel = this.relPathInVault(src.path, A)
       await this.copyVaultSubtreeTo(A, srcNode, B, dstBase)
       await this.deleteEntryInVault(A, srcRel)
-      message.success(`已移动到 ${target.label || '库'}（${finalName}）`)
+      message.success(this.$t('toast.movedToName', { where: target.label || this.$t('editor.vaultFallback'), name: finalName }))
       this.dropVaultTabsUnder(A, srcRel)
       const vA = this.store.recent.find((x) => x.id === A)
       if (vA) await this.refreshVaultTree(A, vA.path)
@@ -2741,11 +2794,11 @@ export default defineComponent({
       const dstDirRel = target.kind === 'vlt-root' ? '' : this.relPathInVault(target.path, B)
       const base = src.name
       if (src.kind === 'wd-file') {
-        if (!this.isMarkdownName(base)) return message.warning('只能将 Markdown（.md/.markdown）文件放入加密库')
+        if (!this.isMarkdownName(base)) return message.warning(this.$t('toast.mdOnlyToVault'))
         const content = await tauri.readPlainFile(src.path)
         let finalName = base
         if (this.vaultHasChild(B, target, base)) {
-          const d = await this.askDragConflict(base, target.label || '库')
+          const d = await this.askDragConflict(base, target.label || this.$t('editor.vaultFallback'))
           if (d === 'cancel') return
           if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
           else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
@@ -2757,16 +2810,16 @@ export default defineComponent({
           this.closeWdTab(src.path)
           await this.reloadWorkdirDir(this.parentDir(src.path))
         }
-        message.success(`${isMove ? '已移动到' : '已复制到'} ${target.label || '库'}（${finalName}）`)
+        message.success(isMove ? this.$t('toast.movedToName', { where: target.label || this.$t('editor.vaultFallback'), name: finalName }) : this.$t('toast.copiedToName', { where: target.label || this.$t('editor.vaultFallback'), name: finalName }))
         await this.refreshVaultTree(B, vB.path)
         return
       }
       // 文件夹：仅收集 Markdown，保留目录结构落到目标下的同名文件夹
       const { items, skipped } = await this.collectWdMarkdownFiles(src.path)
-      if (!items.length) return message.warning('该文件夹内没有可导入的 Markdown 文件')
+      if (!items.length) return message.warning(this.$t('toast.noMdInFolder'))
       let finalName = base
       if (this.vaultHasChild(B, target, base)) {
-        const d = await this.askDragConflict(base, target.label || '库')
+        const d = await this.askDragConflict(base, target.label || this.$t('editor.vaultFallback'))
         if (d === 'cancel') return
         if (d === 'overwrite') await this.deleteEntryInVault(B, dstDirRel ? `${dstDirRel}/${base}` : base)
         else finalName = this.makeUniqueName(base, (x) => this.vaultHasChild(B, target, x))
@@ -2787,7 +2840,11 @@ export default defineComponent({
         await this.reloadWorkdirDir(this.parentDir(src.path))
       }
       message.success(
-        `${isMove ? '已移动到' : '已复制到'} ${target.label || '库'}（导入 ${items.length} 个${fail ? `，失败 ${fail}` : ''}${skipped ? `，跳过非 Markdown ${skipped}` : ''}）`,
+        this.$t('toast.folderSummary', {
+          verb: isMove ? this.$t('toast.verbMoved') : this.$t('toast.verbCopied'),
+          where: target.label || this.$t('editor.vaultFallback'),
+          detail: this.$t('toast.importDetail', { n: items.length }) + (fail ? this.$t('toast.failFrag', { n: fail }) : '') + (skipped ? this.$t('toast.skipNonMdFrag', { n: skipped }) : ''),
+        }),
       )
       await this.refreshVaultTree(B, vB.path)
     },
@@ -2807,7 +2864,7 @@ export default defineComponent({
         const content = await this.readVaultEntryContent(A, srcRel)
         let dest = this.joinPath(targetDir, base)
         if (await tauri.pathExists(dest)) {
-          const d = await this.askDragConflict(base, target.label || '工作目录')
+          const d = await this.askDragConflict(base, target.label || this.$t('sidebar.workdir'))
           if (d === 'cancel') return
           if (d === 'overwrite') await tauri.deletePath(dest)
           else dest = this.joinPath(targetDir, await this.uniqueWdName(targetDir, base))
@@ -2818,7 +2875,7 @@ export default defineComponent({
           this.dropVaultTabsUnder(A, srcRel)
           await this.refreshVaultTree(A, vA.path)
         }
-        message.success(`${isMove ? '已移动到' : '已复制到'} ${target.label || '工作目录'}（${this.fileName(dest)}）`)
+        message.success(isMove ? this.$t('toast.movedToName', { where: target.label || this.$t('sidebar.workdir'), name: this.fileName(dest) }) : this.$t('toast.copiedToName', { where: target.label || this.$t('sidebar.workdir'), name: this.fileName(dest) }))
         await this.reloadWorkdirDir(targetDir)
         return
       }
@@ -2827,10 +2884,10 @@ export default defineComponent({
       if (!srcNode) return
       const srcRel = this.relPathInVault(src.path, A)
       const items = this.collectVaultFilesUnder(srcNode, A)
-      if (!items.length) return message.warning('该文件夹内没有可导出的文件')
+      if (!items.length) return message.warning(this.$t('toast.noExportInFolder'))
       let finalName = base
       if (await tauri.pathExists(this.joinPath(targetDir, base))) {
-        const d = await this.askDragConflict(base, target.label || '工作目录')
+        const d = await this.askDragConflict(base, target.label || this.$t('sidebar.workdir'))
         if (d === 'cancel') return
         if (d === 'overwrite') await tauri.deletePath(this.joinPath(targetDir, base))
         else finalName = await this.uniqueWdName(targetDir, base)
@@ -2851,7 +2908,11 @@ export default defineComponent({
         await this.refreshVaultTree(A, vA.path)
       }
       message.success(
-        `${isMove ? '已移动到' : '已复制到'} ${target.label || '工作目录'}（导出 ${items.length} 个${fail ? `，失败 ${fail}` : ''}）`,
+        this.$t('toast.folderSummary', {
+          verb: isMove ? this.$t('toast.verbMoved') : this.$t('toast.verbCopied'),
+          where: target.label || this.$t('sidebar.workdir'),
+          detail: this.$t('toast.exportDetail', { n: items.length }) + (fail ? this.$t('toast.failFrag', { n: fail }) : ''),
+        }),
       )
       await this.reloadWorkdirDir(targetDir)
     },
@@ -3023,8 +3084,8 @@ export default defineComponent({
     async applySetDefault() {
       try {
         const r = await tauri.trySetDefaultFileHandler()
-        if (r === 'set') message.success('已将 MarkLock 设为 .md / .mdl / .mdlb 的默认打开程序')
-        else message.warning('自动设置未成功。请右键文件 →「打开方式」→ 选择 MarkLock 并勾选「始终使用此应用」（macOS：显示简介 → 打开方式 → 全部更改…）')
+        if (r === 'set') message.success(this.$t('settings.toast.setDefaultSuccess'))
+        else message.warning(this.$t('settings.toast.setDefaultManual'))
       } catch (e) {
         message.error(String(e))
       }
@@ -3044,7 +3105,7 @@ export default defineComponent({
     clearRecent() {
       this.store.clearRecentFiles()
       this.store.clearRecentVaults()
-      message.success('已清空最近打开（收藏已保留）')
+      message.success(this.$t('toast.recentCleared'))
     },
 
     // ---------- 全局搜索（已解锁库 + 工作目录明文文件） ----------
@@ -3153,7 +3214,7 @@ export default defineComponent({
         const root = this.normPath(this.workdirRoot)
         const p = this.normPath(f.path)
         if (root && p.startsWith(root + '/')) {
-          return { vault_id: this.workdirRoot, vault_name: '工作目录', rel_path: p.slice(root.length + 1) }
+          return { vault_id: this.workdirRoot, vault_name: this.$t('sidebar.workdir'), rel_path: p.slice(root.length + 1) }
         }
       }
       return {
@@ -3164,9 +3225,9 @@ export default defineComponent({
     },
     /** 页签所属库显示名。 */
     tabVaultName(vaultId: string): string {
-      if (!vaultId) return '打开的文件'
+      if (!vaultId) return this.$t('sidebar.openFiles')
       const v = this.store.recent.find((x) => x.id === vaultId)
-      return v ? v.name : '打开的文件'
+      return v ? v.name : this.$t('sidebar.openFiles')
     },
     /** 页签文件名命中结果（snippet 用展示路径，高亮自然落在文件名上）。 */
     tabNameHit(f: { vaultId: string; name: string; path: string; relPath?: string; encrypted: boolean }): tauri.SearchHit {
@@ -3541,7 +3602,7 @@ export default defineComponent({
         await this.store.saveFile(f.path, f.content)
         // 把自己的写入计入基线，免得下一轮把刚保存的文件当成被外部改动重读一遍
         externalChanges.sync([this.watchTargetOf(f)])
-        message.success(f.encrypted ? '已加密保存' : '已保存')
+        message.success(f.encrypted ? this.$t('toast.savedEnc') : this.$t('toast.saved'))
       } catch (e) {
         message.error(String(e))
       }
@@ -3577,7 +3638,7 @@ export default defineComponent({
           externalChanges.sync([this.watchTargetOf(f)])
         } catch (e) {
           // 静默保存失败不打扰用户；仅当前页签提醒（非当前页签留 dirty 标记下轮重试）
-          if (f.path === this.activePath) message.warning('自动保存失败：' + String(e))
+          if (f.path === this.activePath) message.warning(this.$t('toast.autoSaveFailedPrefix') + String(e))
         }
       }
     },
@@ -3641,11 +3702,11 @@ export default defineComponent({
         }
         if (f.dirty) {
           f.external = 'modified'
-          message.warning(`「${this.fileDisplayName(f)}」在外部被修改，但页签有未保存内容；可在页签右键选「重新加载」取磁盘版本`, 6)
+          message.warning(this.$t('toast.externalModifiedDirty', { name: this.fileDisplayName(f) }), 6)
         } else {
           f.content = disk
           f.external = ''
-          message.info(`「${this.fileDisplayName(f)}」已被外部修改，已重新加载最新内容`)
+          message.info(this.$t('toast.externalReloaded', { name: this.fileDisplayName(f) }))
         }
       }
     },
@@ -3656,7 +3717,7 @@ export default defineComponent({
         if (!hit.has(this.watchTargetOf(f))) continue
         if (f.external === 'missing') continue
         f.external = 'missing'
-        message.error(`「${this.fileDisplayName(f)}」在磁盘上已被删除或移动，页签内容已保留（保存会重新写入）`, 6)
+        message.error(this.$t('toast.externalMissing', { name: this.fileDisplayName(f) }), 6)
       }
     },
     /** 主动重新加载磁盘版本：页签有未保存修改时先确认（此操作会丢弃内存修改）。 */
@@ -3675,7 +3736,7 @@ export default defineComponent({
       this.reloadTarget = ''
       try {
         const f = await this.store.reloadFromDisk(path)
-        message.success(`「${this.fileDisplayName(f)}」已重新加载`)
+        message.success(this.$t('toast.reloaded', { name: this.fileDisplayName(f) }))
       } catch (e) {
         message.error(String(e))
       }
@@ -3685,12 +3746,12 @@ export default defineComponent({
     async unlockActiveFile() {
       const f = this.activeFile
       if (!f || !f.locked) return
-      if (!this.unlockPwd) return message.warning('请输入密码')
+      if (!this.unlockPwd) return message.warning(this.$t('toast.enterPwd'))
       this.unlocking = true
       try {
         await this.store.unlockFile(f.path, this.unlockPwd)
         this.unlockPwd = ''
-        message.success('已解锁')
+        message.success(this.$t('toast.unlocked'))
       } catch (e) {
         message.error(String(e))
       } finally {
@@ -3702,13 +3763,13 @@ export default defineComponent({
     async unlockActiveVault() {
       const f = this.activeFile
       if (!f) return
-      if (!this.vaultUnlockPwd) return message.warning('请输入主密码')
+      if (!this.vaultUnlockPwd) return message.warning(this.$t('toast.enterMasterPwd'))
       this.vaultUnlocking = true
       this.vaultUnlockError = ''
       try {
         await this.store.unlockVault(f.vaultId, this.vaultUnlockPwd)
         this.vaultUnlockPwd = ''
-        message.success('已解锁')
+        message.success(this.$t('toast.unlocked'))
         // 就地解锁不会经过 EditorView mounted 的统一刷新，这里补加载库树并只展开根层
         await this.openVaultToRoot(f.vaultId)
       } catch (e) {
@@ -3725,24 +3786,24 @@ export default defineComponent({
       const isFile = !v ? (target.path || '').endsWith('.mdl') : !(v.isDir || v.isFileVault)
       const isFileVault = v ? !!v.isFileVault : !!target.isFileVault
       // 库形态需先解锁；单文件 .mdl 改密只需旧密码，不依赖会话
-      if (v && !isFile && !v.unlocked) return message.warning('请先解锁该库再修改密码')
+      if (v && !isFile && !v.unlocked) return message.warning(this.$t('toast.unlockVaultBeforeChangePwd'))
       const title = isFile
-        ? `${v?.name || target.name || (this.fileName(target.path || '') || '文件')}（加密文件）`
-        : `${v?.name || target.name || this.fileName(target.id) || '库'}`
+        ? `${v?.name || target.name || (this.fileName(target.path || '') || this.$t('editor.fileFallback'))}${this.$t('editor.encFileTag')}`
+        : `${v?.name || target.name || this.fileName(target.id) || this.$t('editor.vaultFallback')}`
       this.changePwdTarget = { id: target.id, path: v?.path || target.path || target.id, title, isFileVault, isPlainMdl: isFile }
       this.changePwdForm = { current: '', next: '', confirm: '' }
       this.showChangePwd = true
     },
     async submitChangePwd() {
       const { current, next, confirm } = this.changePwdForm
-      if (!current) return message.warning('请输入当前密码')
-      if (next.length < 1) return message.warning('请设置新密码（至少 1 位）')
-      if (next !== confirm) return message.warning('两次密码不一致')
+      if (!current) return message.warning(this.$t('toast.enterCurrentPwd'))
+      if (next.length < 1) return message.warning(this.$t('toast.setNewPwdMin'))
+      if (next !== confirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
       const t = this.changePwdTarget
       this.changingPwd = true
       try {
         await this.store.changeVaultPassword(t.id, t.path, t.isFileVault, current, next)
-        message.success('密码已修改')
+        message.success(this.$t('toast.pwdModified'))
         this.showChangePwd = false
         const v = this.store.recent.find((x) => x.id === t.id)
         if (v) await this.refreshVaultTree(v.id, v.path)
@@ -3778,26 +3839,26 @@ export default defineComponent({
     async doCreateVault(): Promise<string | null> {
       const { name, path, pwd, confirm } = this.createVaultForm
       if (!path) {
-        message.warning('请选择保存位置')
+        message.warning(this.$t('dialog.toast.pickSaveLocation'))
         return null
       }
       if (pwd.length < 1) {
-        message.warning('请设置密码（至少 1 位）')
+        message.warning(this.$t('dialog.toast.setPwdMin'))
         return null
       }
       if (pwd !== confirm) {
-        message.warning('两次密码不一致')
+        message.warning(this.$t('dialog.toast.pwdMismatch'))
         return null
       }
       this.creatingVault = true
       try {
         const filePath = path.endsWith('.mdlb') ? path : `${path}.mdlb`
-        const vname = name.trim() || (this.fileName(filePath) || '').replace(/\.mdlb$/, '') || '未命名'
+        const vname = name.trim() || (this.fileName(filePath) || '').replace(/\.mdlb$/, '') || this.$t('common.untitled')
         await tauri.createFileVault(filePath, pwd, undefined)
         this.store.registerVault({ id: filePath, name: vname, path: filePath, isDir: false, isFileVault: true })
         await this.store.unlockVault(filePath, pwd)
         await this.refreshVaultTree(filePath, filePath)
-        message.success('单文件库已创建并解锁')
+        message.success(this.$t('dialog.toast.vaultCreated'))
         return filePath
       } catch (e) {
         message.error(String(e))
@@ -3838,15 +3899,15 @@ export default defineComponent({
     },
     /** 提交批量加密：非空/密码一致校验 → invoke → 展示结果；完成后若工作目录已挂且相关则刷新。 */
     async submitBatchEncrypt() {
-      if (!this.bePaths.length) return message.warning('请先添加需加密的文件')
-      if (this.bePassword.length < 1) return message.warning('请设置密码（至少 1 位）')
-      if (this.bePassword !== this.beConfirm) return message.warning('两次密码不一致')
+      if (!this.bePaths.length) return message.warning(this.$t('toast.addFilesFirst'))
+      if (this.bePassword.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+      if (this.bePassword !== this.beConfirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
       this.beBusy = true
       this.beResult = null
       try {
         const r = await tauri.batchEncrypt(this.bePaths, this.bePassword, this.beMoveOriginals)
         this.beResult = r
-        message.success(`加密完成：成功 ${r.encrypted.length} / 失败 ${r.failed.length}`)
+        message.success(this.$t('toast.batchEncryptDone', { ok: r.encrypted.length, fail: r.failed.length }))
         // 相关文件若在工作目录树下，刷新展示
         if (this.workdirRoot) {
           const hit = this.bePaths.some((p) => {
@@ -3890,25 +3951,25 @@ export default defineComponent({
     },
     /** 提交导入：先确认目标（必要时新建+解锁），再一次性写盘，完成后刷新目标库树。 */
     async submitImportDir() {
-      if (!this.idSrcDir) return message.warning('请先选择要导入的目录')
+      if (!this.idSrcDir) return message.warning(this.$t('toast.pickImportDir'))
       let vaultId = ''
       let vaultPath = ''
       if (this.idTargetKind === 'existing') {
-        if (!this.idVaultId) return message.warning('请选择一个已解锁的库')
+        if (!this.idVaultId) return message.warning(this.$t('toast.pickUnlockedVault'))
         const v = this.store.recent.find((x) => x.id === this.idVaultId)
-        if (!v) return message.warning('未找到目标库')
-        if (!v.unlocked) return message.warning('目标库尚未解锁，请先解锁后再导入')
+        if (!v) return message.warning(this.$t('toast.vaultNotFound'))
+        if (!v.unlocked) return message.warning(this.$t('toast.targetVaultLocked'))
         vaultId = v.id
         vaultPath = v.path
       } else {
         const { name, path, pwd, confirm } = this.idCreateForm
-        if (!path) return message.warning('请为新库选择保存位置')
-        if (pwd.length < 1) return message.warning('请设置密码（至少 1 位）')
-        if (pwd !== confirm) return message.warning('两次密码不一致')
+        if (!path) return message.warning(this.$t('toast.pickNewVaultPath'))
+        if (pwd.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+        if (pwd !== confirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
         this.idBusy = true
         try {
           const filePath = path.endsWith('.mdlb') ? path : `${path}.mdlb`
-          const vname = name.trim() || (this.fileName(filePath) || '').replace(/\.mdlb$/, '') || '未命名'
+          const vname = name.trim() || (this.fileName(filePath) || '').replace(/\.mdlb$/, '') || this.$t('common.untitled')
           await tauri.createFileVault(filePath, pwd, undefined)
           this.store.registerVault({ id: filePath, name: vname, path: filePath, isDir: false, isFileVault: true })
           await this.store.unlockVault(filePath, pwd)
@@ -3925,7 +3986,7 @@ export default defineComponent({
       try {
         const r = await tauri.importDirToVault(vaultId, this.idSrcDir)
         this.idResult = r
-        message.success(`导入完成：成功 ${r.imported.length} / 跳过 ${r.skipped.length} / 失败 ${r.failed.length}`)
+        message.success(this.$t('toast.importDone', { ok: r.imported.length, skip: r.skipped.length, fail: r.failed.length }))
         try { await this.refreshVaultTree(vaultId, vaultPath) } catch { /* 刷新失败不阻断 */ }
       } catch (e) {
         message.error(String(e))
@@ -3958,7 +4019,7 @@ export default defineComponent({
       this.copySourcePath = f.path
       this.copyVaultId = this.store.unlockedVaults.find((x) => x.isDir || x.isFileVault)?.id || ''
       this.copyDir = ''
-      this.copyName = (f.name || '未命名').replace(/\.md$|\.mdl$|\.markdown$/, '')
+      this.copyName = (f.name || this.$t('common.untitled')).replace(/\.md$|\.mdl$|\.markdown$/, '')
       this.createVaultForm = { name: '', path: '', pwd: '', confirm: '' }
       this.showCopyToVault = true
     },
@@ -3966,7 +4027,7 @@ export default defineComponent({
     async submitCopyToVault() {
       const f = this.openFiles.find((x) => x.path === this.copySourcePath) || this.activeFile
       if (!f) return
-      if (!this.copyVaultId) return message.warning('请选择一个已解锁的库')
+      if (!this.copyVaultId) return message.warning(this.$t('toast.pickUnlockedVault'))
       // 内联「新建库」：点复制时先创建库，再复制到库根
       let vaultId = this.copyVaultId
       if (vaultId === '__new__') {
@@ -3976,7 +4037,7 @@ export default defineComponent({
         this.copyVaultId = created
         this.copyDir = ''
       }
-      const name = this.copyName.trim() || '未命名'
+      const name = this.copyName.trim() || this.$t('common.untitled')
       const fileName = name.endsWith('.md') ? name : name + '.md'
       const relPath = this.copyDir ? `${this.copyDir}/${fileName}` : fileName
       this.copying = true
@@ -3987,7 +4048,7 @@ export default defineComponent({
         } else {
           await tauri.createInVault(vaultId, relPath, f.content)
         }
-        message.success('已复制到加密库')
+        message.success(this.$t('toast.copiedToVault'))
         this.showCopyToVault = false
         if (v) await this.refreshVaultTree(v.id, v.path)
       } catch (e) {
@@ -4005,7 +4066,7 @@ export default defineComponent({
       this.openNewDraft()
     },
     openNewDraft() {
-      this.store.openNewDraft('未命名')
+      this.store.openNewDraft(this.$t('common.untitled'))
       // 预览态下源码面板已收起，切到分屏确保编辑器可见
       if (this.currentMode === 'preview') this.setMode('split')
       // 新页签首次渲染才创建实例，等挂载完成后聚焦，可直接输入
@@ -4016,7 +4077,7 @@ export default defineComponent({
     openSaveAs() {
       this.saveAsConvert = false
       this.saveAsSourcePath = ''
-      this.saveAsName = (this.activeFile?.name || '未命名').replace(/\.mdl$/, '')
+      this.saveAsName = (this.activeFile?.name || this.$t('common.untitled')).replace(/\.mdl$/, '')
       this.saveAsPwd = ''
       this.saveAsConfirm = ''
       this.saveAsVaultId = this.store.unlockedVaults.find((x) => x.isDir || x.isFileVault)?.id || ''
@@ -4032,7 +4093,7 @@ export default defineComponent({
     /** 工作目录根 + 当前草稿名拼出默认保存路径（未挂载工作目录则返回空；joinPath 兼容 Windows 反斜杠）。 */
     defaultSavePath(mode: 'file' | 'plain'): string {
       if (!this.workdirRoot) return ''
-      const name = this.saveAsName.trim() || '未命名'
+      const name = this.saveAsName.trim() || this.$t('common.untitled')
       const ext = mode === 'plain' ? 'md' : 'mdl'
       return this.joinPath(this.workdirRoot, name + '.' + ext)
     },
@@ -4046,12 +4107,12 @@ export default defineComponent({
       if (!this.saveAsPath) return
       const base = this.fileName(this.saveAsPath)
       const ext = (base.match(/\.[^.]+$/) || [''])[0]
-      const name = (this.saveAsName.trim() || '未命名').replace(/\.[^.]+$/, '')
+      const name = (this.saveAsName.trim() || this.$t('common.untitled')).replace(/\.[^.]+$/, '')
       const dir = /[\\/]/.test(this.saveAsPath) ? this.parentDir(this.saveAsPath) : ''
       this.saveAsPath = dir ? this.joinPath(dir, name + ext) : name + ext
     },
     async browseSavePath() {
-      const name = this.saveAsName.trim() || '未命名'
+      const name = this.saveAsName.trim() || this.$t('common.untitled')
       if (this.saveAsMode === 'plain') {
         const path = await tauri.saveFileDialog(name + '.md', 'plain')
         if (path) this.saveAsPath = path
@@ -4070,7 +4131,7 @@ export default defineComponent({
       } else if (!f.isNew) {
         return
       }
-      const name = (this.saveAsName.trim() || '未命名')
+      const name = (this.saveAsName.trim() || this.$t('common.untitled'))
       try {
         if (this.saveAsMode === 'plain') {
           // 普通明文 md：选路径后直接落盘，无需密码
@@ -4086,9 +4147,9 @@ export default defineComponent({
             kind: 'plain',
             filePath,
           })
-          message.success('已保存为普通 Markdown 文件')
+          message.success(this.$t('toast.savedAsPlain'))
         } else if (this.saveAsMode === 'vault') {
-          if (!this.saveAsVaultId) return message.warning('请选择一个已解锁的库')
+          if (!this.saveAsVaultId) return message.warning(this.$t('toast.pickUnlockedVault'))
           // 内联「新建库」：点保存时先创建库，再存到库根
           let vaultId = this.saveAsVaultId
           if (vaultId === '__new__') {
@@ -4099,7 +4160,7 @@ export default defineComponent({
             this.saveAsDir = ''
           }
           const v = this.store.unlockedVaults.find((x) => x.id === vaultId)
-          if (!v) return message.warning('该库未解锁')
+          if (!v) return message.warning(this.$t('toast.vaultNotUnlocked'))
           const relPath = this.saveAsDir ? `${this.saveAsDir}/${name}.md` : `${name}.md`
           this.saving = true
           await this.store.saveDraft(f.path, f.content, {
@@ -4107,11 +4168,11 @@ export default defineComponent({
             vaultId,
             relPath,
           })
-          message.success('已存入加密库')
+          message.success(this.$t('toast.savedToVault'))
         } else {
           const pwd = this.saveAsPwd
-          if (pwd.length < 1) return message.warning('请设置密码（至少 1 位）')
-          if (pwd !== this.saveAsConfirm) return message.warning('两次密码不一致')
+          if (pwd.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+          if (pwd !== this.saveAsConfirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
           // 选择保存位置（先同步文件名，确保保存出的文件名与输入一致）
           this.syncSaveAsPathName()
           let filePath = this.saveAsPath
@@ -4129,12 +4190,12 @@ export default defineComponent({
             password: pwd,
           })
           if (this.saveAsConvert) {
-            message.success('已转为加密文件')
+            message.success(this.$t('toast.convertedToEnc'))
             this.showSaveAs = false
             if (this.workdirRoot) await this.refreshWorkdir()
             await this.handleConvertedOriginal(originalPath)
           } else {
-            message.success('已保存为加密文件')
+            message.success(this.$t('toast.savedAsEnc'))
           }
         }
         this.showSaveAs = false
@@ -4161,7 +4222,7 @@ export default defineComponent({
       this.saveAsMode = 'file'
       // 默认落在原明文文件所在目录（而非工作目录根）
       const srcDir = this.parentDir(p)
-      this.saveAsPath = srcDir ? this.joinPath(srcDir, (this.saveAsName.trim() || '未命名') + '.mdl') : ''
+      this.saveAsPath = srcDir ? this.joinPath(srcDir, (this.saveAsName.trim() || this.$t('common.untitled')) + '.mdl') : ''
       this.createVaultForm = { name: '', path: '', pwd: '', confirm: '' }
       this.showSaveAs = true
     },
@@ -4190,10 +4251,10 @@ export default defineComponent({
     async deleteConvertedOriginal(path: string) {
       try {
         await tauri.deletePath(path)
-        message.success('已将原明文文件移入回收站')
+        message.success(this.$t('toast.origMovedToTrash'))
         if (this.workdirRoot) await this.refreshWorkdir()
       } catch (e) {
-        message.error(`删除原文件失败：${String(e)}`)
+        message.error(this.$t('toast.deleteOrigFailed', { err: String(e) }))
       }
     },
 
@@ -4243,7 +4304,7 @@ export default defineComponent({
         else await this.wdCreateVaultFile(name)
         return
       }
-      if (!this.newFileVaultId) return message.warning('请先解锁一个库')
+      if (!this.newFileVaultId) return message.warning(this.$t('dialog.toast.unlockVaultFirst'))
       const v = this.store.recent.find((x) => x.id === this.newFileVaultId)
       const fileName = name.endsWith('.md') ? name : name + '.md'
       const relPath = this.newFileDir ? `${this.newFileDir}/${fileName}` : fileName
@@ -4253,7 +4314,7 @@ export default defineComponent({
         } else {
           await tauri.createInVault(this.newFileVaultId, relPath, '# ' + fileName.replace(/\.md$/, ''))
         }
-        message.success('已创建')
+        message.success(this.$t('toast.created'))
         this.showNewFile = false
         this.newFileName = ''
         if (v) await this.refreshVaultTree(v.id, v.path)
@@ -4267,7 +4328,7 @@ export default defineComponent({
       const abs = this.joinPath(this.wdDir, fileName)
       try {
         await tauri.createPlainFile(abs, `# ${fileName.replace(/\.[^.]+$/, '')}\n`)
-        message.success('已创建')
+        message.success(this.$t('toast.created'))
         this.showNewFile = false
         this.newFileName = ''
         await this.reloadWorkdirDir(this.wdDir)
@@ -4279,13 +4340,13 @@ export default defineComponent({
     /** 工作目录新建独立加密文件 .mdl：自带独立密码，创建后刷新父目录并打开为锁定态页签（输入密码即解锁）。 */
     async wdCreateEncrypted(name: string) {
       const pwd = this.newFilePwd
-      if (pwd.length < 1) return message.warning('请设置密码（至少 1 位）')
-      if (pwd !== this.newFileConfirm) return message.warning('两次密码不一致')
+      if (pwd.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+      if (pwd !== this.newFileConfirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
       const fileName = name.endsWith('.mdl') ? name : name + '.mdl'
       const abs = this.joinPath(this.wdDir, fileName)
       try {
         await tauri.createFile(abs, pwd, `# ${fileName.replace(/\.[^.]+$/, '')}\n`)
-        message.success('已创建加密文件，输入密码即可解锁')
+        message.success(this.$t('toast.encFileCreated'))
         this.showNewFile = false
         this.newFileName = ''
         this.newFilePwd = ''
@@ -4315,7 +4376,7 @@ export default defineComponent({
         const abs = this.joinPath(this.wdDir, name)
         try {
           await tauri.createPlainDir(abs)
-          message.success('已创建文件夹')
+          message.success(this.$t('toast.folderCreated'))
           this.showNewFolder = false
           this.newFolderName = ''
           await this.reloadWorkdirDir(this.wdDir)
@@ -4324,7 +4385,7 @@ export default defineComponent({
         }
         return
       }
-      if (!this.newFolderVaultId) return message.warning('请先解锁一个库')
+      if (!this.newFolderVaultId) return message.warning(this.$t('dialog.toast.unlockVaultFirst'))
       const v = this.store.recent.find((x) => x.id === this.newFolderVaultId)
       const relPath = this.newFolderDir ? `${this.newFolderDir}/${name}` : name
       try {
@@ -4333,7 +4394,7 @@ export default defineComponent({
         } else {
           await tauri.createFolderInVault(this.newFolderVaultId, relPath)
         }
-        message.success('已创建文件夹')
+        message.success(this.$t('toast.folderCreated'))
         this.showNewFolder = false
         this.newFolderName = ''
         if (v) await this.refreshVaultTree(v.id, v.path)
@@ -4357,7 +4418,7 @@ export default defineComponent({
       if (this.wdOp) {
         // 工作目录明文重命名/移动：在同一父目录下按输入名（可含子路径）拼接目标
         const newName = this.renameName.trim().replace(/^\/+/, '')
-        if (!newName) return message.warning('请输入新名称')
+        if (!newName) return message.warning(this.$t('toast.enterNewName'))
         const parent = this.parentDir(this.wdPath)
         const target = this.joinPath(parent, newName)
         if (target === this.wdPath) {
@@ -4367,7 +4428,7 @@ export default defineComponent({
         this.renaming = true
         try {
           await tauri.renamePath(this.wdPath, target)
-          message.success('已重命名')
+          message.success(this.$t('toast.renamed'))
           this.showRename = false
           // 若被重命名的文件正打开，同步其页签 path/name
           const src = this.wdPath
@@ -4388,7 +4449,7 @@ export default defineComponent({
         return
       }
       const newRel = this.renameName.trim().replace(/^\/+/, '')
-      if (!newRel) return message.warning('请输入新名称')
+      if (!newRel) return message.warning(this.$t('toast.enterNewName'))
       const oldRel = this.relPathInVault(this.renameNodePath, this.renameVaultId)
       if (newRel === oldRel) {
         this.showRename = false
@@ -4402,7 +4463,7 @@ export default defineComponent({
         } else {
           await tauri.renameInVault(this.renameVaultId, oldRel, newRel)
         }
-        message.success('已重命名')
+        message.success(this.$t('toast.renamed'))
         this.showRename = false
         // 若被重命名的文件当前已打开，同步更新其 path/name
         this.syncOpenedFileAfterRename(oldRel, newRel)
@@ -4446,7 +4507,7 @@ export default defineComponent({
         const target = this.wdPath
         try {
           await tauri.deletePath(target)
-          message.success('已移入回收站')
+          message.success(this.$t('toast.movedToTrash'))
           this.showDelete = false
           this.store.closeFile(target)
           this.store.dropClosedTab(target)
@@ -4467,7 +4528,7 @@ export default defineComponent({
         } else {
           await tauri.deleteInVault(this.deleteVaultId, rel)
         }
-        message.success('已删除')
+        message.success(this.$t('toast.deleted'))
         this.showDelete = false
         // 若删除的是已打开的文件，关闭其页签
         const root = v?.path || ''
@@ -4485,7 +4546,7 @@ export default defineComponent({
     // ---------- 锁定 ----------
     async lockVault(id: string) {
       await this.store.lockVault(id)
-      message.info('已锁定')
+      message.info(this.$t('toast.locked'))
     },
     /**
      * 加密库行点击：已解锁则展开/折叠库内树；锁定态则走解锁流程（跳解锁页输密码），
@@ -4510,16 +4571,16 @@ export default defineComponent({
       }
       this.store.removeVault(id)
       delete this.vaultTrees[id]
-      message.info('已关闭库（磁盘文件未删除）')
+      message.info(this.$t('toast.vaultClosed'))
     },
     async lockAll() {
       await this.store.lockAll()
-      message.info('已全部锁定')
+      message.info(this.$t('toast.allLocked'))
     },
     async reapExpired() {
       const ids = await this.store.reapExpired()
       if (ids.length) {
-        message.warning(`${ids.length} 个库已自动锁定`)
+        message.warning(this.$t('toast.vaultsAutoLocked', { count: ids.length }))
         // 刷新树
         ids.forEach((id) => {
           const v = this.store.recent.find((x) => x.id === id)
@@ -4531,20 +4592,20 @@ export default defineComponent({
     openAutoLockMenu(e: MouseEvent) {
       const cur = this.store.settings.autoLockSecs
       const items = [
-        { label: '1 分钟', v: 60 },
-        { label: '5 分钟', v: 300 },
-        { label: '15 分钟', v: 900 },
-        { label: '30 分钟', v: 1800 },
-        { label: '不自动锁定', v: 0 },
+        { label: this.$t('settings.options.min1'), v: 60 },
+        { label: this.$t('settings.options.min5'), v: 300 },
+        { label: this.$t('settings.options.min15'), v: 900 },
+        { label: this.$t('settings.options.min30'), v: 1800 },
+        { label: this.$t('settings.options.neverLock'), v: 0 },
       ].map((o) => ({
         kind: 'item',
         label: o.label,
         checked: cur === o.v,
-        hint: o.v === DEFAULT_SETTINGS.autoLockSecs ? '默认' : '',
+        hint: o.v === DEFAULT_SETTINGS.autoLockSecs ? this.$t('editor.default') : '',
         run: () => this.store.updateSettings({ autoLockSecs: o.v }),
       }))
       // 垂直抬到状态栏上方、水平与本项左对齐（具体夹取规则见 showCtxMenu 的 above 分支）
-      this.showCtxMenu(e, items, e.currentTarget as HTMLElement, '自动锁定间隔')
+      this.showCtxMenu(e, items, e.currentTarget as HTMLElement, this.$t('editor.autoLockInterval'))
     },
     /** 状态栏「字号」点击弹字号菜单；档位与设置页「编辑器字体大小」一致（10–28，2px 步进，对应 ⌘+/⌘-）。 */
     openFontSizeMenu(e: MouseEvent) {
@@ -4553,11 +4614,11 @@ export default defineComponent({
         kind: 'item',
         label: `${v} px`,
         checked: cur === v,
-        hint: v === DEFAULT_SETTINGS.editorFontSize ? '默认' : '',
+        hint: v === DEFAULT_SETTINGS.editorFontSize ? this.$t('editor.default') : '',
         run: () => this.store.updateSettings({ editorFontSize: v }),
       }))
       // 垂直抬到状态栏上方、水平与本项左对齐（与自动锁定菜单同一套定位规则）
-      this.showCtxMenu(e, items, e.currentTarget as HTMLElement, '字体大小')
+      this.showCtxMenu(e, items, e.currentTarget as HTMLElement, this.$t('editor.fontSizeTitle'))
     },
 
     // ---------- 打开库（从最近/工作目录点击） ----------
@@ -4574,7 +4635,7 @@ export default defineComponent({
         // 收藏/最近是快照，文件可能已被移动或删除：打开前先校验，失效则清理登记
         if (!(await tauri.pathExists(v.path))) {
           this.store.removeVault(v.id)
-          message.warning(`文件不存在（可能已被移动或删除），已从列表移除：${v.name}`)
+          message.warning(this.$t('toast.fileMissingRemovedList', { name: v.name }))
           return
         }
         this.store.openEncryptedFile(v.path, v.name)
@@ -4621,7 +4682,7 @@ export default defineComponent({
           const wasFav = this.store.isFavoriteFile(f.path)
           if (wasFav) this.store.toggleFavoriteFile(f.path)
           this.store.forgetFile(f.path)
-          message.warning(`文件不存在（可能已被移动或删除），已从${wasFav ? '收藏与最近' : '最近'}中移除：${f.name}`)
+          message.warning(this.$t('toast.fileMissingRemoved', { scope: wasFav ? this.$t('editor.scopeFavRecent') : this.$t('editor.scopeRecent'), name: f.name }))
           return
         }
       }
@@ -4777,7 +4838,7 @@ export default defineComponent({
       if (isVault) {
         const v = this.store.recent.find((x) => x.id === target.vault)
         if (!v) return
-        if (!v.unlocked) return message.warning('请先解锁目标加密库，再拖入文件')
+        if (!v.unlocked) return message.warning(this.$t('toast.unlockTargetBeforeDrop'))
         for (const p of paths) {
           try {
             const info = await tauri.inspectPath(p)
@@ -4791,12 +4852,12 @@ export default defineComponent({
       }
       // 工作目录根 / 子目录：文件直接复制；单个目录则询问「复制进来」还是「打开为工作目录」
       const targetDir = target.kind === 'wd-root' ? this.workdirRoot : target.path
-      if (!targetDir) return message.warning('请先设置工作目录')
+      if (!targetDir) return message.warning(this.$t('toast.setWorkdirFirst'))
       if (paths.length === 1) {
         try {
           const info = await tauri.inspectPath(paths[0])
           if (info.is_dir) {
-            this.wdDirDrop = { path: paths[0], targetDir, label: target.label || '工作目录' }
+            this.wdDirDrop = { path: paths[0], targetDir, label: target.label || this.$t('sidebar.workdir') }
             this.showWdDirDropPrompt = true
             return
           }
@@ -4814,7 +4875,7 @@ export default defineComponent({
         }
       }
       if (n) {
-        message.success(`已复制 ${n} 项到 ${target.label || '工作目录'}`)
+        message.success(this.$t('toast.copiedItemsTo', { n, where: target.label || this.$t('sidebar.workdir') }))
         await this.reloadWorkdirDir(targetDir)
       }
     },
@@ -4826,12 +4887,12 @@ export default defineComponent({
       if (!ctx) return
       if (choice === 'open') {
         await this.setWorkdir(ctx.path)
-        message.success(`已打开为工作目录：${this.fileName(ctx.path)}`)
+        message.success(this.$t('toast.openedAsWorkdir', { name: this.fileName(ctx.path) }))
         return
       }
       try {
         await tauri.copyAsset(ctx.targetDir, ctx.path)
-        message.success(`已复制「${this.fileName(ctx.path)}」到 ${ctx.label}`)
+        message.success(this.$t('toast.copiedNameTo', { name: this.fileName(ctx.path), where: ctx.label }))
         await this.reloadWorkdirDir(ctx.targetDir)
       } catch (e) {
         message.error(String(e))
@@ -4910,7 +4971,7 @@ export default defineComponent({
         if (!hasAsset) return // 纯文本粘贴：放行给 CodeMirror 正常处理
         e.preventDefault()
         e.stopPropagation()
-        message.info('请先保存文件，再粘贴图片或文件')
+        message.info(this.$t('toast.saveBeforePaste'))
         this.openSaveAs()
         return
       }
@@ -4928,7 +4989,7 @@ export default defineComponent({
             const finalAbs = await tauri.writeAssetBytes(destDir, this.genPastedName(file), dataUrl)
             this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
           }
-          message.success(`已粘贴 ${files.length} 个资源到 ${datDirName}`)
+          message.success(this.$t('toast.pastedAssets', { n: files.length, dir: datDirName }))
           return
         }
         // 有 Files 类型但无对象：macOS 走原生剪贴板取路径兜底
@@ -4939,14 +5000,14 @@ export default defineComponent({
           paths = []
         }
         if (!paths.length) {
-          message.info('剪贴板中的文件暂不可读取，请改用拖入')
+          message.info(this.$t('toast.clipboardUnreadable'))
           return
         }
         for (const p of paths) {
           const finalAbs = await tauri.copyAsset(destDir, p)
           this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
         }
-        message.success(`已粘贴 ${paths.length} 个资源到 ${datDirName}`)
+        message.success(this.$t('toast.pastedAssets', { n: paths.length, dir: datDirName }))
       } catch (err) {
         message.error(String(err))
       }
@@ -4995,7 +5056,7 @@ export default defineComponent({
           }
         }
         message.success(
-          mode === 'copy' ? `已复制 ${list.length} 个资源到 ${datDirName}` : `已链接 ${list.length} 个资源`,
+          mode === 'copy' ? this.$t('toast.copiedAssetsTo', { n: list.length, dir: datDirName }) : this.$t('toast.linkedAssets', { n: list.length }),
         )
         this.showAssetPrompt = false
         this.assetPromptFiles = []
@@ -5040,19 +5101,19 @@ export default defineComponent({
       // 主菜单入口不传路径→当前激活页签；页签右键菜单传入被右键页签的路径（可能非激活）。
       const f = targetPath ? this.openFiles.find((x) => x.path === targetPath) : this.activeFile
       if (!f) {
-        message.warning('请先打开要导出的文件')
+        message.warning(this.$t('toast.openBeforeExport'))
         return
       }
       if (f.locked) {
-        message.warning('文件已锁定，请先解锁再导出')
+        message.warning(this.$t('toast.unlockBeforeExport'))
         return
       }
       if (!f.content) {
-        message.warning('文件内容为空，无内容可导出')
+        message.warning(this.$t('toast.emptyToExport'))
         return
       }
       // 取展示名的扩展名替换为 .html（草稿名无扩展名时直接追加）
-      const base = f.name.replace(/\.[^.]+$/, '') || f.name || '未命名'
+      const base = f.name.replace(/\.[^.]+$/, '') || f.name || this.$t('common.untitled')
       const target = await tauri.saveHtmlDialog(base + '.html')
       if (!target) return
       // 复用预览渲染，但去掉仅在应用内有效的代码块复制按钮（离线 HTML 里无脚本）。
@@ -5073,7 +5134,7 @@ export default defineComponent({
       const html = this.buildStandaloneHtml(f.name, body)
       try {
         await tauri.writePlainFile(target, html)
-        message.success('已导出 HTML：' + target.split(/[\\/]/).pop())
+        message.success(this.$t('toast.exportedHtml', { name: target.split(/[\\/]/).pop() || '' }))
       } catch (e) {
         message.error(String(e))
       }
@@ -5149,7 +5210,7 @@ export default defineComponent({
         if (/^assets?:\/\//i.test(m[1])) refs.add(m[1])
       }
       const exportDir = this.parentDir(target)
-      const exportBase = this.fileName(exportDir) || '导出'
+      const exportBase = this.fileName(exportDir) || this.$t('editor.exportFallback')
       for (const ref of refs) {
         const abs = this.assetUrlToLocalPath(ref)
         if (!abs) continue
@@ -5242,7 +5303,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 .hljs-meta, .hljs-section, .hljs-deletion { color: ${HL.meta}; }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }`
-      const safeTitle = (title || 'MarkLock 导出').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
+      const safeTitle = (title || this.$t('editor.exportTitle')).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
       return `<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -5288,14 +5349,14 @@ ${bodyHtml}
     /** 页签/条目的显示名：库内文件锁定后显示「xx 库文件」，不暴露具体文件名。 */
     fileDisplayName(f: { name: string; vaultId: string; encrypted: boolean }) {
       if (this.isVaultFileLocked(f)) {
-        const vn = this.vaultName(f.vaultId) || '库'
-        return `${vn} 库文件`
+        const vn = this.vaultName(f.vaultId) || this.$t('editor.vaultFallback')
+        return this.$t('editor.vaultFile', { name: vn })
       }
       return f.name
     },
     /** 库显示名（用于「xx 库文件」）。 */
     vaultDisplayName(vaultId: string) {
-      return this.vaultName(vaultId) || '库'
+      return this.vaultName(vaultId) || this.$t('editor.vaultFallback')
     },
     /**
      * 文件条目的 tooltip 文案：库内文件锁定后不暴露真实路径，仅提示「xx 库文件（已锁定）」。
@@ -5303,15 +5364,15 @@ ${bodyHtml}
      */
     fileTip(f: { path: string; name: string; vaultId: string; encrypted: boolean }) {
       if (this.isVaultFileLocked(f)) {
-        const vn = this.vaultName(f.vaultId) || '库'
-        return `${vn} 库文件（已锁定，解锁后可见）`
+        const vn = this.vaultName(f.vaultId) || this.$t('editor.vaultFallback')
+        return this.$t('editor.vaultFileLocked', { name: vn })
       }
       return this.externalTip((f as any).external) + ((f as any).path || f.name)
     },
     /** 外部修改状态的 tooltip 文案（无异常时为空串）。 */
     externalTip(ext?: string): string {
-      if (ext === 'missing') return '⚠ 磁盘上已被删除或移动\n'
-      if (ext === 'modified') return '⚠ 磁盘版本已变（页签有未保存内容），可右键重新加载\n'
+      if (ext === 'missing') return this.$t('editor.extMissingTip')
+      if (ext === 'modified') return this.$t('editor.extModifiedTip')
       return ''
     },
     /** 页签 tooltip 文案：锁定文件同样不暴露真实路径，未锁定显示完整路径。 */
@@ -5322,11 +5383,11 @@ ${bodyHtml}
       if (!ts) return ''
       const diff = Date.now() - ts
       const min = Math.floor(diff / 60000)
-      if (min < 1) return '刚刚'
-      if (min < 60) return `${min}分钟前`
+      if (min < 1) return this.$t('editor.justNow')
+      if (min < 60) return this.$t('editor.minsAgo', { n: min })
       const hr = Math.floor(min / 60)
-      if (hr < 24) return `${hr}小时前`
-      return `${Math.floor(hr / 24)}天前`
+      if (hr < 24) return this.$t('editor.hoursAgo', { n: hr })
+      return this.$t('editor.daysAgo', { n: Math.floor(hr / 24) })
     },
   },
 })
@@ -5339,8 +5400,8 @@ ${bodyHtml}
       <div v-if="dragOver" class="drop-mask">
         <div class="drop-card">
           <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /><path d="M12 11v6M9 14l3-3 3 3" /></svg>
-          <div class="drop-t">松开以打开</div>
-          <div class="drop-d">普通文件直接打开 · 目录挂载为工作目录 · 加密文件/库走解锁</div>
+          <div class="drop-t">{{ $t('editor.dropTitle') }}</div>
+          <div class="drop-d">{{ $t('editor.dropDesc') }}</div>
         </div>
       </div>
     </transition>
@@ -5354,88 +5415,88 @@ ${bodyHtml}
 
     <!-- ======== 标题栏（macOS 红绿灯叠加在左侧空白处） ======== -->
     <div class="titlebar" data-tauri-drag-region="deep" @contextmenu="openContextMenu($event, 'view')">
-      <span class="icon-btn" data-tauri-drag-region="false" :title="store.settings.showSidebar ? '隐藏侧边栏' : '显示侧边栏'" @click="toggleSidebar">
+      <span class="icon-btn" data-tauri-drag-region="false" :title="store.settings.showSidebar ? $t('editor.hideSidebar') : $t('menu.showSidebar')" @click="toggleSidebar">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9.5 4v16" /></svg>
       </span>
       <div class="tb-title">
         <span class="doc">{{ activeFileName }}</span>
-        <span class="dot" title="已保存"></span>
+        <span class="dot" :title="$t('editor.saved')"></span>
         <span class="vault">{{ vaultName(store.activeVaultId || activeFile?.vaultId || '') }}</span>
         <span v-if="activeFile && activeFile.encrypted" class="tag tag-gold">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
-          已加密
+          {{ $t('editor.encrypted') }}
         </span>
         <span v-else-if="activeFile && activeFile.isNew" class="tag tag-gray">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
-          未保存
+          {{ $t('editor.unsaved') }}
         </span>
         <span v-else-if="activeFile" class="tag tag-gray">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
-          明文
+          {{ $t('editor.plaintext') }}
         </span>
       </div>
       <div class="tb-right" data-tauri-drag-region="false">
-        <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" title="保存 ⌘S" @click="saveActive">
+        <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" :title="$t('editor.saveSc')" @click="saveActive">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><path d="M17 21v-8H7v8M7 3v5h8" /></svg>
         </span>
-        <span v-if="hasLockables" class="icon-btn" title="立即锁定 ⌘L" style="color: #d48806;" @click="lockAll">
+        <span v-if="hasLockables" class="icon-btn" :title="$t('editor.lockSc')" style="color: #d48806;" @click="lockAll">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
         </span>
         <div class="seg">
-          <span :class="{ on: currentMode === 'edit' }" title="切换显示 ⌘E" @click="setMode('edit')">编辑</span>
-          <span :class="{ on: currentMode === 'split' }" title="切换显示 ⌘E" @click="setMode('split')">分屏</span>
-          <span :class="{ on: currentMode === 'preview' }" title="切换显示 ⌘E" @click="setMode('preview')">预览</span>
+          <span :class="{ on: currentMode === 'edit' }" :title="$t('editor.toggleViewSc')" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
+          <span :class="{ on: currentMode === 'split' }" :title="$t('editor.toggleViewSc')" @click="setMode('split')">{{ $t('editor.modeSplit') }}</span>
+          <span :class="{ on: currentMode === 'preview' }" :title="$t('editor.toggleViewSc')" @click="setMode('preview')">{{ $t('editor.modePreview') }}</span>
         </div>
         <span class="menu-wrap">
           <span class="icon-btn" @click="moreOpen = !moreOpen">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="19" cy="12" r="1.6" /></svg>
           </span>
           <div class="menu" :class="{ open: moreOpen }">
-            <div class="m-cap">新建</div>
-            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="ck"></span><span class="m-label">新建文件</span><span class="kbd-hint">⌘N</span></div>
-            <div class="m-item" @click="openCreateVault(); moreOpen = false"><span class="ck"></span>新建加密库</div>
-            <div class="m-item" v-if="activeFile && !isActiveInVault" @click="openCopyToVault(); moreOpen = false"><span class="ck"></span>复制到加密库</div>
+            <div class="m-cap">{{ $t('menu.capNew') }}</div>
+            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.newFile') }}</span><span class="kbd-hint">⌘N</span></div>
+            <div class="m-item" @click="openCreateVault(); moreOpen = false"><span class="ck"></span>{{ $t('menu.newEncVault') }}</div>
+            <div class="m-item" v-if="activeFile && !isActiveInVault" @click="openCopyToVault(); moreOpen = false"><span class="ck"></span>{{ $t('menu.copyToVault') }}</div>
             <div class="m-sep"></div>
-            <div class="m-cap">打开</div>
-            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="ck"></span><span class="m-label">打开文件…</span><span class="kbd-hint">⌘O</span></div>
-            <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>打开工作目录…</div>
-            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="ck"></span><span class="m-label">撤销关闭页签</span><span class="kbd-hint">⌘⇧T</span></div>
+            <div class="m-cap">{{ $t('menu.capOpen') }}</div>
+            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">⌘O</span></div>
+            <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openWorkdirDots') }}</div>
+            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">⌘⇧T</span></div>
             <div class="m-sep"></div>
             <div class="m-item has-sub">
-              <span class="ck"></span>导入导出<span class="sub-arrow">◂</span>
+              <span class="ck"></span>{{ $t('menu.importExport') }}<span class="sub-arrow">◂</span>
               <div class="sub-menu">
-                <div class="m-item" @click="openBatchEncrypt(); moreOpen = false"><span class="ck"></span>批量加密文件…</div>
-                <div class="m-item" @click="openImportDir(); moreOpen = false"><span class="ck"></span>导入目录到库…</div>
+                <div class="m-item" @click="openBatchEncrypt(); moreOpen = false"><span class="ck"></span>{{ $t('menu.batchEncrypt') }}</div>
+                <div class="m-item" @click="openImportDir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.importDir') }}</div>
                 <div class="m-sep"></div>
-                <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtml(); moreOpen = false"><span class="ck"></span>导出 HTML…</div>
+                <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtml(); moreOpen = false"><span class="ck"></span>{{ $t('menu.exportHtml') }}</div>
               </div>
             </div>
             <div class="m-sep"></div>
-            <div class="m-cap">显示设置</div>
-            <div class="m-item" @click="store.updateSettings({ showTabs: !store.settings.showTabs })"><span class="ck">{{ store.settings.showTabs ? '✓' : '' }}</span>顶部页签</div>
-            <div class="m-item" @click="store.updateSettings({ showToolbar: !store.settings.showToolbar })"><span class="ck">{{ store.settings.showToolbar ? '✓' : '' }}</span>格式工具栏</div>
-            <div class="m-item" @click="store.updateSettings({ showStatusbar: !store.settings.showStatusbar })"><span class="ck">{{ store.settings.showStatusbar ? '✓' : '' }}</span>状态栏</div>
+            <div class="m-cap">{{ $t('menu.capDisplay') }}</div>
+            <div class="m-item" @click="store.updateSettings({ showTabs: !store.settings.showTabs })"><span class="ck">{{ store.settings.showTabs ? '✓' : '' }}</span>{{ $t('menu.topTabs') }}</div>
+            <div class="m-item" @click="store.updateSettings({ showToolbar: !store.settings.showToolbar })"><span class="ck">{{ store.settings.showToolbar ? '✓' : '' }}</span>{{ $t('menu.fmtToolbar') }}</div>
+            <div class="m-item" @click="store.updateSettings({ showStatusbar: !store.settings.showStatusbar })"><span class="ck">{{ store.settings.showStatusbar ? '✓' : '' }}</span>{{ $t('menu.viewStatusbar') }}</div>
             <div class="m-item has-sub">
-              <span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span>侧边栏<span class="sub-arrow">◂</span>
+              <span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span>{{ $t('menu.viewSidebar') }}<span class="sub-arrow">◂</span>
               <div class="sub-menu">
-                <div class="m-item" @click="store.updateSettings({ showSidebar: !store.settings.showSidebar })"><span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span><span class="m-label">显示侧边栏</span><span class="kbd-hint">⌘J</span></div>
+                <div class="m-item" @click="store.updateSettings({ showSidebar: !store.settings.showSidebar })"><span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span><span class="m-label">{{ $t('menu.showSidebar') }}</span><span class="kbd-hint">⌘J</span></div>
                 <div class="m-sep"></div>
-                <div class="m-item" @click="store.updateSettings({ showOpenFiles: !store.settings.showOpenFiles })"><span class="ck">{{ store.settings.showOpenFiles ? '✓' : '' }}</span>打开的文件</div>
-                <div class="m-item" @click="store.updateSettings({ showUnlockedVaults: !store.settings.showUnlockedVaults })"><span class="ck">{{ store.settings.showUnlockedVaults ? '✓' : '' }}</span>加密库</div>
-                <div class="m-item" @click="store.updateSettings({ showWorkdir: !store.settings.showWorkdir })"><span class="ck">{{ store.settings.showWorkdir ? '✓' : '' }}</span>工作目录（主目录）</div>
-                <div class="m-item" @click="store.updateSettings({ showFavorites: !store.settings.showFavorites })"><span class="ck">{{ store.settings.showFavorites ? '✓' : '' }}</span>收藏</div>
-                <div class="m-item" @click="store.updateSettings({ showRecent: !store.settings.showRecent })"><span class="ck">{{ store.settings.showRecent ? '✓' : '' }}</span>最近打开</div>
-                <div class="m-item" @click="store.updateSettings({ showOutline: !store.settings.showOutline })"><span class="ck">{{ store.settings.showOutline ? '✓' : '' }}</span>大纲</div>
+                <div class="m-item" @click="store.updateSettings({ showOpenFiles: !store.settings.showOpenFiles })"><span class="ck">{{ store.settings.showOpenFiles ? '✓' : '' }}</span>{{ $t('sidebar.openFiles') }}</div>
+                <div class="m-item" @click="store.updateSettings({ showUnlockedVaults: !store.settings.showUnlockedVaults })"><span class="ck">{{ store.settings.showUnlockedVaults ? '✓' : '' }}</span>{{ $t('sidebar.vaults') }}</div>
+                <div class="m-item" @click="store.updateSettings({ showWorkdir: !store.settings.showWorkdir })"><span class="ck">{{ store.settings.showWorkdir ? '✓' : '' }}</span>{{ $t('menu.workdirHome') }}</div>
+                <div class="m-item" @click="store.updateSettings({ showFavorites: !store.settings.showFavorites })"><span class="ck">{{ store.settings.showFavorites ? '✓' : '' }}</span>{{ $t('sidebar.favorites') }}</div>
+                <div class="m-item" @click="store.updateSettings({ showRecent: !store.settings.showRecent })"><span class="ck">{{ store.settings.showRecent ? '✓' : '' }}</span>{{ $t('sidebar.recent') }}</div>
+                <div class="m-item" @click="store.updateSettings({ showOutline: !store.settings.showOutline })"><span class="ck">{{ store.settings.showOutline ? '✓' : '' }}</span>{{ $t('sidebar.outline') }}</div>
                 <div class="m-sep"></div>
-                <div class="m-item" @click="openVaultAction(); moreOpen = false"><span class="ck"></span>打开库</div>
-                <div class="m-item" v-if="registeredVaults.length" @click="closeAllVaults(); moreOpen = false"><span class="ck"></span>关闭所有库</div>
-                <div class="m-item" v-if="workdirRoot" @click="closeWorkdir(); moreOpen = false"><span class="ck"></span>关闭工作目录</div>
-                <div class="m-item" v-else @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>打开工作目录</div>
+                <div class="m-item" @click="openVaultAction(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openVault') }}</div>
+                <div class="m-item" v-if="registeredVaults.length" @click="closeAllVaults(); moreOpen = false"><span class="ck"></span>{{ $t('menu.closeAllVaults') }}</div>
+                <div class="m-item" v-if="workdirRoot" @click="closeWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.closeWorkdir') }}</div>
+                <div class="m-item" v-else @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openWorkdir') }}</div>
               </div>
             </div>
             <div class="m-sep"></div>
-            <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>偏好设置…</div>
-            <div class="m-item" @click="$router.push({ path: '/settings', query: { tab: 'about' } }); moreOpen = false"><span class="ck"></span>关于</div>
+            <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>{{ $t('menu.prefs') }}</div>
+            <div class="m-item" @click="$router.push({ path: '/settings', query: { tab: 'about' } }); moreOpen = false"><span class="ck"></span>{{ $t('menu.about') }}</div>
           </div>
         </span>
       </div>
@@ -5448,16 +5509,16 @@ ${bodyHtml}
         <div class="sb-head">
           <div class="sb-search">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#b6bcc7" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
-            <input class="input" placeholder="搜索文件名与内容…" v-model="searchQuery" @input="onSearchInput" @focus="searchQuery && (searchOpen = true)" @keydown="onSearchKeydown" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+            <input class="input" :placeholder="$t('editor.searchPh')" v-model="searchQuery" @input="onSearchInput" @focus="searchQuery && (searchOpen = true)" @keydown="onSearchKeydown" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
             <!-- 搜索结果下拉 -->
             <div v-if="searchOpen" class="search-pop" ref="searchPop">
-              <div v-if="searching" class="search-empty">搜索中…</div>
-              <div v-else-if="!searchResults.length" class="search-empty">未找到匹配的文件名或内容</div>
+              <div v-if="searching" class="search-empty">{{ $t('editor.searching') }}</div>
+              <div v-else-if="!searchResults.length" class="search-empty">{{ $t('editor.searchNoMatch') }}</div>
               <template v-else>
                 <div class="search-hit" :class="{ active: i === searchIndex }" v-for="(h, i) in searchResults" :key="i" @click="openSearchHit(h)" @mouseenter="searchIndex = i">
                   <span class="sh-dot" :style="{ background: vaultColor(h.vault_id) }"></span>
                   <div class="sh-body">
-                    <div class="sh-title"><span class="sh-name">{{ hitName(h) }}</span><span v-if="h.name_hit" class="sh-name-tag">文件名</span><span class="sh-vault">{{ h.vault_name }}</span></div>
+                    <div class="sh-title"><span class="sh-name">{{ hitName(h) }}</span><span v-if="h.name_hit" class="sh-name-tag">{{ $t('editor.nameTag') }}</span><span class="sh-vault">{{ h.vault_name }}</span></div>
                     <div class="sh-snippet" :class="{ 'path-hit': h.name_hit }" v-html="highlight(h.snippet)"></div>
                   </div>
                 </div>
@@ -5472,9 +5533,9 @@ ${bodyHtml}
           <div v-if="secId === 'open'" class="sec" :dragable="'sec:open'" :class="secClass('open')">
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:open', $event)">
               <span class="chev" :style="isSecClosed('open') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
-              打开的文件 <span class="cnt">{{ openFiles.length }}</span>
+              {{ $t('sidebar.openFiles') }} <span class="cnt">{{ openFiles.length }}</span>
               <span class="acts">
-                <span class="icon-btn" title="全部关闭" @click.stop="closeAllFiles()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg></span>
+                <span class="icon-btn" :title="$t('editor.closeAllBtn')" @click.stop="closeAllFiles()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg></span>
               </span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('open')">
@@ -5492,9 +5553,9 @@ ${bodyHtml}
                 <EncIcon v-if="f.encrypted" class="lead" type="file" :color="fileIconColor(f)" :size="14" />
                 <EncIcon v-else class="lead" type="plain" :color="fileIconColor(f)" :size="14" />
                 <span class="fname">{{ fileDisplayName(f) }}</span>
-                <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? '磁盘上已被删除或移动' : '磁盘版本已变，页签有未保存内容'"></span>
-                <span v-if="f.dirty" class="dirty" title="未保存"></span>
-                <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" title="收藏" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
+                <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
+                <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
+                <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" :title="$t('menu.fav')" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
                 <span class="x" @click.stop="closeFile(f.path)">✕</span>
               </div>
             </div>
@@ -5504,10 +5565,10 @@ ${bodyHtml}
           <div v-else-if="secId === 'vaults'" class="sec" :dragable="'sec:vaults'" :class="secClass('vaults')">
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:vaults', $event)">
               <span class="chev" :style="isSecClosed('vaults') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
-              加密库 <span class="cnt">{{ vaultCount }}</span>
+              {{ $t('sidebar.vaults') }} <span class="cnt">{{ vaultCount }}</span>
               <span class="acts">
-                <span class="icon-btn" title="更多操作" @click.stop="openVaultsMoreMenu($event)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                <span class="icon-btn" title="锁定所有库" @click.stop="lockAll()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
+                <span class="icon-btn" :title="$t('common.more')" @click.stop="openVaultsMoreMenu($event)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+                <span class="icon-btn" :title="$t('editor.lockAllVaults')" @click.stop="lockAll()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
               </span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('vaults')">
@@ -5528,10 +5589,10 @@ ${bodyHtml}
                   <EncIcon class="lead" type="vault" :color="v.color" :size="15" />
                   <span class="fname">{{ v.name }}</span>
                   <span class="acts">
-                    <span class="icon-btn" title="更多操作" @click.stop="openContextMenu($event, 'vault', v.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+                    <span class="icon-btn" :title="$t('common.more')" @click.stop="openContextMenu($event, 'vault', v.id)"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
                   </span>
-                  <span v-if="v.unlocked" class="icon-btn" title="锁定该库" @click.stop="lockVault(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
-                  <span v-else class="icon-btn locked" title="点击解锁并打开" @click.stop="onVaultRowClick(v)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
+                  <span v-if="v.unlocked" class="icon-btn" :title="$t('menu.lockVault')" @click.stop="lockVault(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
+                  <span v-else class="icon-btn locked" :title="$t('editor.clickUnlockOpen')" @click.stop="onVaultRowClick(v)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg></span>
                 </div>
                 <div class="t-sub" v-show="v.unlocked && !isTreeClosed('v-' + v.id)" data-drop-kind="vlt-root" :data-drop-vault="v.id">
                   <VaultTreeNode
@@ -5552,7 +5613,7 @@ ${bodyHtml}
                     @delete-node="(n) => openDelete(v.id, n)"
                     @ctx-node="(p: any) => openVaultNodeMenu(p.e, v, p.node)"
                   />
-                  <div v-else class="empty-hint" @click.stop="openContextMenu($event, 'vault', v.id)">库内暂无文件，可在「更多」菜单中新建</div>
+                  <div v-else class="empty-hint" @click.stop="openContextMenu($event, 'vault', v.id)">{{ $t('editor.vaultEmptyHint') }}</div>
                 </div>
               </div>
             </div>
@@ -5562,7 +5623,7 @@ ${bodyHtml}
           <div v-else-if="secId === 'favorites'" class="sec" :dragable="'sec:favorites'" :class="secClass('favorites')">
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:favorites', $event)">
               <span class="chev" :style="isSecClosed('favorites') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
-              收藏 <span class="cnt">{{ favoriteVaults.length + favoriteFileList.length }}</span>
+              {{ $t('sidebar.favorites') }} <span class="cnt">{{ favoriteVaults.length + favoriteFileList.length }}</span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('favorites')">
               <!-- 收藏的文件 -->
@@ -5579,7 +5640,7 @@ ${bodyHtml}
               >
                 <EncIcon class="lead" :type="f.encrypted ? 'file' : 'plain'" :color="fileIconColor(f)" :size="14" />
                 <span class="fname">{{ fileDisplayName(f) }}</span>
-                <span class="star on" title="取消收藏" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
+                <span class="star on" :title="$t('menu.unfav')" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
               </div>
 
               <!-- 收藏的库 -->
@@ -5596,10 +5657,10 @@ ${bodyHtml}
               >
                 <EncIcon class="lead" type="vault" :color="v.color" :size="14" />
                 <span class="fname">{{ v.name }}</span>
-                <span class="st-ico" :class="v.unlocked ? 'unlocked' : 'locked'" v-tip="v.unlocked ? '已解锁' : '已锁定'">
+                <span class="st-ico" :class="v.unlocked ? 'unlocked' : 'locked'" v-tip="v.unlocked ? $t('editor.unlockedTip') : $t('editor.lockedTip')">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
                 </span>
-                <span class="star on" title="取消收藏" @click.stop="store.toggleFavorite(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
+                <span class="star on" :title="$t('menu.unfav')" @click.stop="store.toggleFavorite(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
               </div>
             </div>
           </div>
@@ -5608,9 +5669,9 @@ ${bodyHtml}
           <div v-else-if="secId === 'recent'" class="sec" :dragable="'sec:recent'" :class="secClass('recent')">
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:recent', $event)">
               <span class="chev" :style="isSecClosed('recent') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
-              最近打开
+              {{ $t('sidebar.recent') }}
               <span class="acts">
-                <span class="icon-btn" title="清除最近打开" @click.stop="clearRecent()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6" /></svg></span>
+                <span class="icon-btn" :title="$t('editor.clearRecent')" @click.stop="clearRecent()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6" /></svg></span>
               </span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('recent')">
@@ -5618,17 +5679,17 @@ ${bodyHtml}
               <div v-for="f in store.recentFiles.slice(0, 10)" :key="'f-' + f.path" class="t-item" v-tip="fileTip(f) + '\n' + timeAgo(f.lastOpened)" @click="recentOpenFile(f)">
                 <EncIcon class="lead" :type="f.encrypted ? 'file' : 'plain'" :color="fileIconColor(f)" :size="14" />
                 <span class="fname">{{ fileDisplayName(f) }}</span>
-                <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" title="收藏" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
+                <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" :title="$t('menu.fav')" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
               </div>
 
               <!-- 最近打开的库（仅显示前 10 条；登记的库在「加密库」分组完整可见） -->
               <div v-for="v in store.recent.filter((x) => x.isDir || x.isFileVault).slice(0, 10)" :key="'v-' + v.id" class="t-item" v-tip="v.path + '\n' + timeAgo(v.lastOpened)" @click="recentOpenVault(v.id)" @contextmenu.stop="openContextMenu($event, 'vault', v.id)">
                 <EncIcon class="lead" type="vault" :color="v.color" :size="14" />
                 <span class="fname">{{ v.name }}</span>
-                <span class="st-ico" :class="v.unlocked ? 'unlocked' : 'locked'" v-tip="v.unlocked ? '已解锁' : '已锁定'">
+                <span class="st-ico" :class="v.unlocked ? 'unlocked' : 'locked'" v-tip="v.unlocked ? $t('editor.unlockedTip') : $t('editor.lockedTip')">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
                 </span>
-                <span class="star" :class="{ on: store.isFavorite(v.id) }" title="收藏" @click.stop="store.toggleFavorite(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavorite(v.id) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
+                <span class="star" :class="{ on: store.isFavorite(v.id) }" :title="$t('menu.fav')" @click.stop="store.toggleFavorite(v.id)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavorite(v.id) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
               </div>
             </div>
           </div>
@@ -5637,10 +5698,10 @@ ${bodyHtml}
           <div v-else-if="secId === 'outline'" class="sec" :dragable="'sec:outline'" :class="secClass('outline')">
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:outline', $event)">
               <span class="chev" :style="isSecClosed('outline') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
-              大纲 <span class="cnt">{{ outline.length }}</span>
+              {{ $t('sidebar.outline') }} <span class="cnt">{{ outline.length }}</span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('outline')">
-              <div v-if="!outline.length" class="empty-hint">当前文件暂无标题</div>
+              <div v-if="!outline.length" class="empty-hint">{{ $t('editor.outlineEmpty') }}</div>
               <div
                 v-else
                 v-for="(h, i) in outline"
@@ -5648,7 +5709,7 @@ ${bodyHtml}
                 class="ol-item"
                 :class="{ on: h.line === outlineActiveLine }"
                 :style="{ paddingLeft: 12 + (h.level - 1) * 13 + 'px' }"
-                v-tip="h.text + '\n第 ' + h.line + ' 行'"
+                v-tip="$t('editor.outlineTip', { text: h.text, line: h.line })"
                 @click="outlineGoto(h)"
               >
                 <span class="ol-h">H{{ h.level }}</span>
@@ -5664,17 +5725,17 @@ ${bodyHtml}
               <span class="wd-title" v-tip="workdirRoot">{{ workdirTitle }}</span>
               <span class="acts">
                 <template v-if="workdirRoot">
-                  <span class="icon-btn" title="更多操作" @click.stop="openWorkdirMoreMenu($event)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
-                  <span class="icon-btn" title="折叠全部文件夹" @click.stop="collapseWorkdirFolders()"><svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M85.184 149.312h469.376v85.376H85.184V149.312z m755.584 191.68a42.688 42.688 0 0 1-60.416 0l-128-128 60.416-60.352 97.792 97.792 97.792-97.792 60.416 60.352-128 128z m-755.52 21.632h469.312V448H85.248V362.624z m-0.064 213.312h469.376v85.376H85.184V575.936z m567.168 216.704l128-128 6.72-5.44a42.752 42.752 0 0 1 53.696 5.44l128 128-60.416 60.352-97.792-97.792-97.792 97.792-60.416-60.352z m-567.104-3.328h469.312v85.376H85.248v-85.376z" /></svg></span>
+                  <span class="icon-btn" :title="$t('common.more')" @click.stop="openWorkdirMoreMenu($event)"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="19" cy="12" r="1.7" /></svg></span>
+                  <span class="icon-btn" :title="$t('editor.collapseFolders')" @click.stop="collapseWorkdirFolders()"><svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path d="M85.184 149.312h469.376v85.376H85.184V149.312z m755.584 191.68a42.688 42.688 0 0 1-60.416 0l-128-128 60.416-60.352 97.792 97.792 97.792-97.792 60.416 60.352-128 128z m-755.52 21.632h469.312V448H85.248V362.624z m-0.064 213.312h469.376v85.376H85.184V575.936z m567.168 216.704l128-128 6.72-5.44a42.752 42.752 0 0 1 53.696 5.44l128 128-60.416 60.352-97.792-97.792-97.792 97.792-60.416-60.352z m-567.104-3.328h469.312v85.376H85.248v-85.376z" /></svg></span>
                 </template>
               </span>
             </div>
             <div class="sec-list" :class="{ 'drop-into': (fileDrag.active || extDragActive) && dropKey === 'wroot' }" data-drop-kind="wd-root" v-show="!isSecClosed('workdir')">
               <div v-if="!workdirRoot" class="empty-hint" @click="chooseWorkdir()">
-                点击选择要挂载的系统目录
+                {{ $t('editor.wdMountHint') }}
               </div>
               <div v-else-if="!workdir.length" class="empty-hint" @click="wdNewFileAt(workdirRoot)">
-                目录为空，点击新建文件<br>（或在「更多」菜单里新建）
+                {{ $t('editor.wdEmptyPre') }}<br>{{ $t('editor.wdEmptyParen') }}
               </div>
               <WorkdirNode
                 v-else
@@ -5694,10 +5755,10 @@ ${bodyHtml}
           <!-- 空态引导：未打开文件/库/工作目录时，侧边栏不再空荡荡，给出两个入口 -->
           <div v-if="sidebarEmpty" class="sb-empty">
             <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V6a2 2 0 0 1 2-2h2l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" /><path d="M12 11.5v5M9.5 14h5" /></svg>
-            <div class="sb-empty-title">侧边栏暂无内容</div>
-            <div class="sb-empty-desc">打开一个加密库，或选择一个工作目录开始</div>
-            <div class="sb-empty-btn" @click="openVaultAction()">打开库</div>
-            <div class="sb-empty-btn" @click="chooseWorkdir()">选择工作目录</div>
+            <div class="sb-empty-title">{{ $t('editor.sbEmptyTitle') }}</div>
+            <div class="sb-empty-desc">{{ $t('editor.sbEmptyDesc') }}</div>
+            <div class="sb-empty-btn" @click="openVaultAction()">{{ $t('menu.openVault') }}</div>
+            <div class="sb-empty-btn" @click="chooseWorkdir()">{{ $t('editor.chooseWorkdir') }}</div>
           </div>
         </div>
       </aside>
@@ -5721,11 +5782,11 @@ ${bodyHtml}
           <EncIcon v-else type="plain" :color="fileIconColor(f)" :size="13" />
           <span class="tab-name" v-tip="{ text: tabTip(f), place: 'bottom' }">{{ fileDisplayName(f) }}</span>
           <span class="vt">{{ vaultName(f.vaultId) }}</span>
-          <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? '磁盘上已被删除或移动' : '磁盘版本已变，页签有未保存内容'"></span>
-          <span v-if="f.dirty" class="dirty" title="未保存"></span>
+          <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
+          <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
           <span class="x" @click.stop="closeFile(f.path)">✕</span>
         </div>
-        <div class="tab-add" title="新建文件" @click="openNewDraft">
+        <div class="tab-add" :title="$t('menu.newFile')" @click="openNewDraft">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
         </div>
       </div>
@@ -5734,26 +5795,26 @@ ${bodyHtml}
       <section class="workbench">
         <!-- 格式化工具栏 -->
         <div v-show="store.settings.showToolbar && currentMode !== 'preview' && activeFile" class="toolbar">
-          <span class="icon-btn" v-tip="{ text: '标题 1', place: 'bottom' }" @click="fmtHeading(1)"><b style="font-size:13px;">H1</b></span>
-          <span class="icon-btn" v-tip="{ text: '标题 2', place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
-          <span class="icon-btn" v-tip="{ text: '标题 3', place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.h1'), place: 'bottom' }" @click="fmtHeading(1)"><b style="font-size:13px;">H1</b></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.h2'), place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.h3'), place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" v-tip="{ text: '加粗 ⌘B', place: 'bottom' }" @click="fmtWrap('**', '**', '加粗')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 4h6a3.5 3.5 0 0 1 0 7H7zM7 11h7a3.5 3.5 0 0 1 0 7H7z" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '斜体 ⌘I', place: 'bottom' }" @click="fmtWrap('*', '*', '斜体')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 4h-9M14 20H5M15 4L9 20" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '删除线', place: 'bottom' }" @click="fmtWrap('~~', '~~', '删除')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /><path d="M17.3 7.5C16.9 5.6 14.8 4 12 4c-3 0-5 1.6-5 3.5 0 .5.1 1 .4 1.5M6.7 16.5C7.1 18.4 9.2 20 12 20c3 0 5-1.6 5-3.5 0-.5-.1-1-.4-1.5" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '行内代码', place: 'bottom' }" @click="fmtWrap('`', '`', 'code')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6l-6 6 6 6M16 6l6 6-6 6" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '代码块', place: 'bottom' }" @click="fmtCodeBlock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M10 9.5 7.5 12l2.5 2.5M14 9.5l2.5 2.5-2.5 2.5" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.boldSc'), place: 'bottom' }" @click="fmtWrap('**', '**', $t('editor.fmtBold'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 4h6a3.5 3.5 0 0 1 0 7H7zM7 11h7a3.5 3.5 0 0 1 0 7H7z" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.italicSc'), place: 'bottom' }" @click="fmtWrap('*', '*', $t('editor.fmtItalic'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 4h-9M14 20H5M15 4L9 20" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.strike'), place: 'bottom' }" @click="fmtWrap('~~', '~~', $t('editor.fmtStrike'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /><path d="M17.3 7.5C16.9 5.6 14.8 4 12 4c-3 0-5 1.6-5 3.5 0 .5.1 1 .4 1.5M6.7 16.5C7.1 18.4 9.2 20 12 20c3 0 5-1.6 5-3.5 0-.5-.1-1-.4-1.5" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.inlineCode'), place: 'bottom' }" @click="fmtWrap('`', '`', 'code')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6l-6 6 6 6M16 6l6 6-6 6" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.codeBlock'), place: 'bottom' }" @click="fmtCodeBlock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M10 9.5 7.5 12l2.5 2.5M14 9.5l2.5 2.5-2.5 2.5" /></svg></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" v-tip="{ text: '引用', place: 'bottom' }" @click="fmtPrefix('> ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M10 7H6a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-7zm11 0h-4a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-7z" opacity="0.9" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '无序列表', place: 'bottom' }" @click="fmtPrefix('- ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h12M9 12h12M9 18h12" /><circle cx="4.5" cy="6" r="1.3" fill="currentColor" stroke="none" /><circle cx="4.5" cy="12" r="1.3" fill="currentColor" stroke="none" /><circle cx="4.5" cy="18" r="1.3" fill="currentColor" stroke="none" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '任务列表', place: 'bottom' }" @click="fmtPrefix('- [ ] ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="7" rx="1.5" /><path d="M13.5 7.5h7M13.5 16.5h7M5 15.5l1.8 1.8 3.2-3.6" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '表格', place: 'bottom' }" @click="fmtTable"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 11h18M10 11v8" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.quote'), place: 'bottom' }" @click="fmtPrefix('> ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M10 7H6a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-7zm11 0h-4a3 3 0 0 0-3 3v4a3 3 0 0 0 3 3h2a3 3 0 0 0 3-3v-7z" opacity="0.9" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.ulist'), place: 'bottom' }" @click="fmtPrefix('- ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6h12M9 12h12M9 18h12" /><circle cx="4.5" cy="6" r="1.3" fill="currentColor" stroke="none" /><circle cx="4.5" cy="12" r="1.3" fill="currentColor" stroke="none" /><circle cx="4.5" cy="18" r="1.3" fill="currentColor" stroke="none" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.tasklist'), place: 'bottom' }" @click="fmtPrefix('- [ ] ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="7" rx="1.5" /><path d="M13.5 7.5h7M13.5 16.5h7M5 15.5l1.8 1.8 3.2-3.6" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.table'), place: 'bottom' }" @click="fmtTable"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 11h18M10 11v8" /></svg></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" v-tip="{ text: '链接 ⌘K', place: 'bottom' }" @click="fmtLink(false)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '图片', place: 'bottom' }" @click="fmtLink(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: '分割线', place: 'bottom' }" @click="fmtHr"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.linkSc'), place: 'bottom' }" @click="fmtLink(false)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.image'), place: 'bottom' }" @click="fmtLink(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: $t('editor.hr'), place: 'bottom' }" @click="fmtHr"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /></svg></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? '关闭自动换行' : '开启自动换行', place: 'bottom' }" @click="wordWrap = !wordWrap">
+          <span class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? $t('editor.wrapOff') : $t('editor.wrapOn'), place: 'bottom' }" @click="wordWrap = !wordWrap">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-9" /><path d="M12 18l-3-3 3-3" /></svg>
           </span>
           <span class="tb-spacer"></span>
@@ -5768,13 +5829,13 @@ ${bodyHtml}
               <div class="lk-ico">
                 <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>
               </div>
-              <div class="lk-t">未打开文件</div>
-              <div class="lk-d">从侧边栏选择文件打开，或新建一个文件开始编辑。</div>
+              <div class="lk-t">{{ $t('editor.noFileOpen') }}</div>
+              <div class="lk-d">{{ $t('editor.emptyDesc') }}</div>
               <div class="lk-actions">
-                <button class="btn" @click="openNewDraft">新建文件</button>
-                <button class="btn btn-primary" @click="openFileAction">打开文件…</button>
+                <button class="btn" @click="openNewDraft">{{ $t('menu.newFile') }}</button>
+                <button class="btn btn-primary" @click="openFileAction">{{ $t('menu.openFile') }}</button>
                 <!-- 未挂载工作目录时才出现：侧边栏此时没有文件树可点，给一个直接挂载本地目录的入口 -->
-                <button v-if="!workdirRoot" class="btn" @click="chooseWorkdir">选择工作目录…</button>
+                <button v-if="!workdirRoot" class="btn" @click="chooseWorkdir">{{ $t('editor.chooseWdDots') }}</button>
               </div>
             </div>
           </div>
@@ -5786,22 +5847,22 @@ ${bodyHtml}
                 <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#1677ff" stroke-width="1.6" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
               </div>
               <div class="lk-t">{{ activeFileName }}</div>
-              <div class="lk-d">这是一个加密文件（.mdl），输入密码解锁后即可查看与编辑。</div>
+              <div class="lk-d">{{ $t('editor.mdlLockDesc') }}</div>
               <div class="unlock-row">
                 <input
                   ref="filePwdInput"
                   class="input input-lg"
                   type="password"
-                  placeholder="输入该文件的密码"
+                  :placeholder="$t('editor.filePwdPh')"
                   v-model="unlockPwd"
                   :disabled="unlocking"
                   @keyup.enter="unlockActiveFile"
                 />
                 <button class="btn btn-primary btn-lg" style="flex:0 0 96px;" :disabled="unlocking" @click="unlockActiveFile">
-                  {{ unlocking ? '解锁中…' : '解锁' }}
+                  {{ unlocking ? $t('unlock.unlocking') : $t('unlock.unlock') }}
                 </button>
               </div>
-              <div class="lk-hint">密码仅用于本地解密，不会上传到任何服务器</div>
+              <div class="lk-hint">{{ $t('unlock.privacyTip') }}</div>
             </div>
           </div>
 
@@ -5811,23 +5872,23 @@ ${bodyHtml}
               <div class="lk-ico">
                 <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#d48806" stroke-width="1.6" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
               </div>
-              <div class="lk-t">「{{ vaultDisplayName(activeFile?.vaultId || '') }}」已锁定</div>
+              <div class="lk-t">{{ $t('editor.vaultLocked', { name: vaultDisplayName(activeFile?.vaultId || '') }) }}</div>
               <div class="unlock-row">
                 <input
                   ref="vaultPwdInput"
                   class="input input-lg"
                   type="password"
-                  placeholder="输入库主密码"
+                  :placeholder="$t('editor.vaultPwdPh')"
                   v-model="vaultUnlockPwd"
                   :disabled="vaultUnlocking"
                   @keyup.enter="unlockActiveVault"
                 />
                 <button class="btn btn-primary btn-lg" style="flex:0 0 96px;" :disabled="vaultUnlocking" @click="unlockActiveVault">
-                  {{ vaultUnlocking ? '解锁中…' : '解锁' }}
+                  {{ vaultUnlocking ? $t('unlock.unlocking') : $t('unlock.unlock') }}
                 </button>
               </div>
               <div class="lk-err" v-if="vaultUnlockError">{{ vaultUnlockError }}</div>
-              <div class="lk-hint">解锁后该库所有页签的内容将原样恢复</div>
+              <div class="lk-hint">{{ $t('editor.unlockRestoreHint') }}</div>
             </div>
           </div>
 
@@ -5865,508 +5926,508 @@ ${bodyHtml}
 
       <!-- 状态栏（仅侧边栏右侧，与页签栏同列） -->
       <div v-show="store.settings.showStatusbar" class="statusbar" @contextmenu="openContextMenu($event, 'view')">
-        <span class="st">{{ activeFile ? activeFile.content.split('\n').length + ' 行' : '—' }}</span>
-      <span class="st">{{ activeFile ? activeFile.content.length + ' 字' : '—' }}</span>
-      <span class="st"><span class="dot" :style="activeFile && activeFile.dirty ? 'background:var(--gold)' : ''"></span> {{ activeFile && activeFile.dirty ? '未保存' : '已保存' }}</span>
+        <span class="st">{{ activeFile ? $t('editor.lineN', { n: activeFile.content.split('\n').length }) : '—' }}</span>
+      <span class="st">{{ activeFile ? $t('editor.charN', { n: activeFile.content.length }) : '—' }}</span>
+      <span class="st"><span class="dot" :style="activeFile && activeFile.dirty ? 'background:var(--gold)' : ''"></span> {{ activeFile && activeFile.dirty ? $t('editor.unsaved') : $t('editor.saved') }}</span>
       <span
         v-if="activeFile && activeFile.external"
         class="st st-ext"
         :class="activeFile.external"
         v-tip="externalTip(activeFile.external) || ''"
         @click="activeFile.external === 'modified' && reloadTab(activeFile.path)"
-      >{{ activeFile.external === 'missing' ? '磁盘文件已丢失' : '外部已修改，点击重新加载' }}</span>
+      >{{ activeFile.external === 'missing' ? $t('editor.diskFileLost') : $t('editor.extModifiedClick') }}</span>
       <div class="right">
-        <span v-if="activeFile && activeFile.encrypted" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d48806" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>已加密</span>
-        <span v-else-if="activeFile" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>明文</span>
-        <span class="st st-menu" :title="`字体大小 ${store.settings.editorFontSize} px（点击修改，⌘+ / ⌘- 可实时调节）`" @click="openFontSizeMenu($event)"><svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor"><path d="M448 234.688v640H362.688v-640h-256V149.312H704v85.376H448zM789.312 576v298.688H704V576H576V490.688h341.312V576h-128z" /></svg>{{ store.settings.editorFontSize }} px</span>
-        <span class="st st-menu" title="点击修改自动锁定间隔" @click="openAutoLockMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>自动锁定 {{ autoLockLabel }}</span>
-        <span class="st">{{ unlockedCount }} 库</span>
+        <span v-if="activeFile && activeFile.encrypted" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d48806" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>{{ $t('editor.encrypted') }}</span>
+        <span v-else-if="activeFile" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>{{ $t('editor.plaintext') }}</span>
+        <span class="st st-menu" :title="$t('editor.fontSizeStatus', { size: store.settings.editorFontSize })" @click="openFontSizeMenu($event)"><svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor"><path d="M448 234.688v640H362.688v-640h-256V149.312H704v85.376H448zM789.312 576v298.688H704V576H576V490.688h341.312V576h-128z" /></svg>{{ store.settings.editorFontSize }} px</span>
+        <span class="st st-menu" :title="$t('editor.autoLockClick')" @click="openAutoLockMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>{{ $t('editor.autoLock') }} {{ autoLockLabel }}</span>
+        <span class="st">{{ unlockedCount }} {{ $t('editor.vaultWord') }}</span>
       </div>
       </div>
       </div>
     </div>
 
     <!-- 另存为弹窗（保存草稿页签 / 普通 md 转加密文件） -->
-    <a-modal v-model:open="showSaveAs" :title="saveAsConvert ? '转为加密文件' : '保存为新文件'" :width="440" :footer="null">
+    <a-modal v-model:open="showSaveAs" :title="saveAsConvert ? $t('editor.convertToEnc') : $t('editor.saveAsNew')" :width="440" :footer="null">
       <div class="saveas">
         <!-- 目标类型切换（转换态仅支持独立加密文件 .mdl，隐藏切换） -->
         <div class="seg saveas-seg" v-if="!saveAsConvert">
-          <span :class="{ on: saveAsMode === 'file' }" @click="setSaveAsMode('file')">加密文件 .mdl</span>
-          <span :class="{ on: saveAsMode === 'vault' }" @click="setSaveAsMode('vault')">存入加密库</span>
-          <span :class="{ on: saveAsMode === 'plain' }" @click="setSaveAsMode('plain')">普通 md</span>
+          <span :class="{ on: saveAsMode === 'file' }" @click="setSaveAsMode('file')">{{ $t('editor.segEncFile') }}</span>
+          <span :class="{ on: saveAsMode === 'vault' }" @click="setSaveAsMode('vault')">{{ $t('editor.segToVault') }}</span>
+          <span :class="{ on: saveAsMode === 'plain' }" @click="setSaveAsMode('plain')">{{ $t('editor.segPlain') }}</span>
         </div>
 
         <div class="saveas-field">
-          <label>文件名</label>
-          <input class="input" v-model="saveAsName" placeholder="如 会议纪要" />
+          <label>{{ $t('editor.labelName') }}</label>
+          <input class="input" v-model="saveAsName" :placeholder="$t('editor.phName')" />
         </div>
 
         <template v-if="saveAsMode === 'file'">
           <div class="saveas-field">
-            <label>保存位置</label>
+            <label>{{ $t('editor.labelPath') }}</label>
             <div class="saveas-path">
-              <input class="input" v-model="saveAsPath" :placeholder="'如 ~/Documents/' + saveAsName + '.mdl'" readonly />
-              <button class="btn" @click="browseSavePath">浏览…</button>
+              <input class="input" v-model="saveAsPath" :placeholder="$t('editor.phPathMdl', { name: saveAsName })" readonly />
+              <button class="btn" @click="browseSavePath">{{ $t('common.browse') }}</button>
             </div>
           </div>
           <div class="saveas-field">
-            <label>主密码</label>
-            <input class="input" type="password" v-model="saveAsPwd" placeholder="至少 1 位，用于加密该文件" />
+            <label>{{ $t('editor.labelPwd') }}</label>
+            <input class="input" type="password" v-model="saveAsPwd" :placeholder="$t('editor.phPwdFile')" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (saveAsStrength >= n ? saveAsStrength : '')"></i>
-              <em v-if="saveAsStrength >= 4">强 · 建议使用密码管理器生成</em>
-              <em v-else-if="saveAsStrength >= 3">中 · 建议混合符号</em>
-              <em v-else>弱 · 建议 12 位以上并混合符号</em>
+              <em v-if="saveAsStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+              <em v-else-if="saveAsStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+              <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
             </div>
           </div>
           <div class="saveas-field">
-            <label>确认密码</label>
-            <input class="input" type="password" v-model="saveAsConfirm" placeholder="再次输入主密码" />
+            <label>{{ $t('editor.labelConfirm') }}</label>
+            <input class="input" type="password" v-model="saveAsConfirm" :placeholder="$t('editor.phConfirm')" />
           </div>
-          <div class="saveas-hint">保存为独立的加密文件，拥有独立密码，可单独移动/分享。</div>
+          <div class="saveas-hint">{{ $t('editor.hintEncFile') }}</div>
         </template>
 
         <template v-else-if="saveAsMode === 'vault'">
           <div class="saveas-field">
-            <label>目标库</label>
+            <label>{{ $t('editor.labelVault') }}</label>
             <select class="input" v-model="saveAsVaultId" @change="onSaveAsVaultChange">
               <option v-for="v in unlockedVaults.filter((x) => x.isDir || x.isFileVault)" :key="v.id" :value="v.id">{{ v.name }}</option>
-              <option value="__new__">＋ 新建库…</option>
+              <option value="__new__">{{ $t('editor.newVaultOpt') }}</option>
             </select>
           </div>
           <!-- 内联新建库表单 -->
           <template v-if="saveAsVaultId === '__new__'">
             <div class="saveas-field">
-              <label>保存位置</label>
+              <label>{{ $t('editor.labelPath') }}</label>
               <div class="saveas-path">
-                <input class="input" v-model="createVaultForm.path" placeholder="选择 .mdlb 文件的保存路径" readonly />
-                <button class="btn" @click="browseCreateVaultPath">浏览…</button>
+                <input class="input" v-model="createVaultForm.path" :placeholder="$t('editor.phVaultPath')" readonly />
+                <button class="btn" @click="browseCreateVaultPath">{{ $t('common.browse') }}</button>
               </div>
             </div>
             <div class="saveas-field">
-              <label>主密码</label>
-              <input class="input" type="password" v-model="createVaultForm.pwd" placeholder="至少 1 位，用于加密库内所有文件" />
+              <label>{{ $t('editor.labelPwd') }}</label>
+              <input class="input" type="password" v-model="createVaultForm.pwd" :placeholder="$t('editor.phPwdVault')" />
               <div class="strength">
                 <i v-for="n in 4" :key="n" :class="'lv' + (createVaultStrength >= n ? createVaultStrength : '')"></i>
-                <em v-if="createVaultStrength >= 4">强 · 建议使用密码管理器生成</em>
-                <em v-else-if="createVaultStrength >= 3">中 · 建议混合符号</em>
-                <em v-else>弱 · 建议 12 位以上并混合符号</em>
+                <em v-if="createVaultStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+                <em v-else-if="createVaultStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+                <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
               </div>
             </div>
             <div class="saveas-field">
-              <label>确认密码</label>
-              <input class="input" type="password" v-model="createVaultForm.confirm" placeholder="再次输入主密码" />
+              <label>{{ $t('editor.labelConfirm') }}</label>
+              <input class="input" type="password" v-model="createVaultForm.confirm" :placeholder="$t('editor.phConfirm')" />
             </div>
-            <div class="saveas-hint">点击下方「保存」将创建该单文件库，并把文件保存到库根目录。</div>
+            <div class="saveas-hint">{{ $t('editor.hintSaveCreateVault') }}</div>
           </template>
           <template v-else>
             <div class="saveas-field" v-if="saveAsFolders.length">
-              <label>目标文件夹</label>
+              <label>{{ $t('editor.labelFolder') }}</label>
               <select class="input" v-model="saveAsDir">
-                <option value="">库根目录</option>
+                <option value="">{{ $t('editor.vaultRoot') }}</option>
                 <option v-for="d in saveAsFolders" :key="d" :value="d">{{ d }}</option>
               </select>
             </div>
-            <div class="saveas-hint" v-if="!unlockedVaults.some((x) => x.isDir || x.isFileVault)">没有已解锁的库，可在下拉里选「＋ 新建库…」创建一个。</div>
-            <div class="saveas-hint" v-else>存入已解锁库，复用库的主密码，无需再次填写密码。</div>
+            <div class="saveas-hint" v-if="!unlockedVaults.some((x) => x.isDir || x.isFileVault)">{{ $t('editor.hintNoUnlocked') }}</div>
+            <div class="saveas-hint" v-else>{{ $t('editor.hintToVaultReuse') }}</div>
           </template>
         </template>
 
         <template v-else>
           <div class="saveas-field">
-            <label>保存位置</label>
+            <label>{{ $t('editor.labelPath') }}</label>
             <div class="saveas-path">
-              <input class="input" v-model="saveAsPath" :placeholder="'如 ~/Documents/' + saveAsName + '.md'" readonly />
-              <button class="btn" @click="browseSavePath">浏览…</button>
+              <input class="input" v-model="saveAsPath" :placeholder="$t('editor.phPathMd', { name: saveAsName })" readonly />
+              <button class="btn" @click="browseSavePath">{{ $t('common.browse') }}</button>
             </div>
           </div>
-          <div class="saveas-hint">保存为普通 Markdown 文件（明文，不加密），可被其他编辑器直接打开；在 MarkLock 中重新打开时按明文阅读/编辑。</div>
+          <div class="saveas-hint">{{ $t('editor.hintPlainSave') }}</div>
         </template>
       </div>
 
       <div class="modal-foot">
-        <button class="btn" @click="showSaveAs = false">取消</button>
-        <button class="btn btn-primary" :disabled="saving" @click="submitSaveAs">{{ saving ? '处理中…' : (saveAsConvert ? '转换' : '保存') }}</button>
+        <button class="btn" @click="showSaveAs = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="saving" @click="submitSaveAs">{{ saving ? $t('editor.processing') : (saveAsConvert ? $t('editor.convertBtn') : $t('editor.save')) }}</button>
       </div>
     </a-modal>
 
     <!-- 转为加密文件完成：原明文文件处理询问 -->
-    <a-modal v-model:open="showConvertPrompt" title="转为加密文件完成" :width="440" :footer="null" :closable="false" :mask-closable="false">
+    <a-modal v-model:open="showConvertPrompt" :title="$t('editor.convertDoneTitle')" :width="440" :footer="null" :closable="false" :mask-closable="false">
       <div class="saveas">
-        <div class="convert-msg">已将该文件转为加密文件（.mdl）。是否删除原来的明文文件？删除后不可恢复。</div>
+        <div class="convert-msg">{{ $t('editor.convertDoneMsg') }}</div>
         <div class="convert-path" v-tip="convertOriginalPath">{{ convertOriginalPath }}</div>
-        <label class="convert-remember"><input type="checkbox" v-model="convertRemember" /> 以后都按此处理，不再询问</label>
+        <label class="convert-remember"><input type="checkbox" v-model="convertRemember" /> {{ $t('editor.convertRemember') }}</label>
         <div class="modal-foot">
-          <button class="btn" @click="onConvertPrompt('keep')">保留原文件</button>
-          <button class="btn btn-danger" @click="onConvertPrompt('delete')">删除原文件</button>
+          <button class="btn" @click="onConvertPrompt('keep')">{{ $t('settings.general.convertKeep') }}</button>
+          <button class="btn btn-danger" @click="onConvertPrompt('delete')">{{ $t('settings.general.convertDelete') }}</button>
         </div>
       </div>
     </a-modal>
 
     <!-- 拖拽落点重名冲突：取消 / 保留两者 / 覆盖 -->
-    <a-modal v-model:open="showDragConflict" title="目标已存在同名项" :width="440" :footer="null" :closable="false" :mask-closable="false">
+    <a-modal v-model:open="showDragConflict" :title="$t('editor.conflictTitle')" :width="440" :footer="null" :closable="false" :mask-closable="false">
       <div class="saveas">
-        <div class="convert-msg">目标位置已存在名为「{{ dragConflict && dragConflict.name }}」的项。选择「覆盖」将先删除同名项再写入（目录则整棵替换），不可恢复。</div>
+        <div class="convert-msg">{{ $t('editor.conflictMsg', { name: dragConflict?.name || '' }) }}</div>
         <div class="convert-path" v-tip="dragConflict ? dragConflict.target : ''">{{ dragConflict ? dragConflict.target : '' }}</div>
         <div class="modal-foot">
-          <button class="btn" @click="onDragConflict('cancel')">取消</button>
-          <button class="btn" @click="onDragConflict('rename')">保留两者</button>
-          <button class="btn btn-danger" @click="onDragConflict('overwrite')">覆盖</button>
+          <button class="btn" @click="onDragConflict('cancel')">{{ $t('common.cancel') }}</button>
+          <button class="btn" @click="onDragConflict('rename')">{{ $t('editor.conflictKeep') }}</button>
+          <button class="btn btn-danger" @click="onDragConflict('overwrite')">{{ $t('editor.conflictOverwrite') }}</button>
         </div>
       </div>
     </a-modal>
 
     <!-- 外部拖入单个目录到工作目录：复制进来 / 打开为工作目录 -->
-    <a-modal v-model:open="showWdDirDropPrompt" title="拖入文件夹到工作目录" :width="440" :footer="null" :closable="false" :mask-closable="false">
+    <a-modal v-model:open="showWdDirDropPrompt" :title="$t('editor.wdDropTitle')" :width="440" :footer="null" :closable="false" :mask-closable="false">
       <div class="saveas">
-        <div class="convert-msg">检测到拖入的是一个文件夹。要将其复制到当前工作目录下，还是直接打开该文件夹作为工作目录？</div>
+        <div class="convert-msg">{{ $t('editor.wdDropMsg') }}</div>
         <div class="convert-path" v-tip="wdDirDrop ? wdDirDrop.path : ''">{{ wdDirDrop ? wdDirDrop.path : '' }}</div>
         <div class="modal-foot">
-          <button class="btn" @click="showWdDirDropPrompt = false">取消</button>
-          <button class="btn" @click="onWdDirDrop('copy')">复制到工作目录</button>
-          <button class="btn btn-primary" @click="onWdDirDrop('open')">打开为工作目录</button>
+          <button class="btn" @click="showWdDirDropPrompt = false">{{ $t('common.cancel') }}</button>
+          <button class="btn" @click="onWdDirDrop('copy')">{{ $t('editor.wdDropCopy') }}</button>
+          <button class="btn btn-primary" @click="onWdDirDrop('open')">{{ $t('editor.wdDropOpen') }}</button>
         </div>
       </div>
     </a-modal>
 
     <!-- 新建文件（库内 / 工作目录，工作目录可选普通 md / 加密） -->
-    <a-modal v-model:open="showNewFile" title="新建文件" :width="440" :footer="null">
+    <a-modal v-model:open="showNewFile" :title="$t('menu.newFile')" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
-          <label>目标位置</label>
-          <div class="saveas-hint">{{ wdOp ? (wdDir || '工作目录') : (newFileDir ? '库内 / ' + newFileDir : '库根目录') }}</div>
+          <label>{{ $t('editor.labelTarget') }}</label>
+          <div class="saveas-hint">{{ wdOp ? (wdDir || $t('sidebar.workdir')) : (newFileDir ? $t('editor.inVaultPrefix') + newFileDir : $t('editor.vaultRoot')) }}</div>
         </div>
         <!-- 类型选择仅工作目录生效：库内新建天然跟随库主密码加密 -->
         <div class="seg saveas-seg" v-if="wdOp">
-          <span :class="{ on: newFileType === 'plain' }" @click="newFileType = 'plain'">普通 md</span>
-          <span :class="{ on: newFileType === 'encrypted' }" @click="newFileType = 'encrypted'">加密文件 .mdl</span>
-          <span :class="{ on: newFileType === 'vault' }" @click="newFileType = 'vault'">加密库文件 .mdlb</span>
+          <span :class="{ on: newFileType === 'plain' }" @click="newFileType = 'plain'">{{ $t('editor.segPlain') }}</span>
+          <span :class="{ on: newFileType === 'encrypted' }" @click="newFileType = 'encrypted'">{{ $t('editor.segEncFile') }}</span>
+          <span :class="{ on: newFileType === 'vault' }" @click="newFileType = 'vault'">{{ $t('editor.segVaultFile') }}</span>
         </div>
         <div class="saveas-field">
-          <label>文件名</label>
-          <input class="input" ref="newFileNameInput" v-model="newFileName" placeholder="如 会议纪要" @keyup.enter="submitNewFile" />
+          <label>{{ $t('editor.labelName') }}</label>
+          <input class="input" ref="newFileNameInput" v-model="newFileName" :placeholder="$t('editor.phName')" @keyup.enter="submitNewFile" />
         </div>
         <template v-if="wdOp && newFileType !== 'plain'">
           <div class="saveas-field">
-            <label>主密码</label>
-            <input class="input" type="password" v-model="newFilePwd" :placeholder="newFileType === 'vault' ? '至少 1 位，用于加密库内所有文件' : '至少 1 位，用于加密该文件'" />
+            <label>{{ $t('editor.labelPwd') }}</label>
+            <input class="input" type="password" v-model="newFilePwd" :placeholder="newFileType === 'vault' ? $t('editor.phPwdVault') : $t('editor.phPwdFile')" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (newFileStrength >= n ? newFileStrength : '')"></i>
-              <em v-if="newFileStrength >= 4">强 · 建议使用密码管理器生成</em>
-              <em v-else-if="newFileStrength >= 3">中 · 建议混合符号</em>
-              <em v-else>弱 · 建议 12 位以上并混合符号</em>
+              <em v-if="newFileStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+              <em v-else-if="newFileStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+              <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
             </div>
           </div>
           <div class="saveas-field">
-            <label>确认密码</label>
-            <input class="input" type="password" v-model="newFileConfirm" placeholder="再次输入主密码" @keyup.enter="submitNewFile" />
+            <label>{{ $t('editor.labelConfirm') }}</label>
+            <input class="input" type="password" v-model="newFileConfirm" :placeholder="$t('editor.phConfirm')" @keyup.enter="submitNewFile" />
           </div>
         </template>
-        <div class="saveas-hint" v-if="!wdOp">文件将以库主密码加密存储，打开时无需再次输入密码。</div>
-        <div class="saveas-hint" v-else-if="newFileType === 'plain'">将在工作目录创建明文文件（不加密），无扩展名时自动补 .md。</div>
-        <div class="saveas-hint" v-else-if="newFileType === 'encrypted'">创建独立的加密文件（.mdl），拥有独立密码，可单独移动/分享。</div>
-        <div class="saveas-hint" v-else>在当前目录创建单文件加密库（.mdlb）并自动解锁，创建后显示在侧边栏「加密库」分组。</div>
+        <div class="saveas-hint" v-if="!wdOp">{{ $t('editor.hintNewInVault') }}</div>
+        <div class="saveas-hint" v-else-if="newFileType === 'plain'">{{ $t('editor.hintNewPlain') }}</div>
+        <div class="saveas-hint" v-else-if="newFileType === 'encrypted'">{{ $t('editor.hintNewEnc') }}</div>
+        <div class="saveas-hint" v-else>{{ $t('editor.hintNewVault') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showNewFile = false">取消</button>
-        <button class="btn btn-primary" @click="submitNewFile">创建</button>
+        <button class="btn" @click="showNewFile = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" @click="submitNewFile">{{ $t('editor.createBtn') }}</button>
       </div>
     </a-modal>
 
     <!-- 新建文件夹（库内） -->
-    <a-modal v-model:open="showNewFolder" title="新建文件夹" :width="420" :footer="null">
+    <a-modal v-model:open="showNewFolder" :title="$t('editor.newFolderTitle')" :width="420" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
-          <label>目标位置</label>
-          <div class="saveas-hint">{{ wdOp ? (wdDir || '工作目录') : (newFolderDir ? '库内 / ' + newFolderDir : '库根目录') }}</div>
+          <label>{{ $t('editor.labelTarget') }}</label>
+          <div class="saveas-hint">{{ wdOp ? (wdDir || $t('sidebar.workdir')) : (newFolderDir ? $t('editor.inVaultPrefix') + newFolderDir : $t('editor.vaultRoot')) }}</div>
         </div>
         <div class="saveas-field">
-          <label>文件夹名</label>
-          <input class="input" ref="newFolderNameInput" v-model="newFolderName" placeholder="如 项目文档" @keyup.enter="submitNewFolder" />
+          <label>{{ $t('editor.labelFolderName') }}</label>
+          <input class="input" ref="newFolderNameInput" v-model="newFolderName" :placeholder="$t('editor.phFolderName')" @keyup.enter="submitNewFolder" />
         </div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showNewFolder = false">取消</button>
-        <button class="btn btn-primary" @click="submitNewFolder">创建</button>
+        <button class="btn" @click="showNewFolder = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" @click="submitNewFolder">{{ $t('editor.createBtn') }}</button>
       </div>
     </a-modal>
 
     <!-- 新建加密库 -->
-    <a-modal v-model:open="showCreateVault" title="新建加密库" :width="440" :footer="null">
+    <a-modal v-model:open="showCreateVault" :title="$t('dialog.create.title')" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
-          <label>保存位置</label>
+          <label>{{ $t('editor.labelPath') }}</label>
           <div class="saveas-path">
-            <input class="input" v-model="createVaultForm.path" placeholder="选择 .mdlb 文件的保存路径" readonly />
-            <button class="btn" @click="browseCreateVaultPath">浏览…</button>
+            <input class="input" v-model="createVaultForm.path" :placeholder="$t('editor.phVaultPath')" readonly />
+            <button class="btn" @click="browseCreateVaultPath">{{ $t('common.browse') }}</button>
           </div>
         </div>
         <div class="saveas-field">
-          <label>主密码</label>
-          <input class="input" type="password" v-model="createVaultForm.pwd" placeholder="至少 1 位，用于加密库内所有文件" />
+          <label>{{ $t('editor.labelPwd') }}</label>
+          <input class="input" type="password" v-model="createVaultForm.pwd" :placeholder="$t('editor.phPwdVault')" />
           <div class="strength">
             <i v-for="n in 4" :key="n" :class="'lv' + (createVaultStrength >= n ? createVaultStrength : '')"></i>
-            <em v-if="createVaultStrength >= 4">强 · 建议使用密码管理器生成</em>
-            <em v-else-if="createVaultStrength >= 3">中 · 建议混合符号</em>
-            <em v-else>弱 · 建议 12 位以上并混合符号</em>
+            <em v-if="createVaultStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+            <em v-else-if="createVaultStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+            <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
           </div>
         </div>
         <div class="saveas-field">
-          <label>确认密码</label>
-          <input class="input" type="password" v-model="createVaultForm.confirm" placeholder="再次输入主密码" @keyup.enter="submitCreateVault" />
+          <label>{{ $t('editor.labelConfirm') }}</label>
+          <input class="input" type="password" v-model="createVaultForm.confirm" :placeholder="$t('editor.phConfirm')" @keyup.enter="submitCreateVault" />
         </div>
-        <div class="saveas-hint">单文件库（.mdlb）：文件名、目录结构、正文全部密文，可直接放进 iCloud / Dropbox 同步。</div>
+        <div class="saveas-hint">{{ $t('editor.hintMdlb') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showCreateVault = false">取消</button>
-        <button class="btn btn-primary" :disabled="creatingVault" @click="submitCreateVault">{{ creatingVault ? '创建中…' : '创建并解锁' }}</button>
+        <button class="btn" @click="showCreateVault = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="creatingVault" @click="submitCreateVault">{{ creatingVault ? $t('dialog.create.creating') : $t('dialog.create.createAndUnlock') }}</button>
       </div>
     </a-modal>
 
     <!-- 批量加密文件 -->
-    <a-modal v-model:open="showBatchEncrypt" title="批量加密文件" :width="520" :footer="null" :mask-closable="!beBusy" :closable="!beBusy">
+    <a-modal v-model:open="showBatchEncrypt" :title="$t('editor.batchTitle')" :width="520" :footer="null" :mask-closable="!beBusy" :closable="!beBusy">
       <div class="saveas">
         <div class="saveas-field">
-          <label>待加密文件 <span class="be-cnt">（已选 {{ bePaths.length }} 个）</span></label>
+          <label>{{ $t('editor.labelBeFiles') }} <span class="be-cnt">{{ $t('editor.beSelected', { n: bePaths.length }) }}</span></label>
           <div class="be-list">
-            <div v-if="!bePaths.length" class="empty-hint">尚未选择文件，点击下方「添加文件…」。</div>
+            <div v-if="!bePaths.length" class="empty-hint">{{ $t('editor.beEmpty') }}</div>
             <div v-for="p in bePaths" :key="p" class="be-row">
               <span class="be-path" v-tip="p">{{ p }}</span>
               <span class="be-del" @click="beRemove(p)">×</span>
             </div>
           </div>
           <div class="be-actions">
-            <button class="btn" :disabled="beBusy" @click="beBrowse">添加文件…</button>
-            <button class="btn" :disabled="beBusy || !bePaths.length" @click="bePaths = []">清空</button>
+            <button class="btn" :disabled="beBusy" @click="beBrowse">{{ $t('editor.beAdd') }}</button>
+            <button class="btn" :disabled="beBusy || !bePaths.length" @click="bePaths = []">{{ $t('editor.beClear') }}</button>
           </div>
         </div>
         <div class="saveas-field">
-          <label>主密码</label>
-          <input class="input" type="password" v-model="bePassword" :readonly="beBusy" placeholder="至少 1 位，本次批次内所有文件共用" />
+          <label>{{ $t('editor.labelPwd') }}</label>
+          <input class="input" type="password" v-model="bePassword" :readonly="beBusy" :placeholder="$t('editor.phPwdBatch')" />
           <div class="strength">
             <i v-for="n in 4" :key="n" :class="'lv' + (beStrength >= n ? beStrength : '')"></i>
-            <em v-if="beStrength >= 4">强 · 建议使用密码管理器生成</em>
-            <em v-else-if="beStrength >= 3">中 · 建议混合符号</em>
-            <em v-else>弱 · 建议 12 位以上并混合符号</em>
+            <em v-if="beStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+            <em v-else-if="beStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+            <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
           </div>
         </div>
         <div class="saveas-field">
-          <label>确认密码</label>
-          <input class="input" type="password" v-model="beConfirm" :readonly="beBusy" placeholder="再次输入主密码" @keyup.enter="submitBatchEncrypt" />
+          <label>{{ $t('editor.labelConfirm') }}</label>
+          <input class="input" type="password" v-model="beConfirm" :readonly="beBusy" :placeholder="$t('editor.phConfirm')" @keyup.enter="submitBatchEncrypt" />
         </div>
         <div class="saveas-field">
-          <label>原文件处理</label>
-          <label class="radio"><input type="radio" :value="false" v-model="beMoveOriginals" :disabled="beBusy" /> 保留原文件，同目录生成 .mdl 副本</label>
-          <label class="radio"><input type="radio" :value="true" v-model="beMoveOriginals" :disabled="beBusy" /> 将原文件移到同目录下的「原文件」子文件夹</label>
+          <label>{{ $t('editor.labelOrigHandle') }}</label>
+          <label class="radio"><input type="radio" :value="false" v-model="beMoveOriginals" :disabled="beBusy" /> {{ $t('editor.beRadioKeep') }}</label>
+          <label class="radio"><input type="radio" :value="true" v-model="beMoveOriginals" :disabled="beBusy" /> {{ $t('editor.beRadioMove') }}</label>
         </div>
         <div v-if="beResult" class="be-result">
-          <div>✓ 加密成功：<b>{{ beResult.encrypted.length }}</b> 个文件<template v-if="beMoveOriginals">，已移动 {{ beResult.moved.length }} 个原件</template></div>
+          <div>{{ $t('editor.beOk', { n: beResult.encrypted.length }) }}<template v-if="beMoveOriginals">{{ $t('editor.beMovedSuffix', { n: beResult.moved.length }) }}</template></div>
           <div v-if="beResult.failed.length" class="be-failed">
-            ⚠ 失败 {{ beResult.failed.length }} 个：
+            {{ $t('editor.beFailedPrefix', { n: beResult.failed.length }) }}
             <ul>
               <li v-for="(f, i) in beResult.failed.slice(0, 10)" :key="i"><span class="be-fpath">{{ f[0] }}</span> — {{ f[1] }}</li>
-              <li v-if="beResult.failed.length > 10">… 另外 {{ beResult.failed.length - 10 }} 项</li>
+              <li v-if="beResult.failed.length > 10">{{ $t('editor.beMoreSuffix', { n: beResult.failed.length - 10 }) }}</li>
             </ul>
           </div>
         </div>
-        <div class="saveas-hint">同一个主密码，但每个文件都是独立的 .mdl（与目录库内文件同构）；Argon2id 仅执行一次，多文件不会逐个耗时。</div>
+        <div class="saveas-hint">{{ $t('editor.beHint') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" :disabled="beBusy" @click="showBatchEncrypt = false">{{ beResult ? '关闭' : '取消' }}</button>
-        <button class="btn btn-primary" :disabled="beBusy" @click="submitBatchEncrypt">{{ beBusy ? '加密中…' : '开始加密' }}</button>
+        <button class="btn" :disabled="beBusy" @click="showBatchEncrypt = false">{{ beResult ? $t('common.close') : $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="beBusy" @click="submitBatchEncrypt">{{ beBusy ? $t('editor.beBusy') : $t('editor.beStart') }}</button>
       </div>
     </a-modal>
 
     <!-- 导入目录到库 -->
-    <a-modal v-model:open="showImportDir" title="导入目录到库" :width="520" :footer="null" :mask-closable="!idBusy" :closable="!idBusy">
+    <a-modal v-model:open="showImportDir" :title="$t('editor.importTitle')" :width="520" :footer="null" :mask-closable="!idBusy" :closable="!idBusy">
       <div class="saveas">
         <div class="saveas-field">
-          <label>源目录</label>
+          <label>{{ $t('editor.labelSrcDir') }}</label>
           <div class="saveas-path">
-            <input class="input" v-model="idSrcDir" :readonly="true" placeholder="选择包含 md/txt 的目录（含子目录）" />
-            <button class="btn" :disabled="idBusy" @click="idBrowseSrc">浏览…</button>
+            <input class="input" v-model="idSrcDir" :readonly="true" :placeholder="$t('editor.phImportSrc')" />
+            <button class="btn" :disabled="idBusy" @click="idBrowseSrc">{{ $t('common.browse') }}</button>
           </div>
         </div>
         <div class="saveas-field">
-          <label>目标库</label>
-          <label class="radio"><input type="radio" value="existing" v-model="idTargetKind" :disabled="idBusy || !unlockedVaults.length" /> 导入到已解锁的库</label>
-          <label class="radio"><input type="radio" value="new" v-model="idTargetKind" :disabled="idBusy" /> 新建单文件库（.mdlb）后导入</label>
+          <label>{{ $t('editor.labelVault') }}</label>
+          <label class="radio"><input type="radio" value="existing" v-model="idTargetKind" :disabled="idBusy || !unlockedVaults.length" /> {{ $t('editor.importRadioExisting') }}</label>
+          <label class="radio"><input type="radio" value="new" v-model="idTargetKind" :disabled="idBusy" /> {{ $t('editor.importRadioNew') }}</label>
         </div>
         <template v-if="idTargetKind === 'existing'">
           <div class="saveas-field">
-            <label>选择库</label>
+            <label>{{ $t('editor.labelPickVault') }}</label>
             <select class="input" v-model="idVaultId" :disabled="idBusy">
               <option v-for="v in unlockedVaults.filter((x) => x.isDir || x.isFileVault)" :key="v.id" :value="v.id">{{ v.name }}</option>
             </select>
-            <div v-if="!unlockedVaults.length" class="saveas-hint">当前无已解锁库，请选「新建库」或先去解锁页解锁一个库。</div>
+            <div v-if="!unlockedVaults.length" class="saveas-hint">{{ $t('editor.importNoVault') }}</div>
           </div>
         </template>
         <template v-else>
           <div class="saveas-field">
-            <label>新库保存位置</label>
+            <label>{{ $t('editor.labelNewVaultPath') }}</label>
             <div class="saveas-path">
-              <input class="input" v-model="idCreateForm.path" placeholder="选择 .mdlb 文件的保存路径" readonly />
-              <button class="btn" :disabled="idBusy" @click="idBrowseVaultPath">浏览…</button>
+              <input class="input" v-model="idCreateForm.path" :placeholder="$t('editor.phVaultPath')" readonly />
+              <button class="btn" :disabled="idBusy" @click="idBrowseVaultPath">{{ $t('common.browse') }}</button>
             </div>
           </div>
           <div class="saveas-field">
-            <label>主密码</label>
-            <input class="input" type="password" v-model="idCreateForm.pwd" :readonly="idBusy" placeholder="至少 1 位" />
+            <label>{{ $t('editor.labelPwd') }}</label>
+            <input class="input" type="password" v-model="idCreateForm.pwd" :readonly="idBusy" :placeholder="$t('editor.phPwdMin')" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (idCreateStrength >= n ? idCreateStrength : '')"></i>
-              <em v-if="idCreateStrength >= 4">强</em>
-              <em v-else-if="idCreateStrength >= 3">中</em>
-              <em v-else>弱</em>
+              <em v-if="idCreateStrength >= 4">{{ $t('editor.sStrong') }}</em>
+              <em v-else-if="idCreateStrength >= 3">{{ $t('editor.sMed') }}</em>
+              <em v-else>{{ $t('editor.sWeak') }}</em>
             </div>
           </div>
           <div class="saveas-field">
-            <label>确认密码</label>
-            <input class="input" type="password" v-model="idCreateForm.confirm" :readonly="idBusy" placeholder="再次输入主密码" />
+            <label>{{ $t('editor.labelConfirm') }}</label>
+            <input class="input" type="password" v-model="idCreateForm.confirm" :readonly="idBusy" :placeholder="$t('editor.phConfirm')" />
           </div>
         </template>
         <div v-if="idResult" class="be-result">
-          <div>✓ 导入：<b>{{ idResult.imported.length }}</b> 个文件 / 跳过 {{ idResult.skipped.length }} / 失败 {{ idResult.failed.length }}</div>
+          <div>{{ $t('editor.importResult', { n: idResult.imported.length, skip: idResult.skipped.length, fail: idResult.failed.length }) }}</div>
           <div v-if="idResult.skipped.length" class="be-failed">
-            → 跳过示例（最多10 项）：
+            {{ $t('editor.importSkipEx') }}
             <ul><li v-for="(s, i) in idResult.skipped.slice(0, 10)" :key="i">{{ s }}</li></ul>
           </div>
           <div v-if="idResult.failed.length" class="be-failed">
-            ⚠ 失败明细：
+            {{ $t('editor.importFailDetail') }}
             <ul><li v-for="(f, i) in idResult.failed.slice(0, 10)" :key="i"><span class="be-fpath">{{ f[0] }}</span> — {{ f[1] }}</li></ul>
           </div>
         </div>
-        <div class="saveas-hint">仅导入 .md/.markdown/.mdown/.mkd/.txt，自动保留子目录结构；目标已存在同名文件时不覆盖。</div>
+        <div class="saveas-hint">{{ $t('editor.importHint') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" :disabled="idBusy" @click="showImportDir = false">{{ idResult ? '关闭' : '取消' }}</button>
-        <button class="btn btn-primary" :disabled="idBusy" @click="submitImportDir">{{ idBusy ? '导入中…' : '开始导入' }}</button>
+        <button class="btn" :disabled="idBusy" @click="showImportDir = false">{{ idResult ? $t('common.close') : $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="idBusy" @click="submitImportDir">{{ idBusy ? $t('editor.importing') : $t('editor.importStart') }}</button>
       </div>
     </a-modal>
 
     <!-- 复制到加密库 -->
-    <a-modal v-model:open="showCopyToVault" title="复制到加密库" :width="440" :footer="null">
+    <a-modal v-model:open="showCopyToVault" :title="$t('editor.copyTitle')" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
-          <label>目标库</label>
+          <label>{{ $t('editor.labelVault') }}</label>
           <select class="input" v-model="copyVaultId" @change="onCopyVaultChange">
             <option v-for="v in unlockedVaults.filter((x) => x.isDir || x.isFileVault)" :key="v.id" :value="v.id">{{ v.name }}</option>
-            <option value="__new__">＋ 新建库…</option>
+            <option value="__new__">{{ $t('editor.newVaultOpt') }}</option>
           </select>
         </div>
         <!-- 内联新建库表单 -->
         <template v-if="copyVaultId === '__new__'">
           <div class="saveas-field">
-            <label>保存位置</label>
+            <label>{{ $t('editor.labelPath') }}</label>
             <div class="saveas-path">
-              <input class="input" v-model="createVaultForm.path" placeholder="选择 .mdlb 文件的保存路径" readonly />
-              <button class="btn" @click="browseCreateVaultPath">浏览…</button>
+              <input class="input" v-model="createVaultForm.path" :placeholder="$t('editor.phVaultPath')" readonly />
+              <button class="btn" @click="browseCreateVaultPath">{{ $t('common.browse') }}</button>
             </div>
           </div>
           <div class="saveas-field">
-            <label>主密码</label>
-            <input class="input" type="password" v-model="createVaultForm.pwd" placeholder="至少 1 位，用于加密库内所有文件" />
+            <label>{{ $t('editor.labelPwd') }}</label>
+            <input class="input" type="password" v-model="createVaultForm.pwd" :placeholder="$t('editor.phPwdVault')" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (createVaultStrength >= n ? createVaultStrength : '')"></i>
-              <em v-if="createVaultStrength >= 4">强 · 建议使用密码管理器生成</em>
-              <em v-else-if="createVaultStrength >= 3">中 · 建议混合符号</em>
-              <em v-else>弱 · 建议 12 位以上并混合符号</em>
+              <em v-if="createVaultStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+              <em v-else-if="createVaultStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+              <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
             </div>
           </div>
           <div class="saveas-field">
-            <label>确认密码</label>
-            <input class="input" type="password" v-model="createVaultForm.confirm" placeholder="再次输入主密码" />
+            <label>{{ $t('editor.labelConfirm') }}</label>
+            <input class="input" type="password" v-model="createVaultForm.confirm" :placeholder="$t('editor.phConfirm')" />
           </div>
-          <div class="saveas-hint">点击下方「复制」将创建该单文件库，并把文件复制到库根目录。</div>
+          <div class="saveas-hint">{{ $t('editor.hintCopyCreateVault') }}</div>
         </template>
         <template v-else>
           <div class="saveas-field" v-if="copyFolders.length">
-            <label>目标文件夹</label>
+            <label>{{ $t('editor.labelFolder') }}</label>
             <select class="input" v-model="copyDir">
-              <option value="">库根目录</option>
+              <option value="">{{ $t('editor.vaultRoot') }}</option>
               <option v-for="d in copyFolders" :key="d" :value="d">{{ d }}</option>
             </select>
           </div>
           <div class="saveas-field">
-            <label>文件名</label>
-            <input class="input" v-model="copyName" placeholder="如 会议纪要" />
+            <label>{{ $t('editor.labelName') }}</label>
+            <input class="input" v-model="copyName" :placeholder="$t('editor.phName')" />
           </div>
-          <div class="saveas-hint" v-if="!unlockedVaults.some((x) => x.isDir || x.isFileVault)">没有已解锁的库，可在下拉里选「＋ 新建库…」创建一个。</div>
-          <div class="saveas-hint" v-else>将当前文件内容另存一份到库内，原文件保持不变。</div>
+          <div class="saveas-hint" v-if="!unlockedVaults.some((x) => x.isDir || x.isFileVault)">{{ $t('editor.hintNoUnlocked') }}</div>
+          <div class="saveas-hint" v-else>{{ $t('editor.hintCopyReuse') }}</div>
         </template>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showCopyToVault = false">取消</button>
-        <button class="btn btn-primary" :disabled="copying" @click="submitCopyToVault">{{ copying ? '复制中…' : '复制' }}</button>
+        <button class="btn" @click="showCopyToVault = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="copying" @click="submitCopyToVault">{{ copying ? $t('editor.copying') : $t('editor.copyBtn') }}</button>
       </div>
     </a-modal>
 
     <!-- 修改主密码（库 / 单文件 .mdl） -->
-    <a-modal v-model:open="showChangePwd" :title="`修改密码 · ${changePwdTarget.title}`" :width="440" :footer="null">
+    <a-modal v-model:open="showChangePwd" :title="$t('editor.changePwdTitle', { title: changePwdTarget.title })" :width="440" :footer="null">
       <div class="saveas">
-        <div class="saveas-hint">仅以新密码重新加密密钥，不重加密正文；旧密码即刻失效且不可找回。</div>
+        <div class="saveas-hint">{{ $t('editor.changePwdHint') }}</div>
         <div class="saveas-field">
-          <label>当前密码</label>
-          <input class="input" type="password" v-model="changePwdForm.current" placeholder="输入现有主密码" />
+          <label>{{ $t('editor.labelCurPwd') }}</label>
+          <input class="input" type="password" v-model="changePwdForm.current" :placeholder="$t('editor.phCurPwd')" />
         </div>
         <div class="saveas-field">
-          <label>新密码</label>
-          <input class="input" type="password" v-model="changePwdForm.next" placeholder="至少 1 位" />
+          <label>{{ $t('editor.labelNewPwd') }}</label>
+          <input class="input" type="password" v-model="changePwdForm.next" :placeholder="$t('editor.phPwdMin')" />
           <div class="strength">
             <i v-for="n in 4" :key="n" :class="'lv' + (changePwdStrength >= n ? changePwdStrength : '')"></i>
-            <em v-if="changePwdStrength >= 4">强 · 建议使用密码管理器生成</em>
-            <em v-else-if="changePwdStrength >= 3">中 · 建议混合符号</em>
-            <em v-else>弱 · 建议 12 位以上并混合符号</em>
+            <em v-if="changePwdStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+            <em v-else-if="changePwdStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+            <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
           </div>
         </div>
         <div class="saveas-field">
-          <label>确认新密码</label>
-          <input class="input" type="password" v-model="changePwdForm.confirm" placeholder="再次输入新密码" @keyup.enter="submitChangePwd" />
+          <label>{{ $t('editor.labelConfirmNew') }}</label>
+          <input class="input" type="password" v-model="changePwdForm.confirm" :placeholder="$t('editor.phConfirmNew')" @keyup.enter="submitChangePwd" />
         </div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showChangePwd = false">取消</button>
-        <button class="btn btn-primary" :disabled="changingPwd" @click="submitChangePwd">{{ changingPwd ? '修改中…' : '确认修改' }}</button>
+        <button class="btn" @click="showChangePwd = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="changingPwd" @click="submitChangePwd">{{ changingPwd ? $t('dialog.change.changing') : $t('dialog.change.confirm') }}</button>
       </div>
     </a-modal>
 
     <!-- 重命名 / 移动（库内） -->
-    <a-modal v-model:open="showRename" :title="renameIsDir ? '重命名文件夹 / 移动' : '重命名文件 / 移动'" :width="440" :footer="null">
+    <a-modal v-model:open="showRename" :title="renameIsDir ? $t('editor.renameTitleDir') : $t('editor.renameTitleFile')" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-field">
-          <label>新名称 / 路径</label>
-          <input class="input" ref="renameNameInput" v-model="renameName" placeholder="如 项目/新名字.md" @keyup.enter="submitRename" />
+          <label>{{ $t('editor.labelNewNamePath') }}</label>
+          <input class="input" ref="renameNameInput" v-model="renameName" :placeholder="$t('editor.phRename')" @keyup.enter="submitRename" />
         </div>
-        <div class="saveas-hint">可直接输入新名称；若输入含「/」的路径（如「子目录/新名字.md」），则把该项移动/重命名到对应位置。</div>
+        <div class="saveas-hint">{{ $t('editor.renameHint') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showRename = false">取消</button>
-        <button class="btn btn-primary" :disabled="renaming" @click="submitRename">{{ renaming ? '处理中…' : '确定' }}</button>
+        <button class="btn" @click="showRename = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="renaming" @click="submitRename">{{ renaming ? $t('editor.processing') : $t('common.confirm') }}</button>
       </div>
     </a-modal>
 
     <!-- 删除（库内） -->
-    <a-modal v-model:open="showDelete" :title="(wdOp ? '移入回收站：' : '') + (deleteIsDir ? '文件夹' : '文件')" :width="440" :footer="null">
+    <a-modal v-model:open="showDelete" :title="(wdOp ? $t('editor.trashPrefix') : '') + (deleteIsDir ? $t('editor.targetDir') : $t('editor.targetFile'))" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-hint" :style="wdOp ? 'color:var(--text-2);' : 'color:#cf1322;'">
           {{ wdOp
-            ? (deleteIsDir ? '将把该文件夹移入系统回收站，可从回收站恢复。' : '将把该文件移入系统回收站，可从回收站恢复。')
-            : (deleteIsDir ? '将删除该文件夹及其内部所有内容（不可恢复）。' : '将删除该文件（不可恢复）。') }}
+            ? (deleteIsDir ? $t('editor.delMsgWdDir') : $t('editor.delMsgWdFile'))
+            : (deleteIsDir ? $t('editor.delMsgVaultDir') : $t('editor.delMsgVaultFile')) }}
         </div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showDelete = false">取消</button>
-        <button :class="['btn', wdOp ? 'btn-primary' : 'btn-danger']" :disabled="deleting" @click="submitDelete">{{ wdOp ? (deleting ? '移入中…' : '移入回收站') : (deleting ? '删除中…' : '删除') }}</button>
+        <button class="btn" @click="showDelete = false">{{ $t('common.cancel') }}</button>
+        <button :class="['btn', wdOp ? 'btn-primary' : 'btn-danger']" :disabled="deleting" @click="submitDelete">{{ wdOp ? (deleting ? $t('editor.movingToTrash') : $t('editor.moveToTrashBtn')) : (deleting ? $t('editor.deleting') : $t('editor.deleteBtn')) }}</button>
       </div>
     </a-modal>
 
     <!-- 预览模式勾选任务清单确认 -->
-    <a-modal v-model:open="showTaskConfirm" :title="pendingTaskChecked ? '勾选任务' : '取消勾选'" :width="440" :footer="null">
+    <a-modal v-model:open="showTaskConfirm" :title="pendingTaskChecked ? $t('editor.taskCheck') : $t('editor.taskUncheck')" :width="440" :footer="null">
       <div class="saveas">
-        <div class="saveas-hint" style="color:var(--text-2);">「{{ pendingTaskText }}」{{ pendingTaskChecked ? '该任务已完成' : '该任务设置为未完成' }}。</div>
+        <div class="saveas-hint" style="color:var(--text-2);">「{{ pendingTaskText }}」{{ pendingTaskChecked ? $t('editor.taskDone') : $t('editor.taskUndone') }}。</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showTaskConfirm = false">取消</button>
-        <button class="btn btn-primary" @click="submitTaskConfirm">确定</button>
+        <button class="btn" @click="showTaskConfirm = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" @click="submitTaskConfirm">{{ $t('common.confirm') }}</button>
       </div>
     </a-modal>
 
@@ -6376,50 +6437,50 @@ ${bodyHtml}
         <div class="saveas-hint">{{ closeConfirmText }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="cancelClose">取消</button>
+        <button class="btn" @click="cancelClose">{{ $t('common.cancel') }}</button>
         <button class="btn btn-danger" @click="discardClose">{{ closeConfirmDiscard }}</button>
         <button class="btn btn-primary" @click="saveAndClose">{{ closeConfirmSave }}</button>
       </div>
     </a-modal>
 
     <!-- 外部修改：丢弃内存修改、重新加载磁盘版本确认 -->
-    <a-modal v-model:open="showReloadConfirm" title="重新加载磁盘版本" :width="440" :footer="null">
+    <a-modal v-model:open="showReloadConfirm" :title="$t('editor.reloadTitle')" :width="440" :footer="null">
       <div class="saveas">
-        <div class="saveas-hint">页签有未保存的修改，重新加载将丢弃这些修改并换回磁盘上的内容。是否继续？</div>
+        <div class="saveas-hint">{{ $t('editor.reloadMsg') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="showReloadConfirm = false">取消</button>
-        <button class="btn btn-danger" @click="doReloadTab(reloadTarget)">丢弃并重载</button>
+        <button class="btn" @click="showReloadConfirm = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-danger" @click="doReloadTab(reloadTarget)">{{ $t('editor.discardReload') }}</button>
       </div>
     </a-modal>
 
     <!-- 拖入资源（图片/文件）：询问复制到 .dat 资源目录还是仅链接原路径 -->
-    <a-modal v-model:open="showAssetPrompt" title="拖入文件" :width="480" :footer="null" :mask-closable="false">
+    <a-modal v-model:open="showAssetPrompt" :title="$t('editor.assetTitle')" :width="480" :footer="null" :mask-closable="false">
       <div class="saveas">
-        <div class="saveas-hint">检测到拖入的非文档文件。复制到资源目录会将其存入当前文件同名的 .dat 目录并插入相对链接（随文件一起移动/加密）；仅链接则保留原位置，插入绝对路径链接。</div>
+        <div class="saveas-hint">{{ $t('editor.assetMsg') }}</div>
         <div class="saveas-hint" style="max-height:160px;overflow:auto;word-break:break-all;">
           <div v-for="p in assetPromptFiles" :key="p" style="opacity:.85;">{{ fileName(p) }}</div>
         </div>
       </div>
       <div class="modal-foot">
-        <button class="btn" :disabled="assetBusy" @click="cancelAssetPrompt">取消</button>
-        <button class="btn" :disabled="assetBusy" @click="resolveAssetPrompt('link')">仅链接</button>
-        <button class="btn btn-primary" :disabled="assetBusy" @click="resolveAssetPrompt('copy')">复制到资源目录</button>
+        <button class="btn" :disabled="assetBusy" @click="cancelAssetPrompt">{{ $t('common.cancel') }}</button>
+        <button class="btn" :disabled="assetBusy" @click="resolveAssetPrompt('link')">{{ $t('editor.assetLink') }}</button>
+        <button class="btn btn-primary" :disabled="assetBusy" @click="resolveAssetPrompt('copy')">{{ $t('editor.assetCopy') }}</button>
       </div>
     </a-modal>
 
     <!-- 首次使用：询问是否设为 .mdl/.mdlb 默认打开程序 -->
-    <a-modal v-model:open="showAssocPrompt" title="设为默认打开程序" :width="460" :footer="null" :mask-closable="false">
+    <a-modal v-model:open="showAssocPrompt" :title="$t('editor.assocTitle')" :width="460" :footer="null" :mask-closable="false">
       <div class="saveas">
         <div class="saveas-hint">
-          检测到系统当前不是以 MarkLock 打开 .md / .mdl / .mdlb 文件。是否将 MarkLock 设为这三种文件类型的默认打开程序？
-          设为默认后，在访达 / 资源管理器中双击这些文件即可直接由 MarkLock 打开。
+          {{ $t('editor.assocMsg1') }}
+          {{ $t('editor.assocMsg2') }}
         </div>
-        <div class="saveas-hint" style="opacity:.75;">点击后将自动完成设置，无需进入系统设置；极少数被系统锁定的情况会提示手动步骤。</div>
+        <div class="saveas-hint" style="opacity:.75;">{{ $t('editor.assocHint') }}</div>
       </div>
       <div class="modal-foot">
-        <button class="btn" @click="dismissAssocPrompt">暂不需要</button>
-        <button class="btn btn-primary" @click="applySetDefault">设为默认打开程序</button>
+        <button class="btn" @click="dismissAssocPrompt">{{ $t('editor.assocLater') }}</button>
+        <button class="btn btn-primary" @click="applySetDefault">{{ $t('editor.assocBtn') }}</button>
       </div>
     </a-modal>
 
@@ -6499,6 +6560,7 @@ ${bodyHtml}
 .m-item {
   display: flex; align-items: center; gap: 8px;
   height: 30px; padding: 0 10px;
+  white-space: nowrap;
   border-radius: var(--radius-sm);
   font-size: 13px; color: var(--text-2);
   cursor: pointer;
@@ -6517,7 +6579,7 @@ ${bodyHtml}
 .m-item.has-sub > .sub-menu {
   display: none;
   position: absolute; right: 100%; top: -6px;
-  width: 216px;
+  width: 248px;
   background: var(--panel);
   border: 1px solid var(--border-pop);
   border-radius: var(--radius-sm);

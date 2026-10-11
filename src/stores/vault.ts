@@ -133,6 +133,8 @@ export interface Settings {
   clearClipboardOnLock: boolean
   /** 外观主题：浅色 / 深色 / 跟随系统 */
   theme: 'light' | 'dark' | 'system'
+  /** 界面语言：跟随系统 / 简体中文 / English */
+  language: 'system' | 'zh' | 'en'
   /** 代码高亮主题 */
   codeTheme: 'github' | 'monokai' | 'dracula' | 'atom-one-dark'
   /** 代码 Tab 缩进空格数 */
@@ -180,6 +182,7 @@ export const DEFAULT_SETTINGS: Settings = {
   lockOnSleep: true,
   clearClipboardOnLock: false,
   theme: 'system',
+  language: 'system',
   codeTheme: 'github',
   codeIndent: 4,
   editorFontSize: 14,

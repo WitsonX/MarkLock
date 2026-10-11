@@ -6,6 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
+import { t } from '../locales'
 
 // ==================== 类型 ====================
 
@@ -324,9 +325,9 @@ export function search(query: string, workdirs: string[] = []) {
  *   两种顺序都同时提供加密 / 文本 / 所有三类过滤，可在对话框内切换。
  */
 export async function openFileDialog(preferEncrypted = true) {
-  const encrypted = { name: 'MarkLock 加密文件', extensions: ['mdl', 'mdlb'] }
-  const plain = { name: 'Markdown / 文本', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] }
-  const all = { name: '所有文件', extensions: ['*'] }
+  const encrypted = { name: t('common.fd.encFiles'), extensions: ['mdl', 'mdlb'] }
+  const plain = { name: t('common.fd.mdText'), extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] }
+  const all = { name: t('common.fd.all'), extensions: ['*'] }
   const path = await open({
     multiple: false,
     filters: preferEncrypted ? [encrypted, plain, all] : [plain, encrypted, all],
@@ -335,10 +336,10 @@ export async function openFileDialog(preferEncrypted = true) {
 }
 
 /** 保存文件对话框（选择新建 .mdlb 单文件库的路径）。 */
-export async function saveFileVaultDialog(defaultName = '未命名.mdlb') {
+export async function saveFileVaultDialog(defaultName = `${t('common.untitled')}.mdlb`) {
   const path = await save({
     defaultPath: defaultName,
-    filters: [{ name: 'MarkLock 加密库', extensions: ['mdlb'] }],
+    filters: [{ name: t('common.fd.encVault'), extensions: ['mdlb'] }],
   })
   return typeof path === 'string' ? path : null
 }
@@ -367,6 +368,11 @@ export function syncNativeMenu(checks: Record<string, boolean>, hasVaults: boole
   return invoke<void>('sync_native_menu', { checks, hasVaults, hasWorkdir })
 }
 
+/** 同步 macOS 原生菜单语言（'zh' | 'en'）：后端据此重建菜单；非 macOS 为无害空操作。 */
+export function setNativeMenuLang(lang: 'zh' | 'en') {
+  return invoke<void>('set_native_menu_lang', { lang })
+}
+
 /** 取出并清空冷启动缓存的待打开文件路径（修复 macOS 双击打开丢事件）。 */
 export function takePendingOpenPaths() {
   return invoke<string[]>('take_pending_open_paths')
@@ -390,18 +396,18 @@ export function trySetDefaultFileHandler() {
 }
 
 /** 保存文件对话框（选择新建 .mdl / 明文 .md 的路径）。 */
-export async function saveFileDialog(defaultName = '未命名.mdl', kind: 'encrypted' | 'plain' = 'encrypted') {
+export async function saveFileDialog(defaultName = `${t('common.untitled')}.mdl`, kind: 'encrypted' | 'plain' = 'encrypted') {
   const path = await save({
     defaultPath: defaultName,
     filters: kind === 'plain'
       ? [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] }]
-      : [{ name: 'MarkLock 加密文件', extensions: ['mdl'] }],
+      : [{ name: t('common.fd.encFiles'), extensions: ['mdl'] }],
   })
   return typeof path === 'string' ? path : null
 }
 
 /** 保存文件对话框（导出 HTML 的路径）。 */
-export async function saveHtmlDialog(defaultName = '未命名.html') {
+export async function saveHtmlDialog(defaultName = `${t('common.untitled')}.html`) {
   const path = await save({
     defaultPath: defaultName,
     filters: [{ name: 'HTML', extensions: ['html', 'htm'] }],
@@ -417,8 +423,8 @@ export async function openMultipleTextFilesDialog(): Promise<string[]> {
   const r = await open({
     multiple: true,
     filters: [
-      { name: 'Markdown / 文本', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
-      { name: '所有文件', extensions: ['*'] },
+      { name: t('common.fd.mdText'), extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
+      { name: t('common.fd.all'), extensions: ['*'] },
     ],
   })
   if (Array.isArray(r)) return r.filter((x): x is string => typeof x === 'string')

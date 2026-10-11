@@ -8,6 +8,7 @@ import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter,
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel } from '@codemirror/search'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
 import { oneDark } from '@codemirror/theme-one-dark'
+import { t, lang } from '../locales'
 
 export default defineComponent({
   name: 'CodeMirrorEditor',
@@ -28,6 +29,38 @@ export default defineComponent({
     const themeCompartment = new Compartment()
     const activeLineCompartment = new Compartment()
     const readOnlyCompartment = new Compartment()
+    const phrasesCompartment = new Compartment()
+
+    // CodeMirror 内置面板（查找/替换、跳转行、折叠等）的中文短语；英文态返回空对象，
+    // 交由 CodeMirror 自带的英文默认值。
+    const CM_ZH_PHRASES: Record<string, string> = {
+      Find: '查找',
+      Replace: '替换',
+      next: '下一个',
+      previous: '上一个',
+      all: '全部',
+      'match case': '区分大小写',
+      regexp: '正则',
+      'by word': '全字匹配',
+      replace: '替换',
+      'replace all': '全部替换',
+      close: '关闭',
+      'Go to line': '跳转到行',
+      go: '跳转',
+      'replaced match on line $': '已替换第 $ 行的匹配',
+      'replaced $ matches': '已替换 $ 处匹配',
+      'current match': '当前匹配',
+      'on line': '位于第',
+      Completions: '自动补全',
+      'Folded lines': '已折叠行',
+      'Unfolded lines': '已展开行',
+      to: '至',
+      'folded code': '已折叠代码',
+      unfold: '展开',
+      'Selection deleted': '已删除选区',
+      'Control character': '控制字符',
+    }
+    const cmPhrases = (): Record<string, string> => (lang.value === 'en' ? {} : CM_ZH_PHRASES)
 
     const isDark = computed(() => document.documentElement.dataset.theme === 'dark')
 
@@ -144,7 +177,7 @@ export default defineComponent({
 
     // ---------- 格式化操作（供工具栏/快捷键调用） ----------
     /** 用符号包裹选区；无选区时插入占位文本并选中 */
-    const wrapSelection = (before: string, after = before, placeholder = '文本') => {
+    const wrapSelection = (before: string, after = before, placeholder = t('editor.phText')) => {
       if (!view) return
       const st = view.state
       const { from, to } = st.selection.main
@@ -244,7 +277,7 @@ export default defineComponent({
       const st = view.state
       const { from, to } = st.selection.main
       const sel = st.sliceDoc(from, to)
-      const text = sel || (image ? 'alt' : '链接文字')
+      const text = sel || (image ? 'alt' : t('editor.phLinkText'))
       const bang = image ? '!' : ''
       const insert = `${bang}[${text}](url)`
       const urlFrom = from + bang.length + 1 + text.length + 2
@@ -317,33 +350,7 @@ export default defineComponent({
       const state = EditorState.create({
         doc: props.modelValue,
         extensions: [
-          EditorState.phrases.of({
-            'Find': '查找',
-            'Replace': '替换',
-            'next': '下一个',
-            'previous': '上一个',
-            'all': '全部',
-            'match case': '区分大小写',
-            'regexp': '正则',
-            'by word': '全字匹配',
-            'replace': '替换',
-            'replace all': '全部替换',
-            'close': '关闭',
-            'Go to line': '跳转到行',
-            'go': '跳转',
-            'replaced match on line $': '已替换第 $ 行的匹配',
-            'replaced $ matches': '已替换 $ 处匹配',
-            'current match': '当前匹配',
-            'on line': '位于第',
-            'Completions': '自动补全',
-            'Folded lines': '已折叠行',
-            'Unfolded lines': '已展开行',
-            'to': '至',
-            'folded code': '已折叠代码',
-            'unfold': '展开',
-            'Selection deleted': '已删除选区',
-            'Control character': '控制字符',
-          }),
+          phrasesCompartment.of(EditorState.phrases.of(cmPhrases())),
           ...createExtensions(isDark.value),
         ],
       })
@@ -395,6 +402,14 @@ export default defineComponent({
           themeCompartment.reconfigure(dark ? oneDark : customLightTheme),
           activeLineCompartment.reconfigure(dark ? activeLineDark : activeLineLight),
         ],
+      })
+    })
+
+    // 语言切换时重配 CodeMirror 短语（查找/替换面板等内置文案）
+    watch(lang, () => {
+      if (!view) return
+      view.dispatch({
+        effects: phrasesCompartment.reconfigure(EditorState.phrases.of(cmPhrases())),
       })
     })
 

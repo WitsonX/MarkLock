@@ -67,16 +67,16 @@ export default defineComponent({
       })
       this.store.persistFavorites()
       if (missing.some((m) => m.id === this.targetId)) this.targetId = ''
-      message.warning(`库文件不存在，已从列表移除：${missing.map((m) => m.name).join('、')}`)
+      message.warning(this.$t('unlock.prunedMsg', { names: missing.map((m) => m.name).join('、') }))
     },
     async doUnlock() {
       const vault = this.targetVault
       if (!vault) {
-        message.warning('请先选择一个加密库')
+        message.warning(this.$t('unlock.pickVaultFirst'))
         return
       }
       if (!this.password) {
-        message.warning('请输入主密码')
+        message.warning(this.$t('unlock.enterPassword'))
         return
       }
       this.loading = true
@@ -86,11 +86,11 @@ export default defineComponent({
         if (!(await tauri.pathExists(vault.path))) {
           this.store.removeVault(vault.id)
           this.targetId = ''
-          this.error = '库文件不存在（可能已被移动或删除），已从库列表移除'
+          this.error = this.$t('unlock.vaultMissing')
           return
         }
         await this.store.unlockVault(vault.id, this.password)
-        message.success('解锁成功')
+        message.success(this.$t('unlock.unlockSuccess'))
         this.$router.push('/editor')
       } catch (e) {
         this.error = String(e)
@@ -157,19 +157,19 @@ export default defineComponent({
             </svg>
           </div>
           <h1>MarkLock</h1>
-          <p>可加密的 Markdown 查看编辑器<br />你的笔记，只有你能打开。</p>
+          <p>{{ $t('unlock.brandTagline') }}<br />{{ $t('unlock.brandSub') }}</p>
           <div class="feat">
-            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>端到端加密 · 防篡改校验</span>
-            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>独立文件密钥 · 抗暴力破解</span>
-            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>本地加密存储，离线可用，零上传</span>
-            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>自动锁定 &amp; 剪贴板定时清除</span>
+            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>{{ $t('unlock.featE2e') }}</span>
+            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>{{ $t('unlock.featKey') }}</span>
+            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>{{ $t('unlock.featLocal') }}</span>
+            <span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M20 6L9 17l-5-5" /></svg>{{ $t('unlock.featAutoLock') }}</span>
           </div>
           <div class="ver">v1.0.0 · macOS / Windows</div>
         </div>
 
         <!-- 解锁区：目标库 + 一个密码框 -->
         <div class="panel">
-          <h2>解锁加密库</h2>
+          <h2>{{ $t('unlock.title') }}</h2>
 
           <template v-if="vaults.length">
             <!-- 目标库 -->
@@ -190,36 +190,36 @@ export default defineComponent({
             <!-- 未指定目标：紧凑下拉选择 -->
             <div class="pwd-row" v-else>
               <select class="input input-lg" v-model="targetId" :disabled="loading">
-                <option value="" disabled>选择加密库</option>
+                <option value="" disabled>{{ $t('unlock.selectVault') }}</option>
                 <option v-for="v in vaults" :key="v.id" :value="v.id">{{ v.name }}</option>
               </select>
             </div>
 
             <div class="pwd-row">
-              <input ref="pwdInput" class="input input-lg" type="password" placeholder="输入主密码" v-model="password" :disabled="loading" @keyup.enter="doUnlock" />
+              <input ref="pwdInput" class="input input-lg" type="password" :placeholder="$t('unlock.passwordPlaceholder')" v-model="password" :disabled="loading" @keyup.enter="doUnlock" />
               <button class="btn btn-primary btn-lg" style="flex:0 0 92px;" :disabled="loading" @click="doUnlock">
-                {{ loading ? '解锁中…' : '解锁' }}
+                {{ loading ? $t('unlock.unlocking') : $t('unlock.unlock') }}
               </button>
-              <button class="btn btn-lg" style="flex:0 0 92px;" :disabled="loading" @click="cancel">取消</button>
+              <button class="btn btn-lg" style="flex:0 0 92px;" :disabled="loading" @click="cancel">{{ $t('common.cancel') }}</button>
             </div>
             <div class="error" v-if="error">{{ error }}</div>
 
             <div class="alt" v-if="!targetVault">
-              <span class="link gray" @click="openVaultOrFile">打开加密库 / 文件…</span>
+              <span class="link gray" @click="openVaultOrFile">{{ $t('unlock.openVaultOrFile') }}</span>
             </div>
           </template>
 
           <div class="empty" v-else>
-            <p>还没有加密库</p>
+            <p>{{ $t('unlock.emptyTitle') }}</p>
             <p class="empty-sub">
-              <span class="link" @click="openVaultOrFile">打开加密库 / 文件…</span>
-              ，或在编辑器右上菜单「＋ 新建加密库」
+              <span class="link" @click="openVaultOrFile">{{ $t('unlock.emptyHintPrefix') }}</span>
+              {{ $t('unlock.emptyHintSuffix') }}
             </p>
           </div>
 
           <div class="tip">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 8v4M12 16h.01" /></svg>
-            密码仅用于本地解密，不会上传到任何服务器
+            {{ $t('unlock.privacyTip') }}
           </div>
         </div>
       </div>

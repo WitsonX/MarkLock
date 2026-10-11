@@ -49,17 +49,17 @@ export default defineComponent({
     },
     async createVault() {
       const { name, path, pwd, confirm } = this.createForm
-      if (!path) return message.warning('请选择保存位置')
-      if (pwd.length < 1) return message.warning('请设置密码（至少 1 位）')
-      if (pwd !== confirm) return message.warning('两次密码不一致')
+      if (!path) return message.warning(this.$t('dialog.toast.pickSaveLocation'))
+      if (pwd.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+      if (pwd !== confirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
       this.creating = true
       try {
         const filePath = path.endsWith('.mdlb') ? path : `${path}.mdlb`
         await tauri.createFileVault(filePath, pwd, undefined)
-        const vname = name.trim() || (filePath.split(/[\\/]/).pop() || '').replace(/\.mdlb$/, '') || '未命名'
+        const vname = name.trim() || (filePath.split(/[\\/]/).pop() || '').replace(/\.mdlb$/, '') || this.$t('common.untitled')
         this.store.registerVault({ id: filePath, name: vname, path: filePath, isDir: false, isFileVault: true })
         await this.store.unlockVault(filePath, pwd)
-        message.success('单文件库已创建并解锁')
+        message.success(this.$t('dialog.toast.vaultCreated'))
         this.$router.push('/editor')
       } catch (e) {
         message.error(String(e))
@@ -70,13 +70,13 @@ export default defineComponent({
     async changePassword() {
       const { current, next, confirm } = this.changeForm
       const vault = this.store.unlockedVaults[0]
-      if (!vault) return message.warning('请先解锁一个库')
-      if (next.length < 1) return message.warning('请设置密码（至少 1 位）')
-      if (next !== confirm) return message.warning('两次密码不一致')
+      if (!vault) return message.warning(this.$t('dialog.toast.unlockVaultFirst'))
+      if (next.length < 1) return message.warning(this.$t('dialog.toast.setPwdMin'))
+      if (next !== confirm) return message.warning(this.$t('dialog.toast.pwdMismatch'))
       this.changing = true
       try {
         await tauri.changePassword(vault.id, vault.path, current, next)
-        message.success('主密码已修改')
+        message.success(this.$t('dialog.toast.pwdChanged'))
         this.changeForm = { current: '', next: '', confirm: '' }
       } catch (e) {
         message.error(String(e))
@@ -90,7 +90,7 @@ export default defineComponent({
 
 <template>
   <div class="screen">
-    <TitleBar transparent subtitle="弹窗集合 · 新建 / 解锁 / 修改主密码" />
+    <TitleBar transparent :subtitle="$t('dialog.subtitle')" />
 
     <div class="stage">
       <!-- ============ 弹窗 1：新建加密库 ============ -->
@@ -100,36 +100,36 @@ export default defineComponent({
           :footer="null"
           width="460"
           :closable="true"
-          title="新建加密库"
+          :title="$t('dialog.create.title')"
         >
           <div class="form-item">
-            <label class="form-label"><b>保存位置</b></label>
+            <label class="form-label"><b>{{ $t('dialog.create.saveLocation') }}</b></label>
             <div class="path-row">
-              <input class="input" v-model="createForm.path" placeholder="选择 .mdlb 文件的保存路径" readonly />
-              <button class="btn" @click="browsePath">浏览…</button>
+              <input class="input" v-model="createForm.path" :placeholder="$t('dialog.create.pathPlaceholder')" readonly />
+              <button class="btn" @click="browsePath">{{ $t('dialog.create.browse') }}</button>
             </div>
-            <div class="form-hint">.mdlb 是单个加密文件：文件名、目录结构、正文全部密文，可直接放进 iCloud / Dropbox 同步</div>
+            <div class="form-hint">{{ $t('dialog.create.mdlbHint') }}</div>
           </div>
           <div class="form-item">
-            <label class="form-label"><b>主密码</b></label>
+            <label class="form-label"><b>{{ $t('dialog.create.masterPwd') }}</b></label>
             <input class="input" type="password" v-model="createForm.pwd" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (createStrength >= n ? createStrength : '')"></i>
-              <em v-if="createStrength >= 4">强 · 建议使用密码管理器生成</em>
-              <em v-else-if="createStrength >= 3">中 · 建议混合符号</em>
-              <em v-else>弱 · 建议 12 位以上并混合符号</em>
+              <em v-if="createStrength >= 4">{{ $t('dialog.create.strengthStrong') }}</em>
+              <em v-else-if="createStrength >= 3">{{ $t('dialog.create.strengthMed') }}</em>
+              <em v-else>{{ $t('dialog.create.strengthWeak') }}</em>
             </div>
           </div>
           <div class="form-item">
-            <label class="form-label"><b>确认主密码</b></label>
+            <label class="form-label"><b>{{ $t('dialog.create.confirmPwd') }}</b></label>
             <input class="input" type="password" v-model="createForm.confirm" />
           </div>
           <div class="modal-foot">
-            <button class="btn" @click="visible.create = false">取消</button>
-            <button class="btn btn-primary" :disabled="creating" @click="createVault">{{ creating ? '创建中…' : '创建并解锁' }}</button>
+            <button class="btn" @click="visible.create = false">{{ $t('common.cancel') }}</button>
+            <button class="btn btn-primary" :disabled="creating" @click="createVault">{{ creating ? $t('dialog.create.creating') : $t('dialog.create.createAndUnlock') }}</button>
           </div>
         </a-modal>
-        <div class="modal-cap">① 新建加密库（含密码强度提示）</div>
+        <div class="modal-cap">{{ $t('dialog.create.cap') }}</div>
       </div>
 
       <!-- ============ 弹窗 2：解锁（错误态） ============ -->
@@ -138,28 +138,28 @@ export default defineComponent({
           v-model:open="visible.unlock"
           :footer="null"
           width="400"
-          title="解锁加密库"
+          :title="$t('dialog.unlock.title')"
         >
           <div class="unlock-hero">
             <div class="ico">
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#1677ff" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
             </div>
-            <div class="vn">工作笔记</div>
+            <div class="vn">{{ $t('dialog.unlock.mockName') }}</div>
             <div class="vp">~/Documents/Vaults/work.mlkv</div>
           </div>
           <div class="form-item">
             <input class="input input-lg input-error" type="password" v-model="unlockPwd" />
-            <div class="form-hint err">密码错误，请重试。连续失败 5 次后将锁定 10 分钟（还剩 4 次）</div>
+            <div class="form-hint err">{{ $t('dialog.unlock.pwdErr') }}</div>
           </div>
           <div class="form-item" style="display:flex;justify-content:space-between;font-size:13px;">
-            <span class="link gray">使用密码提示</span>
-            <span class="link gray">忘记密码？</span>
+            <span class="link gray">{{ $t('dialog.unlock.useHint') }}</span>
+            <span class="link gray">{{ $t('dialog.unlock.forgotPwd') }}</span>
           </div>
           <div class="modal-foot stretch">
-            <button class="btn btn-primary btn-lg btn-block">解锁</button>
+            <button class="btn btn-primary btn-lg btn-block">{{ $t('dialog.unlock.unlockBtn') }}</button>
           </div>
         </a-modal>
-        <div class="modal-cap">② 解锁（密码错误态 + 失败次数限制）</div>
+        <div class="modal-cap">{{ $t('dialog.unlock.cap') }}</div>
       </div>
 
       <!-- ============ 弹窗 3：修改主密码 ============ -->
@@ -168,35 +168,35 @@ export default defineComponent({
           v-model:open="visible.changePwd"
           :footer="null"
           width="440"
-          title="修改主密码"
+          :title="$t('dialog.change.title')"
         >
           <div class="warn-bar">
             <svg width="15" height="15" style="flex:0 0 auto;margin-top:2px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 9v4M12 17h.01M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" /></svg>
-            <span>修改后，128 个文件只需以新密码重新加密密钥（约 3 秒），<b>无需全文重加密</b>。旧密码即刻失效且不可找回。</span>
+            <span>{{ $t('dialog.change.warnPre') }}<b>{{ $t('dialog.change.warnBold') }}</b>{{ $t('dialog.change.warnPost') }}</span>
           </div>
           <div class="form-item">
-            <label class="form-label"><b>当前主密码</b></label>
+            <label class="form-label"><b>{{ $t('dialog.change.currentPwd') }}</b></label>
             <input class="input" type="password" v-model="changeForm.current" />
           </div>
           <div class="form-item">
-            <label class="form-label"><b>新主密码</b></label>
+            <label class="form-label"><b>{{ $t('dialog.change.newPwd') }}</b></label>
             <input class="input" type="password" v-model="changeForm.next" />
             <div class="strength">
               <i v-for="n in 4" :key="n" :class="'lv' + (changeStrength >= n ? changeStrength : '')"></i>
-              <em v-if="changeStrength >= 3">中等 · 建议 12 位以上并混合符号</em>
-              <em v-else>偏弱 · 建议 12 位以上并混合符号</em>
+              <em v-if="changeStrength >= 3">{{ $t('dialog.change.strengthMed') }}</em>
+              <em v-else>{{ $t('dialog.change.strengthWeak') }}</em>
             </div>
           </div>
           <div class="form-item">
-            <label class="form-label"><b>确认新主密码</b></label>
+            <label class="form-label"><b>{{ $t('dialog.change.confirmNew') }}</b></label>
             <input class="input" type="password" v-model="changeForm.confirm" />
           </div>
           <div class="modal-foot">
-            <button class="btn" @click="visible.changePwd = false">取消</button>
-            <button class="btn btn-primary" :disabled="changing" @click="changePassword">{{ changing ? '修改中…' : '确认修改' }}</button>
+            <button class="btn" @click="visible.changePwd = false">{{ $t('common.cancel') }}</button>
+            <button class="btn btn-primary" :disabled="changing" @click="changePassword">{{ changing ? $t('dialog.change.changing') : $t('dialog.change.confirm') }}</button>
           </div>
         </a-modal>
-        <div class="modal-cap">③ 修改主密码（仅重新加密密钥）</div>
+        <div class="modal-cap">{{ $t('dialog.change.cap') }}</div>
       </div>
     </div>
   </div>

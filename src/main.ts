@@ -5,6 +5,7 @@ import 'ant-design-vue/dist/reset.css'
 import App from './App.vue'
 import router from './router'
 import tip from './lib/tooltip'
+import { t } from './locales'
 import { dismissSplash } from './lib/splash'
 import './styles/global.css'
 
@@ -19,6 +20,8 @@ app.use(createPinia())
 app.use(router)
 app.use(Antd)
 app.directive('tip', tip)
+// 全局翻译函数：模板用 $t('key')，Options API 方法内用 this.$t('key')。
+app.config.globalProperties.$t = t
 try {
   app.mount('#app')
 } finally {
