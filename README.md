@@ -13,31 +13,14 @@
 Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rust。
 所有数据只存本地，文件落盘即密文，**密钥永不出设备、不进 JS、不上传**。
 
-> 📐 完整架构设计与功能演进时间线见 **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)**。
-
 ## 下载
 
-从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包；国内网络可改从 [Gitee 发行版](https://gitee.com/Witson/MarkLock/releases) 下载（三个常规包 Gitee 都有，离线包只在 GitHub）：
+从 [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) 获取安装包，文件名按平台选即可；国内网络可改从 [Gitee 发行版](https://gitee.com/Witson/MarkLock/releases) 下载（Gitee 有除离线包外的全部安装包）。
 
-| 平台 | 文件 |
-|---|---|
-| macOS（Apple Silicon / Intel） | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
-| Windows（x64） | `MarkLock_<ver>_x64-setup.exe` |
-| Windows（x64，内嵌 WebView2，仅 GitHub） | `MarkLock_<ver>_x64-setup-offline.exe` |
+- 默认 Windows 包只有 3.5MB（WebView2 运行时安装时联网下载）；机器没有 WebView2 又连不上微软 CDN 时，改用 `*-setup-offline.exe`（约 209MB，全程免网）。Win11 和更新过的 Win10 一般自带运行时，用默认包就够。
+- 离线包只在 GitHub 提供（Gitee 附件单文件限 100MB）；Gitee 侧可先装官方 [WebView2 运行时](https://go.microsoft.com/fwlink/?linkid=2124701) 再装小包。
 
-默认 Windows 包只有 3.5MB，WebView2 运行时是安装时联网下载的。如果那台机器既没有 WebView2 又连不上微软 CDN，安装会在中途报错退出 —— 这种情况改用 `*-setup-offline.exe`（约 209MB，运行时打进安装包，全程不需要网络）。Windows 11 以及更新过的 Windows 10 基本都自带运行时，用默认包就够。
-
-受 Gitee 附件单文件 100MB 上限限制（实测超限传不上去），离线包只在 GitHub 提供；Gitee 侧的机器可以先单独装微软官方 WebView2 运行时再装小包：https://go.microsoft.com/fwlink/?linkid=2124701
-
-> 安装包只做 ad-hoc 本地签名、未走 Apple 公证，首次打开会提示「未打开 MarkLock —— Apple 无法验证…」（这是未公证的固定流程，不是检测到恶意软件）。放行只需一次：
->
-> 1. 在那个弹窗点「完成」；
-> 2. 打开「系统设置 → 隐私与安全性」，滚到「安全性」一节，会看到「已阻止 "MarkLock" 以保护 Mac」，点右侧的**「仍要打开」**；
-> 3. 输入密码确认，应用即启动，同一个安装位置以后不再询问。
->
-> 新版 macOS 已移除「任何来源」选项，上面这条是最稳的路径；部分版本在「应用程序」里右键 → 打开 也能弹出同样的放行提示，可以一试。
-> 万一提示的是「MarkLock 已损坏」（而非「无法验证」），说明拿到的是没有资源密封的旧构建，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 清除隔离属性即可。
-> Windows 同样未签名，安装时在 SmartScreen 提示里点「更多信息 → 仍要运行」。
+> 安装包未走 Apple 公证，首次打开提示「Apple 无法验证」属固定流程，放行只需一次：弹窗点「完成」→「系统设置 → 隐私与安全性 → 安全性」里点**「仍要打开」**→ 输密码，之后同一位置不再询问（部分版本右键 → 打开 也可）。若提示「已损坏」，是旧构建未做资源密封，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 即可。Windows 同样未签名，SmartScreen 里点「更多信息 → 仍要运行」。
 
 ## 界面
 
@@ -115,6 +98,8 @@ Tauri 2 桌面应用：前端 Vue 3 + Ant Design Vue，壳与加密核心用 Rus
 | 编辑器 | CodeMirror 6 | Markdown 语法高亮 + 源码模式 + 搜索/折叠/自动补全，已接入替换 textarea（见 `src/components/CodeMirrorEditor.vue`） |
 | 加密 | Rust：`aes-gcm` / `argon2` | 密钥操作全部在 Rust 侧完成 |
 
+> 📐 完整架构设计与功能演进时间线见 **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)**。
+
 ## 界面原型
 
 `doc/ui-prototype/` 下是纯静态高保真原型（无外部依赖，双击即可看）：
@@ -191,11 +176,6 @@ MarkLock/
 ## 路线图
 
 1.0 已覆盖加密库 / 单文件双形态、CodeMirror 编辑器、全文搜索、收藏、大纲、外部修改监控与打包分发。
-
-后续计划：
-
-- [ ] 历史快照（可选，同样密文存储）
-- [ ] 更换加密方案并全文重加密
 
 需求与建议欢迎提到 [Issues](https://github.com/WitsonX/MarkLock/issues)。
 

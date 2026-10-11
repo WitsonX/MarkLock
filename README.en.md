@@ -18,31 +18,14 @@ MarkLock is a desktop app built with Tauri 2 — Vue 3 + Ant Design Vue on the f
 
 Every byte hits the disk already encrypted. **Keys never leave the device, never enter JavaScript, never get uploaded.**
 
-> 📐 Full architecture design and evolution timeline: **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)** (Chinese).
-
 ## Download
 
-Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — the three regular installers are also attached to the [Gitee release page](https://gitee.com/Witson/MarkLock/releases), which downloads faster from mainland China:
+Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — pick the file matching your platform. From mainland China the [Gitee release page](https://gitee.com/Witson/MarkLock/releases) downloads faster and carries every installer except the offline build:
 
-| Platform | File |
-|---|---|
-| macOS (Apple Silicon / Intel) | `MarkLock_<ver>_aarch64.dmg` / `MarkLock_<ver>_x64.dmg` |
-| Windows (x64) | `MarkLock_<ver>_x64-setup.exe` |
-| Windows (x64, WebView2 bundled — GitHub only) | `MarkLock_<ver>_x64-setup-offline.exe` |
+- The default Windows build is only 3.5MB (it downloads the WebView2 runtime while installing). If the machine has no WebView2 and can't reach Microsoft's CDN, use `*-setup-offline.exe` instead (about 209MB, no network needed). Windows 11 and updated Windows 10 already ship the runtime, so the default build is fine.
+- The offline build is GitHub-only (Gitee caps attachments at 100MB per file). On a Gitee machine, install the official [WebView2 runtime](https://go.microsoft.com/fwlink/?linkid=2124701) first, then use the small build.
 
-The default Windows build is only 3.5MB and downloads the WebView2 runtime while installing. If the target machine has no WebView2 and cannot reach Microsoft's CDN, the install aborts halfway — use `*-setup-offline.exe` there instead (about 209MB, the runtime ships inside it, no network needed). Windows 11 and updated Windows 10 already have the runtime, so the default build is fine.
-
-The offline build is hosted on GitHub only: Gitee caps release attachments at 100MB per file, so a 209MB asset cannot be uploaded there. On a machine pulled from Gitee, install the WebView2 runtime first — Microsoft's official 64-bit standalone installer is at https://go.microsoft.com/fwlink/?linkid=2124701 — then use the small build.
-
-> Installers carry an ad-hoc signature only — they are not notarized by Apple, so the first launch is blocked with "MarkLock cannot be opened because Apple cannot check it for malicious software". That is the standard un-notarized flow, not a malware finding. One-time bypass:
->
-> 1. Click **Done** on that dialog;
-> 2. Open **System Settings → Privacy & Security**, scroll to the *Security* section, find "MarkLock was blocked to protect your Mac" and click **Open Anyway**;
-> 3. Confirm with your password — the app launches and the same install location won't ask again.
->
-> Recent macOS versions dropped the "App anywhere" option, so the route above is the reliable one; on some builds right-clicking `MarkLock.app` → **Open** in Finder shows the same approval prompt.
-> If macOS instead says the app is **"damaged"**, you grabbed an older build without a resource seal — clear the quarantine flag with `xattr -dr com.apple.quarantine /Applications/MarkLock.app`.
-> Windows binaries are unsigned too: click **More info → Run anyway** on the SmartScreen prompt.
+> Installers carry an ad-hoc signature only — they aren't notarized by Apple, so the first-launch "Apple cannot check it" prompt is expected. One-time bypass: click **Done**, then in **System Settings → Privacy & Security → Security** click **Open Anyway** and confirm with your password — the same location won't ask again (on some builds right-click → **Open** works too). If macOS says the app is **"damaged"**, it's an older build without a resource seal — run `xattr -dr com.apple.quarantine /Applications/MarkLock.app`. Windows binaries are unsigned too: click **More info → Run anyway** on SmartScreen.
 
 ## Core concepts
 
@@ -94,6 +77,8 @@ All crypto runs in Rust. The frontend only ever sees plaintext views and ciphert
 | UI kit | Ant Design Vue | Good fit for a desktop tool |
 | Editor | CodeMirror 6 | Markdown highlighting, source mode, search / folding / completion |
 | Crypto | `aes-gcm`, `argon2`, `zeroize` | Everything key-related stays in Rust |
+
+> 📐 Full architecture design and evolution timeline: **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)** (Chinese).
 
 ## Interface
 
