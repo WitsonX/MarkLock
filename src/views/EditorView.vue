@@ -6406,7 +6406,7 @@ ${bodyHtml}
     </a-modal>
 
     <!-- 删除（库内） -->
-    <a-modal v-model:open="showDelete" :title="(wdOp ? $t('editor.trashPrefix') : '') + (deleteIsDir ? $t('editor.targetDir') : $t('editor.targetFile'))" :width="440" :footer="null">
+    <a-modal v-model:open="showDelete" :title="deleteIsDir ? $t('editor.deleteTitleDir') : $t('editor.deleteTitleFile')" :width="440" :footer="null">
       <div class="saveas">
         <div class="saveas-hint" :style="wdOp ? 'color:var(--text-2);' : 'color:#cf1322;'">
           {{ wdOp
@@ -6416,7 +6416,7 @@ ${bodyHtml}
       </div>
       <div class="modal-foot">
         <button class="btn" @click="showDelete = false">{{ $t('common.cancel') }}</button>
-        <button :class="['btn', wdOp ? 'btn-primary' : 'btn-danger']" :disabled="deleting" @click="submitDelete">{{ wdOp ? (deleting ? $t('editor.movingToTrash') : $t('editor.moveToTrashBtn')) : (deleting ? $t('editor.deleting') : $t('editor.deleteBtn')) }}</button>
+        <button :class="['btn', wdOp ? 'btn-primary' : 'btn-danger']" :disabled="deleting" @click="submitDelete">{{ deleting ? $t('editor.deleting') : $t('editor.deleteBtn') }}</button>
       </div>
     </a-modal>
 

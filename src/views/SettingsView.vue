@@ -2,6 +2,7 @@
 import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getVersion } from '@tauri-apps/api/app'
 import TitleBar from '../components/TitleBar.vue'
 import { useVaultStore } from '../stores/vault'
 import { lang } from '../locales'
@@ -25,6 +26,8 @@ export default defineComponent({
     return {
       aboutIcon,
       active: 'general',
+      // 关于页版本号：运行时从 Tauri 读取（源自 tauri.conf.json），避免在文案里写死
+      appVersion: '',
       // 原生菜单「关于」事件解绑句柄
       _unlistenMenu: null as UnlistenFn | null,
       // 设置搜索关键词
@@ -126,6 +129,8 @@ greet('MarkLock');`
   },
   mounted() {
     this.buildSearchIndex()
+    // 读取真实应用版本用于「关于」页展示；非 Tauri 环境（纯 web dev）下静默降级
+    getVersion().then((v) => (this.appVersion = v)).catch(() => {})
     // 支持通过路由 query（如原生菜单「关于」跳入）直达指定页签
     const tab = this.$route.query.tab
     if (typeof tab === 'string' && this.nav.some((n) => n.key === tab)) this.active = tab
@@ -632,7 +637,7 @@ greet('MarkLock');`
             </div>
             <div class="about-name">MarkLock</div>
             <div class="about-meta">
-              <span class="about-ver">{{ $t('settings.about.version') }}</span>
+              <span class="about-ver">{{ $t('settings.about.version', { version: appVersion }) }}</span>
               <span class="about-sep"></span>
               <span class="about-tech">Tauri 2 · Vue 3</span>
             </div>
