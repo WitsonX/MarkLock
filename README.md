@@ -276,7 +276,10 @@ npm install        # 或普通安装；改动依赖后请一并提交 lock 文�
 npm run dev        # 启动 Vite dev server（http://localhost:1420），仅前端
 npm run build      # 构建前端产物到 dist/
 npm run dev:tauri  # 前端 + Tauri 壳一起跑（需 Rust 环境）
+npm run dev:app    # 打包 debug 版「MarkLock Dev.app」并启动，自动拉起 Vite 热更新（改前端免重编，改 Rust 重跑约 5s）
 ```
+
+macOS 27+ 不受理未打包裸二进制的菜单栏状态项，`dev:tauri` 下托盘图标不会出现（托盘逻辑本身正常执行），属系统限制非缺陷；验证托盘/菜单栏相关功能请用 `npm run dev:app`。它走独立身份 `com.marklock.dev`（见 `src-tauri/tauri.dev.conf.json`），可与已安装版双开互不干扰；该身份仅供开发，不影响正式发布。`dev:app` 拉起的 Vite 会常驻后台，`dev:tauri` 会自动复用它（见 `scripts/dev-vite.mjs`），两者切换不会撞 1420 端口。
 
 首次编译约 400 个 crate，mac 几分钟、Windows 十几分钟，属正常；之后增量编译是秒级。
 

@@ -6,13 +6,12 @@ import App from './App.vue'
 import router from './router'
 import tip from './lib/tooltip'
 import { t } from './locales'
+import { isMac } from './lib/platform'
 import { dismissSplash } from './lib/splash'
 import './styles/global.css'
 
 // 平台标记：macOS 用隐藏原生标题栏方案（红绿灯叠加到自绘工具条），
 // Windows/Linux 保留系统原生标题栏，自绘工具条左侧无需预留红绿灯空间。
-const ua = navigator.userAgent.toLowerCase()
-const isMac = ua.includes('mac os') || (navigator.platform || '').toLowerCase().includes('mac')
 document.documentElement.dataset.platform = isMac ? 'macos' : 'other'
 
 const app = createApp(App)

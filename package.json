@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "dev:tauri": "tauri dev",
+    "dev:tauri": "tauri dev --config src-tauri/tauri.dev.conf.json",
+    "dev:app": "tauri build --debug --bundles app --config src-tauri/tauri.dev.conf.json && { pgrep -f 'node_modules/.bin/vite' >/dev/null || (nohup npm run dev >/tmp/vite-dev.log 2>&1 &); sleep 2; } && open 'src-tauri/target/debug/bundle/macos/MarkLock Dev.app'",
     "build:tauri": "tauri build",
     "icon": "tauri icon src-tauri/icons/app-icon.svg && node scripts/gen-win-appicon.mjs",
     "icon:filetypes": "node scripts/gen-filetype-icons.mjs"

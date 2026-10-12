@@ -161,6 +161,16 @@ export function quitApp() {
   return invoke<void>('quit_app')
 }
 
+/** 同步「关闭窗口时最小化到托盘」开关到后端（决定点关闭按钮是隐藏到托盘还是走退出确认）。 */
+export function setCloseToTray(enabled: boolean) {
+  return invoke<void>('set_close_to_tray', { enabled })
+}
+
+/** 运行时开关系统托盘图标：关闭时移除托盘，开启时（若不存在）重建。 */
+export function setTrayEnabled(enabled: boolean) {
+  return invoke<void>('set_tray_enabled', { enabled })
+}
+
 // ==================== 文件读写 ====================
 
 /** 读取并解密一个已解锁文件的正文。 */

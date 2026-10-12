@@ -115,7 +115,10 @@ npm install        # or a regular install; commit the lock file when deps change
 npm run dev        # Vite dev server only (http://localhost:1420)
 npm run build      # build frontend into dist/
 npm run dev:tauri  # frontend + Tauri shell together
+npm run dev:app    # build & launch a debug "MarkLock Dev.app" with live Vite HMR (frontend edits: no rebuild; Rust edits: ~5s rerun)
 ```
+
+On macOS 27+ the system refuses to place menu-bar status items owned by unbundled binaries, so the tray icon never appears under `dev:tauri` (the tray logic still runs normally) — a system limitation, not a bug. Use `npm run dev:app` to test tray / menu-bar features. It runs under a separate identity `com.marklock.dev` (see `src-tauri/tauri.dev.conf.json`) so it can coexist with an installed build without interference; this identity is dev-only and does not affect official releases. The Vite server started by `dev:app` stays in the background; `dev:tauri` automatically reuses it (see `scripts/dev-vite.mjs`), so switching between the two never clashes on port 1420.
 
 The first compile builds roughly 400 crates — a few minutes on macOS, longer on Windows. Incremental builds after that are seconds.
 

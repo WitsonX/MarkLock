@@ -10,11 +10,13 @@ import * as tauri from '../lib/tauri'
 import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
 import { t as translate, lang } from '../locales'
+import { resolveFontStack } from '../lib/fonts'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import VaultTreeNode from '../components/VaultTreeNode.vue'
 import WorkdirNode from '../components/WorkdirNode.vue'
 import EncIcon from '../components/EncIcon.vue'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
+import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
@@ -469,6 +471,11 @@ export default defineComponent({
       // 依赖当前语言：切语言时重渲染预览（代码复制按钮等 marked 内文案随之更新）
       void lang.value
       return this.renderMarkdown(this.activeFile?.content ?? '')
+    },
+    /** 预览字体族：将设置映射为 CSS font-family 值。'default' 跟随界面（inherit）；
+        其余为显式字体栈。供 .md 内联变量与导出 HTML 共用（导出场景 'default' 回退无衬线栈）。 */
+    previewFontStack(): string {
+      return this.fontFamilyStack(this.store.settings.previewFontFamily)
     },
     autoLockLabel() {
       const s = this.store.settings.autoLockSecs
@@ -1069,6 +1076,11 @@ export default defineComponent({
       const w = Number(this.store.settings.editorMaxWidth) || 0
       document.documentElement.style.setProperty('--editor-max-width', w > 0 ? `${w}px` : 'none')
     },
+    /** 字体族 id → CSS font-family 值（含跨平台回退栈）：委托给共享的 src/lib/fonts.ts，
+        未知/历史 id 自动回退到跟随界面。供 .md 内联变量与导出 HTML 共用。 */
+    fontFamilyStack(family: string): string {
+      return resolveFontStack(family)
+    },
     /** 设置字号（限幅 10–28 并取偶数，与 2px 步进对齐）；变更由 watcher 落实到编辑器与预览 */
     setEditorFontSize(size: number) {
       const v = Math.min(28, Math.max(10, Math.round(size / 2) * 2))
@@ -1117,6 +1129,10 @@ export default defineComponent({
     },
     fmtLink(image: boolean) {
       this.activeEditor()?.insertLink(image)
+    },
+    /** 主菜单/侧边栏菜单中「关于」的入口：唤起 App.vue 常驻的独立对话框。 */
+    openAbout() {
+      openAboutDialog()
     },
     /** 分派 macOS 原生菜单点击（marklock://menu 事件，payload 为 menu:* id）。
      *  全部复用既有方法；菜单项刻意不带 accelerator，故不会与前端全局快捷键 / CodeMirror keymap 冲突。 */
@@ -5264,11 +5280,14 @@ export default defineComponent({
       // 导出文档的内容栏宽跟随「预览内容最大宽度」设置；选「铺满」（0）时不限宽（margin:0 auto 对满宽无影响）
       const exportMaxW = Number(this.store.settings.editorMaxWidth) || 0
       const mdMaxWidth = exportMaxW > 0 ? `${exportMaxW}px` : 'none'
+      // 字体族/行间距跟随预览设置（'default' 已由 fontFamilyStack 映射为无衬线栈）
+      const exportFontStack = this.fontFamilyStack(this.store.settings.previewFontFamily)
+      const exportLineHeight = Number(this.store.settings.previewLineHeight) || 1.7
       const css = `
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Helvetica Neue", "Microsoft YaHei", Arial, sans-serif; font-size: 15px; line-height: 1.7; color: ${C.text}; background: ${C.panel}; -webkit-font-smoothing: antialiased; }
-.md { max-width: ${mdMaxWidth}; margin: 0 auto; padding: 32px 26px 60px; }
+.md { max-width: ${mdMaxWidth}; margin: 0 auto; padding: 32px 26px 60px; font-family: ${exportFontStack}; line-height: ${exportLineHeight}; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
 .md h1 { font-size: 1.8em; border-bottom: 1px solid ${C.border}; padding-bottom: 0.3em; }
 .md h2 { font-size: 1.5em; border-bottom: 1px solid ${C.border}; padding-bottom: 0.3em; }
@@ -5496,7 +5515,7 @@ ${bodyHtml}
             </div>
             <div class="m-sep"></div>
             <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>{{ $t('menu.prefs') }}</div>
-            <div class="m-item" @click="$router.push({ path: '/settings', query: { tab: 'about' } }); moreOpen = false"><span class="ck"></span>{{ $t('menu.about') }}</div>
+            <div class="m-item" @click="openAbout(); moreOpen = false"><span class="ck"></span>{{ $t('menu.about') }}</div>
           </div>
         </span>
       </div>
@@ -5917,7 +5936,7 @@ ${bodyHtml}
 
             <!-- 预览 -->
             <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
-              <div class="md" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent }" v-html="renderedPreview"></div>
+              <div class="md" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="renderedPreview"></div>
             </div>
           </template>
         </div>

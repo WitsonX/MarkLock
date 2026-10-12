@@ -256,6 +256,13 @@ fn store() -> &'static SessionStore {
 /// 初始为 false：首次退出请求（如 macOS Cmd+Q）会被 prevent_exit，转为前端未保存确认弹窗。
 static EXIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
+/// 系统托盘图标 id：语言切换时按此 id 取回托盘并重建菜单文案。
+const TRAY_ID: &str = "main-tray";
+
+/// 「关闭窗口时最小化到托盘」开关：为 true 时点关闭按钮改为隐藏窗口到托盘、程序后台常驻，
+/// 而非走「未保存确认 → 退出」；为 false 时保持原退出语义。由前端经 set_close_to_tray 同步。
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
 /// 冷启动「打开文件」缓冲：macOS `RunEvent::Opened` 可能在前端 `listen()` 注册之前就触发，
 /// Tauri 事件不缓冲会丢失。这里把路径暂存，前端启动后通过 `take_pending_open_paths` 主动拉取；
 /// 应用已运行时的二次打开则靠信号事件触发同一拉取逻辑（drain 保证不重复）。
@@ -525,6 +532,28 @@ fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// 同步「关闭窗口时最小化到托盘」开关到后端：为 true 时 `CloseRequested` 改为隐藏窗口到托盘。
+/// 前端在设置项变更及启动时各调用一次，保证后端行为与 UI 开关一致。
+#[tauri::command]
+fn set_close_to_tray(enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
+}
+
+/// 运行时开关系统托盘：开启时（若不存在）创建托盘图标，关闭时移除。
+/// 供设置页「显示托盘图标」开关使用；图标被系统隐藏/移除后，前端「关→开」拨动可借此重建。
+#[tauri::command]
+fn set_tray_enabled(app: tauri::AppHandle, enabled: bool) {
+    #[cfg(debug_assertions)]
+    eprintln!("[tray] set_tray_enabled({enabled}), exists={}", app.tray_by_id(TRAY_ID).is_some());
+    if enabled {
+        if app.tray_by_id(TRAY_ID).is_none() {
+            let _ = install_tray(&app);
+        }
+    } else {
+        app.remove_tray_by_id(TRAY_ID);
+    }
+}
+
 /// macOS 原生菜单需动态回写的句柄：可勾选项（id → CheckMenuItem）+ 库/工作目录切换项（按状态改标题）。
 #[cfg(target_os = "macos")]
 struct MenuDyn {
@@ -570,15 +599,14 @@ fn sync_native_menu(
 #[allow(dead_code)]
 static MENU_LANG: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// 当前原生菜单是否为英文（仅 macOS 原生菜单使用）。
-#[cfg(target_os = "macos")]
+/// 当前界面菜单语言是否为英文（macOS 原生菜单与各平台托盘菜单共用）。
+#[allow(dead_code)]
 #[inline]
 fn menu_is_en() -> bool {
     MENU_LANG.load(std::sync::atomic::Ordering::Relaxed) == 1
 }
 
-/// 按当前原生菜单语言在中/英文案间选择。
-#[cfg(target_os = "macos")]
+/// 按当前菜单语言在中/英文案间选择（macOS 原生菜单 + 全平台托盘菜单）。
 fn ml(zh: &str, en: &str) -> String {
     if menu_is_en() {
         en.to_string()
@@ -587,8 +615,72 @@ fn ml(zh: &str, en: &str) -> String {
     }
 }
 
-/// 前端切换界面语言时同步 macOS 原生菜单语言：更新语言标志并重建菜单。
-/// 非 macOS 平台无原生菜单，仅更新标志（无害）。
+/// 构建系统托盘右键菜单（文案按 MENU_LANG 取中/英）：显示主窗口 / 全部锁定 / 退出。
+/// 菜单项 id 以 `tray:` 前缀，由托盘自身的 on_menu_event 分派（与 macOS 原生菜单 `menu:` 命名空间隔离）。
+/// 语言切换时 set_native_menu_lang 会按 TRAY_ID 取回托盘并调用本函数重建菜单。
+fn build_tray_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+    let show = MenuItemBuilder::with_id("tray:show", ml("打开 MarkLock", "Show MarkLock")).build(handle)?;
+    let lock = MenuItemBuilder::with_id("tray:lock-all", ml("全部锁定", "Lock All")).build(handle)?;
+    let quit = MenuItemBuilder::with_id("tray:quit", ml("退出 MarkLock", "Quit MarkLock")).build(handle)?;
+    MenuBuilder::new(handle)
+        .item(&show)
+        .separator()
+        .item(&lock)
+        .separator()
+        .item(&quit)
+        .build()
+}
+
+/// 创建系统托盘（全平台）：显示主窗口 / 全部锁定 / 退出。菜单文案随 MENU_LANG 取中/英，
+/// 语言切换时由 set_native_menu_lang 按 TRAY_ID 取回托盘重建。图标用默认窗口图标。
+/// 托盘菜单事件由本托盘的 on_menu_event 就地处理（区别于 macOS 原生菜单的全局 handler）。
+/// setup 与 set_tray_enabled 共用本函数，保证「销毁后重建」与首次创建行为一致。
+fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::tray::TrayIconBuilder;
+    let tray_menu = build_tray_menu(handle)?;
+    let Some(icon) = handle.default_window_icon().cloned() else {
+        #[cfg(debug_assertions)]
+        eprintln!("[tray] 默认窗口图标为 None，跳过托盘创建");
+        return Ok(());
+    };
+    let _tray = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&tray_menu)
+        .tooltip(WINDOW_TITLE)
+        .icon(icon)
+        .on_menu_event(|tray, event| {
+            let app = tray.app_handle();
+            match event.id().0.as_str() {
+                // 显示主窗口：取消最小化 + 显示 + 聚焦（隐藏到托盘后从托盘唤回）。
+                "tray:show" => {
+                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+                // 全部锁定：交给前端统一走 store.lockAll（含锁定前自动保存 + 页签锁定态刷新）。
+                "tray:lock-all" => {
+                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                        let _ = win.emit("marklock://tray-lock-all", ());
+                    }
+                }
+                // 退出：复用现有「未保存确认 → quit_app」流程（发 close-requested 而非直接 exit）。
+                "tray:quit" => {
+                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                        let _ = win.emit("marklock://close-requested", ());
+                    }
+                }
+                _ => {}
+            }
+        })
+        .build(handle)?;
+    #[cfg(debug_assertions)]
+    eprintln!("[tray] 托盘已创建 (install_tray ok)");
+    Ok(())
+}
+
+/// 前端切换界面语言时同步菜单语言：更新语言标志，macOS 重建原生菜单，全平台重建托盘菜单。
 #[tauri::command]
 fn set_native_menu_lang(app: tauri::AppHandle, lang: String) {
     MENU_LANG.store(if lang == "en" { 1 } else { 0 }, std::sync::atomic::Ordering::Relaxed);
@@ -596,9 +688,10 @@ fn set_native_menu_lang(app: tauri::AppHandle, lang: String) {
     {
         let _ = install_native_menu(&app);
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        if let Ok(menu) = build_tray_menu(&app) {
+            let _ = tray.set_menu(Some(menu));
+        }
     }
 }
 
@@ -608,7 +701,7 @@ fn set_native_menu_lang(app: tauri::AppHandle, lang: String) {
 fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
-    // App 菜单「MarkLock」：关于 + 偏好设置(⌘,) + 隐藏/显示全部 + 自定义退出(⌘Q)。
+    // App 菜单「MarkLock」：关于 + 偏好设置(⌘,) + 隐藏(⌘H) + 自定义退出(⌘Q)；「显示全部」类项置于「窗口」菜单。
     // 退出仍用自定义 quit-app 项（不用预定义 quit，避免系统直接 terminate）。
     // 「关于」不用预定义 about（会弹系统 About 面板），改为自定义项路由到应用内「关于」页。
     let about = MenuItemBuilder::with_id("menu:about", ml("关于 MarkLock", "About MarkLock")).build(handle)?;
@@ -738,22 +831,31 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
         .item(&lock_all)
         .build()?;
 
+    // 窗口：最小化 / 全屏 + 「显示所有窗口」。
+    // 「显示所有窗口」不用预定义 show_all（对应 AppKit unhideAllApplications:）：隐藏到托盘走的是
+    // NSWindow 级 orderOut，并非 NSApp hide，预定义项唤不醒窗口且会因校验不通过而置灰；
+    // 改为自定义项由 on_menu_event 直接唤醒主窗口（与托盘「打开 MarkLock」同语义）。
+    let show_all_windows = MenuItemBuilder::with_id("menu:show-all-windows", ml("显示所有窗口", "Show All Windows")).build(handle)?;
     let window_submenu = SubmenuBuilder::new(handle, ml("窗口", "Window"))
         .minimize_with_text(ml("最小化", "Minimize"))
         .fullscreen_with_text(ml("全屏", "Full Screen"))
+        .separator()
+        .item(&show_all_windows)
         .build()?;
 
-    // 帮助：项目主页（GitHub / Gitee）+ 检查更新（跳发布页）+ 反馈（跳 Issue 页）。
-    // Gitee 为国内镜像；具体链接见前端 src/lib/links.ts，点击后由 App.vue 走 open_url 用系统浏览器打开（全局生效，不依赖当前路由）。
+    // 帮助：项目主页（GitHub / Gitee）+ 反馈（跳 Issue 页）+ 检查更新（智能检测）/ 关于（置于底部）。
+    // 外链项（主页/反馈）点击后由 App.vue 走 open_url 用系统浏览器打开（全局生效，不依赖当前路由）；
+    // 「检查更新」不发外链，由 App.vue 拦截 menu:check-update 调前端智能检测（GitHub/Gitee 自动回落，发现新版再弹窗跳转发布页）；
+    // 「关于」复用 menu:about 事件，App.vue 路由到应用内「关于」页（与 App 菜单顶部「关于 MarkLock」同源，允许重复 id）。
     let help_submenu = SubmenuBuilder::new(handle, ml("帮助", "Help"))
         .text("menu:help-github", ml("GitHub 主页", "GitHub Home"))
         .text("menu:help-gitee", ml("Gitee 主页（国内镜像）", "Gitee Home (Chinese mirror)"))
         .separator()
-        .text("menu:check-update", ml("检查更新（GitHub）", "Check for Updates (GitHub)"))
-        .text("menu:check-update-gitee", ml("检查更新（Gitee 国内镜像）", "Check for Updates (Gitee Chinese mirror)"))
-        .separator()
         .text("menu:feedback", ml("反馈与建议（GitHub）", "Feedback (GitHub)"))
         .text("menu:feedback-gitee", ml("反馈与建议（Gitee 国内镜像）", "Feedback (Gitee Chinese mirror)"))
+        .separator()
+        .text("menu:check-update", ml("检查更新", "Check for Updates"))
+        .text("menu:about", ml("关于 MarkLock", "About MarkLock"))
         .build()?;
 
     let menu = MenuBuilder::new(handle)
@@ -1405,6 +1507,8 @@ pub fn run() {
             lock,
             lock_all,
             quit_app,
+            set_close_to_tray,
+            set_tray_enabled,
             read_file,
             read_file_vault,
             write_file,
@@ -1492,6 +1596,9 @@ pub fn run() {
                 });
             }
 
+            // 系统托盘（全平台）：创建逻辑见 install_tray（set_tray_enabled 运行时开关共用）。
+            install_tray(handle)?;
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1499,11 +1606,19 @@ pub fn run() {
                 return;
             }
             match event {
-                // 关闭窗口（点红叉 / Cmd+Q）：不再直接退出，改为通知前端；
-                // 由前端判断是否有未保存文件并弹窗确认，确认后调用 quit_app 命令退出。
+                // 关闭窗口（点红叉）：
+                // - 开启「关闭最小化到托盘」时：隐藏窗口到托盘、程序后台常驻（页签与密钥内存态保留，
+                //   自动锁定定时器照常运行），并通知前端给出一次性提示；
+                // - 否则：保持原语义，通知前端判断未保存并弹窗确认，确认后由 quit_app 退出。
+                // 注：Cmd+Q / 托盘「退出」仍走 close-requested → 退出确认，不受本开关影响。
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    let _ = window.emit("marklock://close-requested", ());
+                    if CLOSE_TO_TRAY.load(Ordering::SeqCst) {
+                        let _ = window.hide();
+                        let _ = window.emit("marklock://hidden-to-tray", ());
+                    } else {
+                        let _ = window.emit("marklock://close-requested", ());
+                    }
                 }
                 // 拖放事件由 Tauri 内置转发给前端（tauri://drag-enter/over/drop/leave），
                 // 这里不再自定义同名事件，避免 payload 类型冲突。
@@ -1516,6 +1631,16 @@ pub fn run() {
             if id == "quit-app" {
                 if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
                     let _ = win.emit("marklock://close-requested", ());
+                }
+                return;
+            }
+            // 「显示所有窗口」：在 Rust 侧直接唤醒主窗口，不转前端（隐藏到托盘后窗口已 orderOut，
+            // 与托盘「打开 MarkLock」同语义：取消最小化 + 显示 + 聚焦）。
+            if id == "menu:show-all-windows" {
+                if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
                 }
                 return;
             }

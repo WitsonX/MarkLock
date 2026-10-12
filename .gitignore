@@ -37,3 +37,4 @@ vite.config.ts.timestamp-*.mjs
 
 # Local tooling / working notes
 .workbuddy/
+doc/marketing

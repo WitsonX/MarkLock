@@ -196,7 +196,8 @@ html[data-platform='macos'] .titlebar {
 
 /* ---------- Markdown 预览样式 ---------- */
 /* 字号跟随编辑器字号设置（+1px：正文非等宽，同 px 值下视觉偏小）；标题/代码均为 em，根字号一变整体等比缩放 */
-.md { padding: 20px 26px 40px; line-height: 1.7; color: var(--text); font-size: calc(var(--editor-font-size, 14px) + 1px); }
+/* 字体族与行间距由预览设置驱动（见 --preview-font-family / --preview-line-height，在 EditorView 内联到 .md），未设置时回退默认：跟随界面字体、1.7 行距 */
+.md { padding: 20px 26px 40px; line-height: var(--preview-line-height, 1.7); font-family: var(--preview-font-family, inherit); color: var(--text); font-size: calc(var(--editor-font-size, 14px) + 1px); }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
 .md h1 { font-size: 1.8em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
 .md h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }

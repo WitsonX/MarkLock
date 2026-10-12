@@ -1,16 +1,15 @@
 <script lang="ts">
 import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { getVersion } from '@tauri-apps/api/app'
 import TitleBar from '../components/TitleBar.vue'
+import AboutCard from '../components/AboutCard.vue'
 import { useVaultStore } from '../stores/vault'
 import { lang } from '../locales'
+import { isMac } from '../lib/platform'
+import { PREVIEW_FONTS, fontLabel, resolveFontStack } from '../lib/fonts'
 import * as tauri from '../lib/tauri'
-import { LINKS } from '../lib/links'
+import { runUpdateCheck } from '../lib/update'
 import hljs from 'highlight.js'
-// 关于页品牌 logo：与 Dock 图标同一光栅化流程生成的白底版（主图标源文件保持 #EAF2FE 不动）
-import aboutIcon from '../assets/about-icon.png'
 
 interface NavItem {
   key: string
@@ -21,15 +20,12 @@ interface NavItem {
 
 export default defineComponent({
   name: 'SettingsView',
-  components: { TitleBar },
+  components: { TitleBar, AboutCard },
   data() {
     return {
-      aboutIcon,
       active: 'general',
-      // 关于页版本号：运行时从 Tauri 读取（源自 tauri.conf.json），避免在文案里写死
-      appVersion: '',
-      // 原生菜单「关于」事件解绑句柄
-      _unlistenMenu: null as UnlistenFn | null,
+      // 通用页「立即检查更新」进行中标志（禁用按钮、防重复点击）；与 AboutCard 内部同名标志彼此独立。
+      checking: false,
       // 设置搜索关键词
       searchQuery: '',
       // 「重置所有配置」确认弹窗
@@ -83,6 +79,30 @@ export default defineComponent({
         { label: '1280 px', value: 1280 },
       ]
     },
+    // 预览字体族选项：来自内置跨平台清单（src/lib/fonts.ts），名称随当前语言重算
+    previewFontOptions() {
+      void lang.value
+      return PREVIEW_FONTS.map((f) => ({ label: fontLabel(f), value: f.id }))
+    },
+    // 预览行间距选项（无单位 line-height 倍数；1.7 为默认）
+    lineHeightOptions() {
+      return [
+        { label: `${this.$t('settings.appear.lhTight')} (1.4)`, value: 1.4 },
+        { label: `${this.$t('settings.appear.lhStandard')} (1.7)`, value: 1.7 },
+        { label: `${this.$t('settings.appear.lhLoose')} (1.9)`, value: 1.9 },
+        { label: `${this.$t('settings.appear.lhExtra')} (2.1)`, value: 2.1 },
+      ]
+    },
+    // 检查更新频率选项
+    updateCheckOptions() {
+      return [
+        { label: this.$t('settings.options.updateDaily'), value: 'daily' },
+        { label: this.$t('settings.options.updateWeekly'), value: 'weekly' },
+        { label: this.$t('settings.options.updateMonthly'), value: 'monthly' },
+        { label: this.$t('settings.options.updateManual'), value: 'manual' },
+        { label: this.$t('settings.options.updateOff'), value: 'off' },
+      ]
+    },
     // 当前实际语言（供 watch 触发搜索索引重建）
     currentLang() {
       return lang.value
@@ -110,10 +130,6 @@ export default defineComponent({
     unlockedVaultCount() {
       return this.store.recent.filter((v) => v.unlocked).length
     },
-    /** 关于页展示与跳转的项目链接 */
-    links() {
-      return LINKS
-    },
     /** 预览代码高亮 HTML（用制表符缩进，tab-size 才能生效） */
     previewCodeHtml() {
       const code = `function greet(name) {
@@ -126,24 +142,20 @@ export default defineComponent({
 greet('MarkLock');`
       return hljs.highlight(code, { language: 'javascript' }).value
     },
+    /** 预览字体族当前 CSS 值（与 EditorView 同源 src/lib/fonts.ts），供排版实时示例使用 */
+    previewFontStack() {
+      return resolveFontStack(this.store.settings.previewFontFamily)
+    },
   },
   mounted() {
     this.buildSearchIndex()
-    // 读取真实应用版本用于「关于」页展示；非 Tauri 环境（纯 web dev）下静默降级
-    getVersion().then((v) => (this.appVersion = v)).catch(() => {})
-    // 支持通过路由 query（如原生菜单「关于」跳入）直达指定页签
+    // 支持通过路由 query（例如外部/书签链接）直达指定页签；菜单「关于」不再走此路径，
+    // 改由 App.vue 弹独立对话框（src/lib/aboutDialog.ts）。
     const tab = this.$route.query.tab
     if (typeof tab === 'string' && this.nav.some((n) => n.key === tab)) this.active = tab
-    // 已在设置页时，原生菜单「关于」直接切到关于页签（App.vue 此时不再重复 push）
-    listen<string>('marklock://menu', (e) => {
-      if (e.payload === 'menu:about') this.active = 'about'
-    }).then((un) => {
-      this._unlistenMenu = un
-    })
   },
   beforeUnmount() {
     ;(this as any)._searchIndex = null
-    if (this._unlistenMenu) this._unlistenMenu()
   },
   watch: {
     searchQuery() {
@@ -162,9 +174,23 @@ greet('MarkLock');`
     },
   },
   methods: {
-    /** 关于页外部链接：用系统浏览器打开（链接集中定义于 src/lib/links.ts）。 */
-    openLink(url: string) {
-      tauri.openUrl(url).catch((err) => message.error(String(err)))
+    /** 托盘相关文案取词：macOS 无「托盘/通知区域」概念，按 Mac 后缀取专属词条（菜单栏 / Dock 语义），其他平台用原键。 */
+    trayT(key: string) {
+      return this.$t(`settings.general.${key}${isMac ? 'Mac' : ''}`)
+    },
+    /** 「显示托盘图标」开关：关闭时连带关闭「关闭最小化到托盘」，避免窗口隐藏后没有任何恢复入口。 */
+    toggleTrayIcon() {
+      const on = !this.store.settings.showTrayIcon
+      this.store.updateSettings(on ? { showTrayIcon: true } : { showTrayIcon: false, closeToTray: false })
+    },
+    /** 「关闭最小化到托盘」开关：开启时若托盘图标被隐藏则连带开启，保证隐藏后有托盘入口可恢复。 */
+    toggleCloseToTray() {
+      const on = !this.store.settings.closeToTray
+      if (on && !this.store.settings.showTrayIcon) {
+        this.store.updateSettings({ closeToTray: true, showTrayIcon: true })
+      } else {
+        this.store.updateSettings({ closeToTray: on })
+      }
     },
     /** 从 DOM 收集全部设置行，构建搜索索引（标题/描述/关键词/分组/分类） */
     buildSearchIndex() {
@@ -242,6 +268,18 @@ greet('MarkLock');`
         else message.warning(this.$t('settings.toast.setDefaultManual'))
       } catch (e) {
         message.error(String(e))
+      }
+    },
+    /** 立即手动检查一次更新（不受频率门控）；结果展示（弹窗/轻提示）由 runUpdateCheck 统一处理。 */
+    async runManualCheck() {
+      if (this.checking) return
+      this.checking = true
+      try {
+        await runUpdateCheck(lang.value === 'zh')
+      } catch (e) {
+        message.error(String(e))
+      } finally {
+        this.checking = false
       }
     },
     /** 执行「重置所有配置」；store 锁定全部库并清空本地记录，随后切回编辑器并重新载入窗口。 */
@@ -326,6 +364,17 @@ greet('MarkLock');`
             </div>
           </div>
           <div class="group">
+            <div class="group-head">{{ trayT('gTray') }}</div>
+            <div class="row" data-key="showTrayIcon" data-keywords="托盘 图标 菜单栏 显示 驻留 tray icon menu bar 系统托盘 dock">
+              <div class="info"><div class="t">{{ trayT('showTrayIcon') }}</div><div class="d">{{ trayT('showTrayIconD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.showTrayIcon }" @click="toggleTrayIcon"></div>
+            </div>
+            <div class="row" data-key="closeToTray" data-keywords="托盘 后台 常驻 关闭 最小化 隐藏 驻留 tray 系统托盘 background minimize hide dock">
+              <div class="info"><div class="t">{{ trayT('closeToTray') }}</div><div class="d">{{ trayT('closeToTrayD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.closeToTray }" @click="toggleCloseToTray"></div>
+            </div>
+          </div>
+          <div class="group">
             <div class="group-head">{{ $t('settings.general.gTabs') }}</div>
             <div class="row" data-key="showTabs" data-keywords="页签 tab 标签栏 顶部 tabs bar">
               <div class="info"><div class="t">{{ $t('settings.general.showTabs') }}</div><div class="d">{{ $t('settings.general.showTabsD') }}</div></div>
@@ -395,6 +444,22 @@ greet('MarkLock');`
             <div class="row" data-key="setDefaultHandler" data-keywords="默认 打开方式 文件关联 md mdl mdlb default handler">
               <div class="info"><div class="t">{{ $t('settings.general.setDefault') }}</div><div class="d">{{ $t('settings.general.setDefaultD') }}</div></div>
               <button class="btn" @click="applySetDefault">{{ $t('settings.general.setDefaultBtn') }}</button>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.general.gUpdate') }}</div>
+            <div class="row" data-key="updateCheckFreq" data-keywords="检查 更新 版本 自动 频率 每天 每周 update check version daily weekly">
+              <div class="info"><div class="t">{{ $t('settings.general.autoUpdate') }}</div><div class="d">{{ $t('settings.general.autoUpdateD') }}</div></div>
+              <a-select
+                :value="store.settings.updateCheckFreq"
+                style="width: 150px;"
+                :options="updateCheckOptions"
+                @change="(v: string) => store.updateSettings({ updateCheckFreq: v as 'daily' | 'weekly' | 'monthly' | 'manual' | 'off' })"
+              />
+            </div>
+            <div class="row" data-key="checkUpdateNow" data-keywords="立即 现在 检查 更新 手动 网络 check now manual network">
+              <div class="info"><div class="t">{{ $t('settings.general.checkNow') }}</div><div class="d">{{ $t('settings.general.checkNowD') }}</div></div>
+              <button class="btn btn-sm" :disabled="checking" @click="runManualCheck">{{ checking ? $t('settings.update.checking') : $t('settings.general.checkNowBtn') }}</button>
             </div>
           </div>
         </div>
@@ -481,6 +546,35 @@ greet('MarkLock');`
                 :options="maxWidthOptions"
                 @change="(v: number) => store.updateSettings({ editorMaxWidth: v })"
               />
+            </div>
+            <div class="row" data-key="previewFontFamily" data-keywords="预览 字体 字形 font 衬线 无衬线 等宽 serif sans mono family">
+              <div class="info"><div class="t">{{ $t('settings.appear.previewFont') }}</div><div class="d">{{ $t('settings.appear.previewFontD') }}</div></div>
+              <a-select
+                :value="store.settings.previewFontFamily"
+                style="width: 200px;"
+                :options="previewFontOptions"
+                @change="(v: string) => store.updateSettings({ previewFontFamily: v })"
+              />
+            </div>
+            <div class="row" data-key="previewLineHeight" data-keywords="预览 行间距 行高 排版 间距 line height leading spacing">
+              <div class="info"><div class="t">{{ $t('settings.appear.lineHeight') }}</div><div class="d">{{ $t('settings.appear.lineHeightD') }}</div></div>
+              <a-select
+                :value="store.settings.previewLineHeight"
+                style="width: 140px;"
+                :options="lineHeightOptions"
+                @change="(v: number) => store.updateSettings({ previewLineHeight: v })"
+              />
+            </div>
+            <div class="type-preview-wrap">
+              <div class="type-preview-label">{{ $t('settings.appear.previewEffect') }}</div>
+              <div class="md type-preview" :style="{ '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight), 'font-size': (store.settings.editorFontSize + 1) + 'px' }">
+                <h3>{{ $t('settings.appear.typeSampleTitle') }}</h3>
+                <p>{{ $t('settings.appear.typeSampleBody') }}</p>
+                <ul>
+                  <li>{{ $t('settings.appear.typeSampleLi1') }}</li>
+                  <li>{{ $t('settings.appear.typeSampleLi2') }}</li>
+                </ul>
+              </div>
             </div>
           </div>
         </div>
@@ -631,60 +725,7 @@ greet('MarkLock');`
 
         <!-- 关于 -->
         <div v-show="active === 'about'" class="s-pane" data-pane="about">
-          <div class="about-card">
-            <div class="about-logo">
-              <img :src="aboutIcon" alt="MarkLock" />
-            </div>
-            <div class="about-name">MarkLock</div>
-            <div class="about-meta">
-              <span class="about-ver">{{ $t('settings.about.version', { version: appVersion }) }}</span>
-              <span class="about-sep"></span>
-              <span class="about-tech">Tauri 2 · Vue 3</span>
-            </div>
-            <p class="about-desc">
-              {{ $t('settings.about.desc') }}
-            </p>
-            <div class="about-feats">
-              <div class="about-feat">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-                <span class="ft">{{ $t('settings.about.featE2e') }}</span>
-                <span class="fd">{{ $t('settings.about.featE2eD') }}</span>
-              </div>
-              <div class="about-feat">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="13" width="18" height="8" rx="2" /><path d="M7 17h.01" /><path d="M5.5 13 7 5h10l1.5 8" /></svg>
-                <span class="ft">{{ $t('settings.about.featOffline') }}</span>
-                <span class="fd">{{ $t('settings.about.featOfflineD') }}</span>
-              </div>
-              <div class="about-feat">
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" /><path d="M9 12l2 2 4-4" /></svg>
-                <span class="ft">{{ $t('settings.about.featTamper') }}</span>
-                <span class="fd">{{ $t('settings.about.featTamperD') }}</span>
-              </div>
-            </div>
-            <div class="about-actions">
-              <div class="about-link-group">
-                <span class="about-link-label">{{ $t('settings.about.checkUpdate') }}</span>
-                <button class="about-link" @click="openLink(links.release)">GitHub</button>
-                <span class="about-dot">·</span>
-                <button class="about-link" @click="openLink(links.giteeRelease)">{{ $t('settings.about.giteeMirror') }}</button>
-              </div>
-              <span class="about-sep"></span>
-              <div class="about-link-group">
-                <span class="about-link-label">{{ $t('settings.about.projectHome') }}</span>
-                <button class="about-link" @click="openLink(links.github)">GitHub</button>
-                <span class="about-dot">·</span>
-                <button class="about-link" @click="openLink(links.gitee)">{{ $t('settings.about.giteeMirror') }}</button>
-              </div>
-              <span class="about-sep"></span>
-              <div class="about-link-group">
-                <span class="about-link-label">{{ $t('settings.about.feedback') }}</span>
-                <button class="about-link" @click="openLink(links.feedback)">GitHub</button>
-                <span class="about-dot">·</span>
-                <button class="about-link" @click="openLink(links.giteeFeedback)">{{ $t('settings.about.giteeMirror') }}</button>
-              </div>
-            </div>
-            <div class="about-links-note">{{ $t('settings.about.linksNote') }}</div>
-          </div>
+          <AboutCard />
         </div>
       </div>
     </div>
@@ -820,50 +861,7 @@ greet('MarkLock');`
 .danger-zone { border-color: #ffccc7; }
 .danger-zone .group-head { background: var(--red-bg); color: #cf1322; }
 
-/* 关于页 */
-.about-card { text-align: center; padding: 40px 24px 24px; max-width: 620px; margin: 0 auto; }
-.about-logo {
-  width: 78px; height: 78px; margin: 0 auto 18px;
-}
-.about-logo img {
-  width: 100%; height: 100%; display: block;
-  /* 中性灰黑软阴影：贴合图标轮廓又不染蓝 */
-  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.14)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.10));
-}
-.about-name { font-size: 24px; font-weight: 700; letter-spacing: 0.3px; color: var(--text); }
-.about-meta { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; }
-.about-ver {
-  font-size: 12px; font-weight: 600; color: var(--primary);
-  background: var(--primary-bg); padding: 3px 11px; border-radius: 999px;
-}
-.about-sep { width: 1px; height: 12px; background: var(--border); }
-.about-tech { font-size: 12px; color: var(--text-3); }
-.about-desc {
-  font-size: 13px; line-height: 1.85; color: var(--text-2);
-  max-width: 460px; margin: 18px auto 22px;
-}
-.about-feats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 24px; }
-.about-feat {
-  display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 14px 8px; border-radius: var(--radius-lg);
-  border: 1px solid var(--border); background: var(--panel);
-}
-.about-feat svg { color: var(--primary); }
-.about-feat .ft { font-size: 12.5px; font-weight: 600; color: var(--text); }
-.about-feat .fd { font-size: 11px; color: var(--text-3); }
-.about-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 14px; }
-.about-link-group { display: inline-flex; align-items: center; gap: 5px; }
-.about-link-label { font-size: 12px; color: var(--text-3); }
-.about-link {
-  font-size: 12px; padding: 0; border: none; background: transparent;
-  color: var(--primary); cursor: pointer; text-decoration: none;
-  transition: color 0.15s;
-}
-.about-link:not(:disabled):hover { color: var(--primary-hover); text-decoration: underline; }
-.about-link:disabled { opacity: 0.55; cursor: not-allowed; }
-.about-dot { font-size: 12px; color: var(--text-4); user-select: none; }
-.about-sep { width: 1px; height: 12px; background: var(--border); }
-.about-links-note { margin-top: 12px; text-align: center; font-size: 11.5px; color: var(--text-4); }
+/* 关于页内容已抽至 src/components/AboutCard.vue（与 App.vue 弹出的独立「关于」对话框共用） */
 
 /* 搜索命中行高亮 / 未命中行淡化 / 跳转定位闪烁 */
 .row.hit { background: var(--primary-bg); }
@@ -970,5 +968,18 @@ greet('MarkLock');`
   padding: 0;
   font-family: inherit;
   font-size: inherit;
+}
+
+/* 排版实时示例：复用全局 .md 样式，绑定与预览区相同的 CSS 变量，改字体/行距/字号即时反映 */
+.type-preview-wrap { padding: 8px 16px; }
+.type-preview-label { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+.type-preview {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--editor-bg);
+  /* 覆盖全局 .md 的大内边距（特异性 0,2,0 > .md 的 0,1,0，无需 !important） */
+  padding: 4px 16px 10px;
+  max-height: 280px;
+  overflow-y: auto;
 }
 </style>

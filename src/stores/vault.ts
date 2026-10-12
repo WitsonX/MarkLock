@@ -123,6 +123,10 @@ export interface Settings {
   showHiddenFiles: boolean
   /** 恢复上次打开的文件 */
   restoreLastSession: boolean
+  /** 是否在系统托盘（菜单栏）显示 MarkLock 图标 */
+  showTrayIcon: boolean
+  /** 点击关闭按钮时是否隐藏到系统托盘（后台常驻）而非退出应用 */
+  closeToTray: boolean
   /** 剪贴板定时清除（秒） */
   clipboardClearSecs: number
   /** 窗口最小化时锁定 */
@@ -143,6 +147,10 @@ export interface Settings {
   editorFontSize: number
   /** 预览内容栏最大宽度（px），0 表示不限制、铺满面板宽度 */
   editorMaxWidth: number
+  /** 预览区字体族 id（见 src/lib/fonts.ts 的 PREVIEW_FONTS；'default' 跟随界面） */
+  previewFontFamily: string
+  /** 预览区行间距（line-height 无单位倍数），默认 1.7 */
+  previewLineHeight: number
   /** 是否显示 Markdown 格式工具栏 */
   showToolbar: boolean
   /** 是否显示状态栏 */
@@ -159,6 +167,8 @@ export interface Settings {
   autoSaveSecs: number
   /** 普通 md 转为加密文件（.mdl）后对原明文文件的处理：每次询问 / 删除原文件 / 保留原文件 */
   convertMdAction: 'ask' | 'delete' | 'keep'
+  /** 检查更新频率：每天 / 每周 / 每月 / 仅手动 / 关闭（默认每周） */
+  updateCheckFreq: 'daily' | 'weekly' | 'monthly' | 'manual' | 'off'
 }
 
 // 导出供 UI 标注「默认」档位（如状态栏字号 / 自动锁定菜单），避免各处硬编码默认值
@@ -177,6 +187,10 @@ export const DEFAULT_SETTINGS: Settings = {
   showOutline: true,
   showHiddenFiles: false,
   restoreLastSession: true,
+  // 托盘图标默认显示：托盘是后台常驻与快捷操作的入口，后续托盘功能也以此为基建
+  showTrayIcon: true,
+  // 关闭最小化到托盘默认关闭：保持原有「点关闭 = 退出（含未保存确认）」语义，用户显式开启才后台常驻
+  closeToTray: false,
   clipboardClearSecs: 30,
   lockOnMinimize: true,
   lockOnSleep: true,
@@ -187,6 +201,8 @@ export const DEFAULT_SETTINGS: Settings = {
   codeIndent: 4,
   editorFontSize: 14,
   editorMaxWidth: 1280,
+  previewFontFamily: 'default',
+  previewLineHeight: 1.7,
   showToolbar: true,
   showStatusbar: true,
   previewDblClickToggle: true,
@@ -195,6 +211,7 @@ export const DEFAULT_SETTINGS: Settings = {
   watchExternalChanges: true,
   autoSaveSecs: 0,
   convertMdAction: 'ask',
+  updateCheckFreq: 'weekly',
 }
 
 function loadRecent(): VaultInfo[] {

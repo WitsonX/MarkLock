@@ -1,0 +1,10 @@
+{
+  "productName": "MarkLock Dev",
+  "identifier": "com.marklock.dev",
+  "mainBinaryName": "marklock-dev",
+  "build": {
+    "beforeDevCommand": "node scripts/dev-vite.mjs",
+    "beforeBuildCommand": null,
+    "frontendDist": "http://localhost:1420"
+  }
+}
