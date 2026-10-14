@@ -6,6 +6,7 @@
 
 import { defineStore } from 'pinia'
 import * as tauri from '../lib/tauri'
+import { isMac } from '../lib/platform'
 
 /** 一个已登记的库（元信息，不含密钥） */
 export interface VaultInfo {
@@ -100,6 +101,37 @@ const SECTION_ORDER_KEY = 'marklock.sectionOrder'
 const SECTION_IDS = ['open', 'vaults', 'workdir', 'favorites', 'recent', 'outline'] as const
 type SectionId = (typeof SECTION_IDS)[number]
 
+/** 便携便签指向的源文件 */
+export interface StickyNoteTarget {
+  /** 所属库 id（加密 .mdl / .mdlb 时有值；明文为 null） */
+  vaultId: string | null
+  /** 文件绝对路径（.mdl / .mdlb 容器，或明文 md） */
+  path: string
+  /** .mdlb 单文件库内的相对路径（仅 kind='mdlb' 时有值） */
+  rel: string | null
+  /** 文件类型：明文 md / 单文件加密 .mdl / 单文件库 .mdlb */
+  kind: 'plain' | 'mdl' | 'mdlb'
+}
+
+/** 热角唤出配置 */
+export interface HotCornerSettings {
+  enabled: boolean
+  /** 触发角落：屏幕四角 */
+  corner: 'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight'
+  /** 停留触发时长（毫秒） */
+  dwellMs: number
+  /** 需按住修饰键才触发（否则纯停留即触发） */
+  requireModifier: boolean
+  /** 所选修饰键（requireModifier 为真时生效；command 在 Windows 映射为 Win 键） */
+  modifier: 'command' | 'shift' | 'control' | 'alt'
+}
+
+/** 快速启动的一个本地应用 */
+export interface QuickLaunchItem {
+  name: string
+  path: string
+}
+
 export interface Settings {
   /** 自动锁定超时（秒），0 表示不自动锁定 */
   autoLockSecs: number
@@ -127,6 +159,9 @@ export interface Settings {
   showTrayIcon: boolean
   /** 点击关闭按钮时是否隐藏到系统托盘（后台常驻）而非退出应用 */
   closeToTray: boolean
+  /** 托盘点击弹出便携便签的鼠标键：off=不弹出、left=左键弹（右键弹菜单）、right=右键弹（左键弹菜单）。
+   * 注：macOS 左键被系统保留给菜单栏菜单，故 mac 仅支持 off/right。 */
+  trayStickyButton: 'off' | 'left' | 'right'
   /** 剪贴板定时清除（秒） */
   clipboardClearSecs: number
   /** 窗口最小化时锁定 */
@@ -169,6 +204,14 @@ export interface Settings {
   convertMdAction: 'ask' | 'delete' | 'keep'
   /** 检查更新频率：每天 / 每周 / 每月 / 仅手动 / 关闭（默认每周） */
   updateCheckFreq: 'daily' | 'weekly' | 'monthly' | 'manual' | 'off'
+  /** 便携便签指向的源文件；null 表示未设置 */
+  stickyNote: StickyNoteTarget | null
+  /** 便携便签的视图模式（编辑 / 分屏 / 预览），跨会话记忆 */
+  stickyMode: 'edit' | 'split' | 'preview'
+  /** 热角唤出（鼠标停留屏幕角落弹出便签）配置 */
+  hotCorner: HotCornerSettings
+  /** 便签底部快速启动的本地应用列表 */
+  quickLaunch: QuickLaunchItem[]
 }
 
 // 导出供 UI 标注「默认」档位（如状态栏字号 / 自动锁定菜单），避免各处硬编码默认值
@@ -189,8 +232,10 @@ export const DEFAULT_SETTINGS: Settings = {
   restoreLastSession: true,
   // 托盘图标默认显示：托盘是后台常驻与快捷操作的入口，后续托盘功能也以此为基建
   showTrayIcon: true,
-  // 关闭最小化到托盘默认关闭：保持原有「点关闭 = 退出（含未保存确认）」语义，用户显式开启才后台常驻
-  closeToTray: false,
+  // 关闭最小化到托盘默认开启：点关闭按钮隐藏到托盘（后台常驻）而非退出应用
+  closeToTray: true,
+  // 托盘弹便签默认绑右键（左键弹菜单）；macOS 仅右键可用，与跨平台默认一致
+  trayStickyButton: 'right',
   clipboardClearSecs: 30,
   lockOnMinimize: true,
   lockOnSleep: true,
@@ -212,6 +257,12 @@ export const DEFAULT_SETTINGS: Settings = {
   autoSaveSecs: 0,
   convertMdAction: 'ask',
   updateCheckFreq: 'weekly',
+  stickyNote: null,
+  // 便签默认以预览模式打开（阅读优先）；用户切到编辑/分屏后按 stickyMode 记忆
+  stickyMode: 'preview',
+  // 热角默认开启：左上角、停留 0.3s 即弹出便签
+  hotCorner: { enabled: true, corner: 'topLeft', dwellMs: 300, requireModifier: false, modifier: 'command' },
+  quickLaunch: [],
 }
 
 function loadRecent(): VaultInfo[] {
@@ -230,7 +281,16 @@ function loadRecent(): VaultInfo[] {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : { ...DEFAULT_SETTINGS }
+    const merged = raw
+      ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
+      : { ...DEFAULT_SETTINGS }
+    // 浅合并会让旧版本存档整体覆盖 hotCorner（缺少新字段），这里对其深合并补齐默认值
+    merged.hotCorner = { ...DEFAULT_SETTINGS.hotCorner, ...(merged.hotCorner || {}) }
+    // macOS 不支持「左键弹便签」（左键被系统保留给菜单栏菜单）；旧存档若为 left 则迁移为 off
+    if (isMac && merged.trayStickyButton === 'left') {
+      merged.trayStickyButton = 'off'
+    }
+    return merged
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
@@ -1109,8 +1169,20 @@ export const useVaultStore = defineStore('vault', {
 
     // ---------- 设置 ----------
     updateSettings(patch: Partial<Settings>) {
-      this.settings = { ...this.settings, ...patch }
+      // 以 localStorage 最新快照为基准叠加本次改动，而非用本窗内存旧值整体回写：
+      // 便签等独立常驻 webview 会在本窗不知情下改写同一份设置（如选定便签文件），
+      // 若以本窗内存旧值为基准持久化，会把它刚写入、本窗尚未同步的字段一并覆盖掉。
+      this.settings = { ...loadSettings(), ...patch }
       this.persistSettings()
+    },
+
+    /**
+     * 从 localStorage 重新读取设置，刷新本窗口的内存副本。
+     * 用于独立常驻 webview（如便携便签）：它与主窗口共用 localStorage 但 Pinia 实例不共享，
+     * 主窗口改设置后此窗需重新读取才能即时生效（否则要等下次整应用启动）。
+     */
+    reloadSettings() {
+      this.settings = loadSettings()
     },
 
     // ---------- 自动锁定回收 ----------

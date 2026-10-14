@@ -8,11 +8,15 @@ mod crypto;
 mod assets;
 #[cfg(target_os = "macos")]
 mod clipboard;
+#[cfg(target_os = "macos")]
+mod appinfo;
+#[cfg(target_os = "windows")]
+mod appinfo_win;
 
 use crypto::session::SessionStore;
 use crypto::vault;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::MacosLauncher;
@@ -83,6 +87,277 @@ mod screenlock {
             CFRelease(dict);
             locked
         }
+    }
+}
+
+/// 热角唤出：鼠标停留屏幕角落一段时间即弹出便携便签。
+///
+/// 系统没有「停留型热角」API，这里用后台线程轮询全局光标位置（骨架照抄上面的锁屏轮询线程
+/// 与 macOS 会话字典探测）：光标进入角落小区域开始计时，停留满 dwell 触发一次 show_sticky，
+/// 离开角落前不重复触发。用轮询而非全局事件钩子：无需辅助功能 / 输入监听权限。
+mod hotcorner {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
+    use tauri::Manager;
+
+    /// 是否启用热角（前端经 set_hot_corner 同步）。
+    pub static ENABLED: AtomicBool = AtomicBool::new(false);
+    /// 停留触发时长（毫秒）。
+    pub static DWELL_MS: AtomicU32 = AtomicU32::new(500);
+    /// 「鼠标移开即隐藏」是否已武装：仅热角唤出时置真（托盘/命令唤出是显式操作，不自动收起）。
+    /// 用户点进便签（前端 sticky_engage）或隐藏窗口时置假，交回 blur/Esc 收起逻辑。
+    pub static AUTOHIDE: AtomicBool = AtomicBool::new(false);
+    /// 角落判定边长：光标距左边缘与上/下边缘均小于该值（像素/点）视为进入角落。
+    const EDGE: f64 = 10.0;
+    /// 轮询间隔（毫秒）。0.5s 级停留手势无需更高精度，也几乎不占 CPU。
+    const POLL_MS: u64 = 100;
+    /// 便签命中判定的外扩边距（像素/点）：把窗口矩形略微放大，
+    /// 覆盖窗口 margin 与角落触发区之间的缝隙，避免鼠标停在缝里被误判为「已移开」。
+    const HIT_PAD: f64 = 20.0;
+    /// 光标移出「保持区域」（便签窗口 ∪ 触发角落）后到收起的宽限（毫秒）：
+    /// 避免贴边抖动误收，也给足从角落移入窗口的时间。
+    const LEAVE_GRACE_MS: u128 = 600;
+
+    #[cfg(target_os = "macos")]
+    mod cursor {
+        use std::ffi::c_void;
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct CGPoint {
+            pub x: f64,
+            pub y: f64,
+        }
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGEventCreate(source: *const c_void) -> *const c_void;
+            fn CGEventGetLocation(event: *const c_void) -> CGPoint;
+            fn CFRelease(cf: *const c_void);
+        }
+        /// 全局光标位置（逻辑点）。
+        pub fn pos() -> Option<(f64, f64)> {
+            unsafe {
+                let ev = CGEventCreate(std::ptr::null());
+                if ev.is_null() {
+                    return None;
+                }
+                let p = CGEventGetLocation(ev);
+                CFRelease(ev);
+                Some((p.x, p.y))
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    mod cursor {
+        #[repr(C)]
+        pub struct POINT {
+            pub x: i32,
+            pub y: i32,
+        }
+        extern "system" {
+            fn GetCursorPos(lp: *mut POINT) -> i32;
+        }
+        /// 全局光标位置（物理像素）。
+        pub fn pos() -> Option<(f64, f64)> {
+            let mut p = POINT { x: 0, y: 0 };
+            if unsafe { GetCursorPos(&mut p) } != 0 {
+                Some((p.x as f64, p.y as f64))
+            } else {
+                None
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    mod cursor {
+        /// 未支持平台：恒返回 None，热角自然不触发。
+        pub fn pos() -> Option<(f64, f64)> {
+            None
+        }
+    }
+
+    /// 修饰键是否正被按下（全局硬件态，无需输入监听权限）。
+    /// 编码：0=Shift 1=Control 2=Alt/Option 3=Command(macOS) / Win(Windows)。
+    /// 供「按住修饰键 + 移到角落」触发模式使用。
+    #[cfg(target_os = "macos")]
+    pub fn modifier_held(id: u8) -> bool {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+        }
+        // 各修饰键的左 / 右虚拟键码（HID keycode）
+        let (left, right): (u16, u16) = match id {
+            0 => (56, 60), // Shift
+            1 => (59, 62), // Control
+            2 => (58, 61), // Option / Alt
+            _ => (55, 54), // Command
+        };
+        // kCGEventSourceStateHIDSystemState = 1：反映真实硬件按下态
+        unsafe { CGEventSourceKeyState(1, left) || CGEventSourceKeyState(1, right) }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn modifier_held(id: u8) -> bool {
+        extern "system" {
+            fn GetAsyncKeyState(virt_key: i32) -> i16;
+        }
+        let vk = match id {
+            0 => 0x10i32, // VK_SHIFT
+            1 => 0x11,   // VK_CONTROL
+            2 => 0x12,   // VK_MENU (Alt)
+            _ => 0x5B,   // VK_LWIN（类比 macOS 的 Command）
+        };
+        // 返回值最高位为 1 表示当前正被按下
+        unsafe { (GetAsyncKeyState(vk) as u16) & 0x8000 != 0 }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    pub fn modifier_held(_id: u8) -> bool {
+        false
+    }
+
+    /// 启动轮询线程（setup 调用一次，进程生命周期常驻）。
+    pub fn start(app: tauri::AppHandle) {
+        std::thread::spawn(move || {
+            let mut since: Option<Instant> = None;
+            let mut fired = false;
+            // 「移开即隐藏」状态机：仅记录光标移出「保持区域」的时刻，达到宽限即收起。
+            let mut left_at: Option<Instant> = None;
+            loop {
+                std::thread::sleep(Duration::from_millis(POLL_MS));
+
+                // 光标坐标空间与显示器尺寸对齐：macOS 光标为逻辑点、Windows 为物理像素，
+                // 显示器/窗口物理尺寸按平台换算到同一空间再比较。
+                let cursor = cursor::pos();
+                let scale = app
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .map(|m| m.scale_factor())
+                    .unwrap_or(1.0);
+                // 屏幕尺寸（光标坐标空间），供角落命中判定使用：macOS 逻辑点 / 其他平台物理像素。
+                let (screen_w, screen_h) = app
+                    .primary_monitor()
+                    .ok()
+                    .flatten()
+                    .map(|m| {
+                        let s = m.size();
+                        #[cfg(target_os = "macos")]
+                        let (ww, hh) = (
+                            s.width as f64 / m.scale_factor(),
+                            s.height as f64 / m.scale_factor(),
+                        );
+                        #[cfg(not(target_os = "macos"))]
+                        let (ww, hh) = (s.width as f64, s.height as f64);
+                        (Some(ww), Some(hh))
+                    })
+                    .unwrap_or((None, None));
+                let bottom = super::sticky_corner_is_bottom();
+                let right = super::sticky_corner_is_right();
+                // 光标是否落在触发角落（与唤出判定同一区域）：停在角落时不收起。
+                let in_corner = match (cursor, screen_w, screen_h) {
+                    (Some((cx, cy)), Some(w), Some(h)) => {
+                        let horiz = if right { cx > w - EDGE } else { cx < EDGE };
+                        let vert = if bottom { cy > h - EDGE } else { cy < EDGE };
+                        horiz && vert
+                    }
+                    _ => false,
+                };
+
+                // ---- 移开即隐藏（仅热角武装时生效）----
+                if AUTOHIDE.load(Ordering::SeqCst) {
+                    // 「保持区域」= 便签窗口（外扩 HIT_PAD）∪ 触发角落；光标在其中即不计时。
+                    let in_window = cursor
+                        .and_then(|(cx, cy)| {
+                            sticky_bounds_logical(&app, scale).map(|(x, y, w, h)| {
+                                cx >= x - HIT_PAD
+                                    && cx <= x + w + HIT_PAD
+                                    && cy >= y - HIT_PAD
+                                    && cy <= y + h + HIT_PAD
+                            })
+                        })
+                        .unwrap_or(false);
+                    if in_window || in_corner {
+                        left_at = None;
+                    } else {
+                        let now = Instant::now();
+                        match left_at {
+                            Some(t) if now.duration_since(t).as_millis() >= LEAVE_GRACE_MS => {
+                                if let Some(w) = app.get_webview_window(super::STICKY_WINDOW) {
+                                    let _ = w.hide();
+                                }
+                                left_at = None;
+                            }
+                            Some(_) => {}
+                            None => left_at = Some(now),
+                        }
+                    }
+                } else {
+                    left_at = None;
+                }
+
+                // ---- 热角唤出 ----
+                if !ENABLED.load(Ordering::SeqCst) {
+                    since = None;
+                    fired = false;
+                    continue;
+                }
+                // in_corner 已在上方按 cursor/屏幕尺寸是否为空一并判定（缺失时为 false）；
+                // 若开启「按住修饰键触发」，还需对应修饰键正被按下才计入停留计时。
+                if !in_corner || !super::sticky_modifier_held() {
+                    since = None;
+                    fired = false;
+                    continue;
+                }
+                if fired {
+                    continue;
+                }
+                let now = Instant::now();
+                match since {
+                    Some(t)
+                        if now.duration_since(t).as_millis()
+                            >= DWELL_MS.load(Ordering::SeqCst) as u128 =>
+                    {
+                        fired = true;
+                        let _ = super::show_sticky(&app);
+                        // 热角唤出后武装「移开即隐藏」。
+                        AUTOHIDE.store(true, Ordering::SeqCst);
+                    }
+                    Some(_) => {}
+                    None => since = Some(now),
+                }
+            }
+        });
+    }
+
+    /// 便签窗口在外框坐标系下的矩形 (x, y, w, h)，已换算到与光标一致的空间
+    /// （macOS 逻辑点 / 其他平台物理像素）。窗口不存在或不可见时返回 None。
+    fn sticky_bounds_logical(
+        app: &tauri::AppHandle,
+        scale: f64,
+    ) -> Option<(f64, f64, f64, f64)> {
+        let win = app.get_webview_window(super::STICKY_WINDOW)?;
+        if !win.is_visible().ok()? {
+            return None;
+        }
+        let pos = win.outer_position().ok()?;
+        let size = win.outer_size().ok()?;
+        #[cfg(target_os = "macos")]
+        let (x, y, w, h) = (
+            pos.x as f64 / scale,
+            pos.y as f64 / scale,
+            size.width as f64 / scale,
+            size.height as f64 / scale,
+        );
+        #[cfg(not(target_os = "macos"))]
+        let (x, y, w, h) = (
+            pos.x as f64,
+            pos.y as f64,
+            size.width as f64,
+            size.height as f64,
+        );
+        let _ = scale;
+        Some((x, y, w, h))
     }
 }
 
@@ -245,6 +520,8 @@ mod fileassoc {
 
 const WINDOW_TITLE: &str = "MarkLock";
 const MAIN_WINDOW: &str = "main";
+/// 便携便签独立窗口标签（与主窗口隔离，前端据此分流到 /sticky 路由）。
+const STICKY_WINDOW: &str = "sticky";
 
 /// 全局会话存储（进程生命周期内唯一）。
 fn store() -> &'static SessionStore {
@@ -262,6 +539,20 @@ const TRAY_ID: &str = "main-tray";
 /// 「关闭窗口时最小化到托盘」开关：为 true 时点关闭按钮改为隐藏窗口到托盘、程序后台常驻，
 /// 而非走「未保存确认 → 退出」；为 false 时保持原退出语义。由前端经 set_close_to_tray 同步。
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+
+/// 托盘点击弹出便签的鼠标键：0=不弹出 1=左键（右键弹菜单）2=右键（左键弹菜单，默认）。
+/// 前端经 set_tray_sticky_button 同步；install_tray 初值与此一致。
+/// 注：macOS 上左键被系统保留给托盘菜单（左键点击不派发 Click 事件），故 mac 仅提供 0/2。
+static TRAY_STICKY_BUTTON: AtomicU8 = AtomicU8::new(2);
+
+/// 便签弹出角落：0=屏幕左上 1=屏幕左下 2=屏幕右上 3=屏幕右下。前端经 set_sticky_corner 同步设置项；
+/// 托盘左键唤出与（阶段二）热角定位共用，避免 Rust 侧回读前端 localStorage。
+static STICKY_CORNER: AtomicU8 = AtomicU8::new(0);
+
+/// 「按住修饰键才触发热角」开关与所选修饰键（0=Shift 1=Control 2=Alt 3=Command/Win），
+/// 前端经 set_hot_corner 同步；默认关闭，即纯停留触发。
+static STICKY_REQUIRE_MOD: AtomicBool = AtomicBool::new(false);
+static STICKY_MODIFIER: AtomicU8 = AtomicU8::new(3);
 
 /// 冷启动「打开文件」缓冲：macOS `RunEvent::Opened` 可能在前端 `listen()` 注册之前就触发，
 /// Tauri 事件不缓冲会丢失。这里把路径暂存，前端启动后通过 `take_pending_open_paths` 主动拉取；
@@ -539,6 +830,22 @@ fn set_close_to_tray(enabled: bool) {
     CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
 }
 
+/// 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端，并即时应用到现有托盘。
+#[tauri::command]
+fn set_tray_sticky_button(app: tauri::AppHandle, button: String) {
+    TRAY_STICKY_BUTTON.store(
+        match button.as_str() {
+            "left" => 1,
+            "right" => 2,
+            _ => 0,
+        },
+        Ordering::SeqCst,
+    );
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        apply_tray_click_mode(&tray);
+    }
+}
+
 /// 运行时开关系统托盘：开启时（若不存在）创建托盘图标，关闭时移除。
 /// 供设置页「显示托盘图标」开关使用；图标被系统隐藏/移除后，前端「关→开」拨动可借此重建。
 #[tauri::command]
@@ -615,16 +922,18 @@ fn ml(zh: &str, en: &str) -> String {
     }
 }
 
-/// 构建系统托盘右键菜单（文案按 MENU_LANG 取中/英）：显示主窗口 / 全部锁定 / 退出。
+/// 构建系统托盘菜单（文案按 MENU_LANG 取中/英）：显示主窗口 / 偏好设置 / 全部锁定 / 退出。
 /// 菜单项 id 以 `tray:` 前缀，由托盘自身的 on_menu_event 分派（与 macOS 原生菜单 `menu:` 命名空间隔离）。
 /// 语言切换时 set_native_menu_lang 会按 TRAY_ID 取回托盘并调用本函数重建菜单。
 fn build_tray_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
     let show = MenuItemBuilder::with_id("tray:show", ml("打开 MarkLock", "Show MarkLock")).build(handle)?;
+    let prefs = MenuItemBuilder::with_id("tray:settings", ml("偏好设置", "Preferences")).build(handle)?;
     let lock = MenuItemBuilder::with_id("tray:lock-all", ml("全部锁定", "Lock All")).build(handle)?;
     let quit = MenuItemBuilder::with_id("tray:quit", ml("退出 MarkLock", "Quit MarkLock")).build(handle)?;
     MenuBuilder::new(handle)
         .item(&show)
+        .item(&prefs)
         .separator()
         .item(&lock)
         .separator()
@@ -636,6 +945,20 @@ fn build_tray_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu
 /// 语言切换时由 set_native_menu_lang 按 TRAY_ID 取回托盘重建。图标用默认窗口图标。
 /// 托盘菜单事件由本托盘的 on_menu_event 就地处理（区别于 macOS 原生菜单的全局 handler）。
 /// setup 与 set_tray_enabled 共用本函数，保证「销毁后重建」与首次创建行为一致。
+///
+/// 按 TRAY_STICKY_BUTTON 应用托盘左右键的「弹菜单 / 派发 Click」行为：
+/// 便签键不弹菜单（改由 Click 事件弹便签），其余情况（含 off）两键均弹菜单。
+/// 右键菜单开关 Tauri 未封装，取内层 `tray_icon::TrayIcon` 设置（`with_inner_tray_icon`）。
+fn apply_tray_click_mode(tray: &tauri::tray::TrayIcon<tauri::Wry>) {
+    let mode = TRAY_STICKY_BUTTON.load(Ordering::SeqCst); // 0=off 1=left 2=right
+    let sticky_left = mode == 1;
+    let sticky_right = mode == 2;
+    // 左键：sticky 在左 → 不弹菜单（发 Click）；否则（含 off）弹菜单。
+    let _ = tray.set_show_menu_on_left_click(!sticky_left);
+    // 右键：sticky 在右 → 不弹菜单（发 Click）；否则（含 off）弹菜单。
+    let _ = tray.with_inner_tray_icon(move |inner| inner.set_show_menu_on_right_click(!sticky_right));
+}
+
 fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::tray::TrayIconBuilder;
     let tray_menu = build_tray_menu(handle)?;
@@ -644,10 +967,49 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
         eprintln!("[tray] 默认窗口图标为 None，跳过托盘创建");
         return Ok(());
     };
-    let _tray = TrayIconBuilder::with_id(TRAY_ID)
+    let tray = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&tray_menu)
         .tooltip(WINDOW_TITLE)
         .icon(icon)
+        // 左右键「弹菜单 / 派发 Click」由 apply_tray_click_mode 统一应用（构建后调用）；
+        // 这里先给左键一个与当前设置一致的初值（sticky 在左=mode1 时左键不弹菜单），避免短暂窗口期行为不符。
+        .show_menu_on_left_click(TRAY_STICKY_BUTTON.load(Ordering::SeqCst) != 1)
+        .on_tray_icon_event(|tray, event| {
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+            if let TrayIconEvent::Click { button, button_state, position, rect, .. } = event {
+                let mode = TRAY_STICKY_BUTTON.load(Ordering::SeqCst); // 0=off 1=left 2=right
+                // 在 Down 触发而非 Up：macOS 上 NSStatusItem 对左键的 mouseUp 常被系统菜单/跟踪环吞掉，
+                // 导致「左键弹便签」收不到 Up 而不生效；Down 是两键在菜单逻辑之前都会派发的首个事件，更可靠。
+                if button_state != MouseButtonState::Down {
+                    return;
+                }
+                // 命中「便签键」（由 TRAY_STICKY_BUTTON 决定）才弹便签；off 或另一键交给系统弹菜单。
+                let hit = match button {
+                    MouseButton::Left => mode == 1,
+                    MouseButton::Right => mode == 2,
+                    _ => false,
+                };
+                if hit {
+                    let app = tray.app_handle();
+                    // 就近摆在图标旁：rect 有效则用图标矩形（转物理像素；OS 上报的托盘 rect 实际为物理，
+                    // scale 仅对 Logical 回退有意义），退化（尺寸 0）时回退到光标位置。
+                    let scale = app
+                        .primary_monitor()
+                        .ok()
+                        .flatten()
+                        .map(|m| m.scale_factor())
+                        .unwrap_or(1.0);
+                    let rp: tauri::PhysicalPosition<i32> = rect.position.to_physical(scale);
+                    let rs: tauri::PhysicalSize<u32> = rect.size.to_physical(scale);
+                    let anchor = if rs.width > 0 && rs.height > 0 {
+                        TrayAnchor { x: rp.x as f64, y: rp.y as f64, w: rs.width as f64, h: rs.height as f64 }
+                    } else {
+                        TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
+                    };
+                    let _ = show_sticky_at(app, Some(anchor), true);
+                }
+            }
+        })
         .on_menu_event(|tray, event| {
             let app = tray.app_handle();
             match event.id().0.as_str() {
@@ -657,6 +1019,15 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
                         let _ = win.unminimize();
                         let _ = win.show();
                         let _ = win.set_focus();
+                    }
+                }
+                // 偏好设置：唤回主窗口并跳转设置页（通用 pane；区别于便签 ⚙ 的 open-settings→sticky tab）。
+                "tray:settings" => {
+                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                        let _ = win.emit("marklock://open-preferences", ());
                     }
                 }
                 // 全部锁定：交给前端统一走 store.lockAll（含锁定前自动保存 + 页签锁定态刷新）。
@@ -675,9 +1046,236 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
             }
         })
         .build(handle)?;
+    // 按当前「便签键」设置应用左右键行为（右键菜单开关走内层 tray_icon）。
+    apply_tray_click_mode(&tray);
     #[cfg(debug_assertions)]
     eprintln!("[tray] 托盘已创建 (install_tray ok)");
     Ok(())
+}
+
+/// 角落编码（STICKY_CORNER）：0=左上 1=左下 2=右上 3=右下。取纵向「下」半（左下 / 右下）。
+fn sticky_corner_is_bottom() -> bool {
+    let c = STICKY_CORNER.load(Ordering::SeqCst);
+    c == 1 || c == 3
+}
+
+/// 取横向「右」半（右上 / 右下），供定位与热角判定使用。
+fn sticky_corner_is_right() -> bool {
+    let c = STICKY_CORNER.load(Ordering::SeqCst);
+    c == 2 || c == 3
+}
+
+/// 触发门控：未开启「按住修饰键」时恒为真；开启后要求对应修饰键正被按下。
+fn sticky_modifier_held() -> bool {
+    if !STICKY_REQUIRE_MOD.load(Ordering::SeqCst) {
+        return true;
+    }
+    hotcorner::modifier_held(STICKY_MODIFIER.load(Ordering::SeqCst))
+}
+
+/// 取回或创建便签窗口。窗口常驻：首次创建后只显隐、不销毁，保证弹出瞬时（见性能考量）。
+/// 无边框 + 置顶 + 初始隐藏 + 不进任务栏，呈现为一张浮在桌面之上的轻窗口。
+fn ensure_sticky_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
+        return Ok(win);
+    }
+    let win = tauri::WebviewWindowBuilder::new(
+        app,
+        STICKY_WINDOW,
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("MarkLock 便签")
+    .inner_size(400.0, 560.0)
+    .min_inner_size(300.0, 220.0)
+    .always_on_top(true)
+    .decorations(false)
+    .resizable(true)
+    .visible(false)
+    .skip_taskbar(true)
+    // macOS「first mouse」：便签显示时不夺焦（见 show_sticky），从别的 App 点回来时，
+    // 默认第一击只用于激活窗口、不下发到内容。开启后 WKWebView 的 acceptsFirstMouse: 返回 YES，
+    // 首次点击即直达内容（两击合一）。非 macOS 平台此选项为空操作。
+    .accept_first_mouse(true)
+    .build()?;
+    Ok(win)
+}
+
+/// 按当前角落设置把便签窗口摆到主显示器对应角落（逻辑坐标，避开菜单栏 / 任务栏）。
+fn position_sticky(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
+    let Ok(Some(mon)) = app.primary_monitor() else { return };
+    let scale = mon.scale_factor();
+    let screen_w = mon.size().width as f64 / scale;
+    let screen_h = mon.size().height as f64 / scale;
+    // 取窗口当前真实尺寸（逻辑像素）：便签可被用户拖动 resize，不能用创建时的固定值，
+    // 否则靠边 / 靠下角定位会按旧尺寸算 top / left，实际边越过屏幕沿导致出界。
+    let (w, h) = win
+        .inner_size()
+        .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
+        .unwrap_or((400.0, 560.0));
+    const MARGIN: f64 = 16.0;
+    let y = if sticky_corner_is_bottom() {
+        (screen_h - h - MARGIN).max(MARGIN)
+    } else {
+        // 上沿：下移避开 macOS 菜单栏 / Windows 顶部任务栏
+        MARGIN + 24.0
+    };
+    let x = if sticky_corner_is_right() {
+        (screen_w - w - MARGIN).max(MARGIN)
+    } else {
+        MARGIN
+    };
+    let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
+}
+
+/// 托盘/菜单栏图标的锚点（物理像素）：图标矩形的位置与尺寸。
+/// rect 退化（尺寸为 0）时回退用光标位置，此时 w=h=0。
+#[derive(Clone, Copy)]
+struct TrayAnchor {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+/// 从托盘/菜单栏图标「就近」弹出时的定位：图标在屏幕上半（如 macOS 菜单栏）→ 便签摆其正下方；
+/// 图标在下半（如 Windows 底部任务栏）→ 摆其正上方。水平以图标中心对齐，并夹在图标所在显示器可视范围内。
+/// 全程用物理像素计算（rect / monitor / inner_size 均为物理），规避多屏不同缩放的换算误差。
+fn position_sticky_near(win: &tauri::WebviewWindow, anchor: TrayAnchor) {
+    // 便签可被用户 resize，取当前真实物理尺寸，不能用创建时固定值。
+    let Ok(size) = win.inner_size() else { return };
+    let (aw, ah) = (size.width as f64, size.height as f64);
+    let icon_cx = anchor.x + anchor.w / 2.0;
+    let icon_cy = anchor.y + anchor.h / 2.0;
+    // 找包含图标中心的显示器（物理坐标包含测试；不依赖 monitor_from_point 的坐标语义）。
+    let monitors = win.available_monitors().unwrap_or_default();
+    let mon = monitors
+        .iter()
+        .find(|m| {
+            let p = m.position();
+            let s = m.size();
+            icon_cx >= p.x as f64
+                && icon_cx <= p.x as f64 + s.width as f64
+                && icon_cy >= p.y as f64
+                && icon_cy <= p.y as f64 + s.height as f64
+        })
+        .or_else(|| monitors.first());
+    let Some(mon) = mon else { return };
+    let mp = mon.position();
+    let ms = mon.size();
+    let scale = mon.scale_factor();
+    let mon_l = mp.x as f64;
+    let mon_t = mp.y as f64;
+    let mon_r = mon_l + ms.width as f64;
+    let mon_b = mon_t + ms.height as f64;
+    let gap = 6.0 * scale; // 图标与便签间距
+    let edge = 8.0 * scale; // 屏幕边缘留白
+    // 竖直：图标在上半 → 摆下方；下半 → 摆上方。
+    let mid_y = mon_t + ms.height as f64 / 2.0;
+    let mut y = if icon_cy < mid_y {
+        anchor.y + anchor.h + gap
+    } else {
+        anchor.y - gap - ah
+    };
+    // 水平：以图标中心对齐。
+    let mut x = icon_cx - aw / 2.0;
+    // 夹在显示器可视范围内（窗口比屏宽时以左上留白为准，避免 min>max）。
+    x = x.max(mon_l + edge).min((mon_r - edge - aw).max(mon_l + edge));
+    y = y.max(mon_t + edge).min((mon_b - edge - ah).max(mon_t + edge));
+    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        x.round() as i32,
+        y.round() as i32,
+    )));
+}
+
+/// 弹出便签（按「热角角落」设置定位）：取回/创建 → 定位 → 显示，并通知便签视图刷新内容
+/// （隐藏期间文件可能被外部改动、库可能被锁定，显示时重新读取最稳妥）。
+/// 热角 / 命令唤出均不夺焦：热角靠 AUTOHIDE「移开即隐藏」收起，命令由调用方自行处理焦点。
+fn show_sticky(app: &tauri::AppHandle) -> tauri::Result<()> {
+    show_sticky_at(app, None, false)
+}
+
+/// 弹出便签的统一实现：anchor 为 Some 时就近摆在托盘/菜单栏图标旁（托盘路径），
+/// 为 None 时按角落设置定位（热角 / 前端命令路径）。
+/// focus=true 时显示后立即夺焦（托盘弹出路径）：让便签成为当前焦点窗口，之后点别处即触发
+/// 前端 `blur` → 自动保存并收起；否则「焦点原本在别的 App」时便签从未获焦、blur 不触发而收不掉。
+fn show_sticky_at(app: &tauri::AppHandle, anchor: Option<TrayAnchor>, focus: bool) -> tauri::Result<()> {
+    let win = ensure_sticky_window(app)?;
+    match anchor {
+        Some(a) => position_sticky_near(&win, a),
+        None => position_sticky(app, &win),
+    }
+    win.show()?;
+    // 托盘弹出：夺焦以便「点别处 → blur → 收起」生效；热角/命令不夺焦，避免打断当前工作。
+    if focus {
+        let _ = win.set_focus();
+    }
+    // 解除「移开即隐藏」（托盘/命令唤出是显式操作，应停留到用户主动收起）；
+    // 热角路径会在调用本函数后重新武装。
+    hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
+    let _ = win.emit("marklock://sticky-show", ());
+    Ok(())
+}
+
+/// 前端 / 托盘 / 热角共用的「弹出便签」命令。
+#[tauri::command]
+fn show_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
+    show_sticky(&app)
+}
+
+/// 隐藏便签窗口（不销毁，下次弹出瞬时）。
+#[tauri::command]
+fn hide_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
+    hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
+    if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
+        win.hide()?;
+    }
+    Ok(())
+}
+
+/// 便签「设置」按钮：唤回主窗口（隐藏到托盘 / 最小化后）并通知其跳转设置页。
+/// 唤回走 Rust 三步（与托盘「打开 MarkLock」同语义），比前端 show() 更可靠；
+/// 跳转由主窗监听 marklock://open-settings 完成（便签是独立 webview，改不了主窗路由）。
+#[tauri::command]
+fn open_settings(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+        let _ = win.emit("marklock://open-settings", ());
+    }
+}
+
+/// 用户已点进便签（获得焦点 / 交互）：解除「移开即隐藏」，此后由 blur/Esc/关闭按钮收起。
+#[tauri::command]
+fn sticky_engage() {
+    hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
+}
+
+/// 同步便签弹出角落（'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight'）到后端，供定位与热角共用。
+#[tauri::command]
+fn set_sticky_corner(corner: String) {
+    let v = match corner.as_str() {
+        "bottomLeft" => 1,
+        "topRight" => 2,
+        "bottomRight" => 3,
+        _ => 0, // topLeft
+    };
+    STICKY_CORNER.store(v, Ordering::SeqCst);
+}
+
+/// 同步热角开关、停留时长、「按住修饰键触发」及其修饰键到后端轮询线程。
+#[tauri::command]
+fn set_hot_corner(enabled: bool, dwell_ms: u32, require_modifier: bool, modifier: String) {
+    hotcorner::ENABLED.store(enabled, Ordering::SeqCst);
+    hotcorner::DWELL_MS.store(dwell_ms, Ordering::SeqCst);
+    STICKY_REQUIRE_MOD.store(require_modifier, Ordering::SeqCst);
+    let m = match modifier.as_str() {
+        "shift" => 0,
+        "control" => 1,
+        "alt" => 2,
+        _ => 3, // command（Windows 上映射为 Win 键）
+    };
+    STICKY_MODIFIER.store(m, Ordering::SeqCst);
 }
 
 /// 前端切换界面语言时同步菜单语言：更新语言标志，macOS 重建原生菜单，全平台重建托盘菜单。
@@ -1107,6 +1705,66 @@ fn open_url(url: String) -> Result<(), crypto::CryptoError> {
     Ok(())
 }
 
+/// 快速启动一个本地应用 / 路径（便签底部快速启动条）。
+///
+/// 与 open_url 不同，这里接收的是用户自己在设置里配置的本地路径（应用、目录或文档），
+/// 交给系统「默认方式」打开：macOS `open`、Windows `explorer`、Linux `xdg-open`。
+/// 路径一律作为独立参数传入、不拼接 shell 字符串，避免命令注入；`.exe`/`.app` 会被直接运行，
+/// 目录与文档则按系统关联打开。
+#[tauri::command]
+fn launch_local(path: String) -> Result<(), crypto::CryptoError> {
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(&path).spawn();
+    #[cfg(target_os = "windows")]
+    let res = std::process::Command::new("explorer").arg(&path).spawn();
+    #[cfg(target_os = "linux")]
+    let res = std::process::Command::new("xdg-open").arg(&path).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let res: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "当前平台不支持快速启动本地应用",
+    ));
+    res.map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// 快速启动项的显示名（macOS 走 NSWorkspace、Windows 走 PowerShell 取本地化应用名；其他平台回退 None，由前端用文件名兜底）。
+#[tauri::command]
+fn app_display_name(path: String) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        appinfo::display_name(&path)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        appinfo_win::display_name(&path)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// 快速启动项的图标 data URL（`data:image/png;base64,…`）。
+/// macOS 从 NSWorkspace、Windows 从 PowerShell(System.Drawing) 抽图标；其他平台回退 None（前端不显示图标）。
+#[tauri::command]
+fn app_icon(path: String) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        appinfo::icon_data_url(&path)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        appinfo_win::icon_data_url(&path)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Windows：查一个扩展名当前生效的关联 ProgId。
 ///
 /// 先读 HKCU FileExts 的 UserChoice（用户显式选择，受系统哈希保护）；不存在时回退
@@ -1509,6 +2167,13 @@ pub fn run() {
             quit_app,
             set_close_to_tray,
             set_tray_enabled,
+            set_tray_sticky_button,
+            show_sticky_note,
+            hide_sticky_note,
+            open_settings,
+            sticky_engage,
+            set_sticky_corner,
+            set_hot_corner,
             read_file,
             read_file_vault,
             write_file,
@@ -1526,6 +2191,9 @@ pub fn run() {
             path_exists,
             reveal_in_finder,
             open_url,
+            launch_local,
+            app_display_name,
+            app_icon,
             file_stamps,
             take_pending_open_paths,
             is_default_file_handler,
@@ -1598,6 +2266,9 @@ pub fn run() {
 
             // 系统托盘（全平台）：创建逻辑见 install_tray（set_tray_enabled 运行时开关共用）。
             install_tray(handle)?;
+
+            // 热角轮询线程（全平台常驻；未支持平台光标读取恒 None 自然不触发）。
+            hotcorner::start(handle.clone());
 
             Ok(())
         })
@@ -1675,14 +2346,15 @@ pub fn run() {
                     }
                 }
             }
-            // macOS：程序运行中点击 Dock 图标 → 重新显示窗口（关闭是隐藏而非退出）
+            // macOS：程序运行中点击 Dock 图标 → 唤回主窗口（关闭到托盘是隐藏而非退出）。
+            // 不再用 has_visible_windows 门控：便携便签可见时它会被误判为 true，
+            // 导致主窗口从托盘无法恢复；点击应用图标应始终以主窗口为准。
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows, .. } => {
-                if !has_visible_windows {
-                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
+            tauri::RunEvent::Reopen { .. } => {
+                if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
                 }
             }
             // 退出请求（macOS Cmd+Q / 菜单退出）：未经确认时拦截并交给前端弹窗判断未保存；

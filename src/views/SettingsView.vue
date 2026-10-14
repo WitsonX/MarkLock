@@ -8,6 +8,7 @@ import { lang } from '../locales'
 import { isMac } from '../lib/platform'
 import { PREVIEW_FONTS, fontLabel, resolveFontStack } from '../lib/fonts'
 import * as tauri from '../lib/tauri'
+import { appIcons, ensureAppIcons } from '../lib/appinfo'
 import { runUpdateCheck } from '../lib/update'
 import hljs from 'highlight.js'
 
@@ -33,6 +34,9 @@ export default defineComponent({
       resetting: false,
       // 编辑器字体大小选项（px，与 ⌘+/⌘- 的 2px 步进对齐，10–28）
       fontSizeOptions: Array.from({ length: 10 }, (_, i) => ({ label: `${10 + i * 2} px`, value: 10 + i * 2 })),
+      // 快速启动项内联重命名：当前编辑行的下标（-1 表示无）与草稿名
+      editingLaunch: -1,
+      editingName: '',
     }
   },
   computed: {
@@ -46,6 +50,7 @@ export default defineComponent({
         { key: 'appear', label: this.$t('settings.nav.appear'), icon: 'appear' },
         { key: 'security', label: this.$t('settings.nav.security'), icon: 'shield', core: true },
         { key: 'keys', label: this.$t('settings.nav.keys'), icon: 'keys' },
+        { key: 'sticky', label: this.$t('settings.nav.sticky'), icon: 'sticky' },
         { key: 'about', label: this.$t('settings.nav.about'), icon: 'about' },
       ]
     },
@@ -67,6 +72,36 @@ export default defineComponent({
         { label: this.$t('settings.options.min5'), value: 300 },
         { label: this.$t('settings.options.min10'), value: 600 },
         { label: this.$t('settings.options.off'), value: 0 },
+      ]
+    },
+    /** 便签文件展示名（未设置时给占位文案） */
+    stickyNoteLabel(): string {
+      const t = this.store.settings.stickyNote
+      if (!t) return this.$t('settings.sticky.none')
+      const base = t.kind === 'mdlb' && t.rel ? t.rel : t.path
+      return base.split(/[\\/]/).pop() || base
+    },
+    cornerOptions() {
+      return [
+        { label: this.$t('settings.sticky.topLeft'), value: 'topLeft' },
+        { label: this.$t('settings.sticky.bottomLeft'), value: 'bottomLeft' },
+        { label: this.$t('settings.sticky.topRight'), value: 'topRight' },
+        { label: this.$t('settings.sticky.bottomRight'), value: 'bottomRight' },
+      ]
+    },
+    modifierOptions() {
+      return [
+        { label: this.$t('settings.sticky.modCommand'), value: 'command' },
+        { label: this.$t('settings.sticky.modShift'), value: 'shift' },
+        { label: this.$t('settings.sticky.modControl'), value: 'control' },
+        { label: this.$t('settings.sticky.modAlt'), value: 'alt' },
+      ]
+    },
+    dwellOptions() {
+      return [
+        { label: '0.3 s', value: 300 },
+        { label: '0.5 s', value: 500 },
+        { label: '1 s', value: 1000 },
       ]
     },
     maxWidthOptions() {
@@ -146,18 +181,34 @@ greet('MarkLock');`
     previewFontStack() {
       return resolveFontStack(this.store.settings.previewFontFamily)
     },
+    /** 快速启动图标的内存缓存（path → data URL），由 lib/appinfo 异步填充。 */
+    iconMap(): Record<string, string> {
+      return appIcons
+    },
+    /** 是否 macOS：模板中据此隐藏「左键弹便签」选项（mac 左键被系统保留给菜单栏菜单）。 */
+    isMac(): boolean {
+      return isMac
+    },
   },
   mounted() {
+    // 便签窗（独立 webview）可能刚改过设置（如在便签内选定文件），本窗内存副本是启动时的旧值；
+    // 进入设置页先从 localStorage 刷新，保证显示与后续写盘都基于最新状态（否则会显示为空并覆盖掉便签目标）。
+    this.store.reloadSettings()
     this.buildSearchIndex()
-    // 支持通过路由 query（例如外部/书签链接）直达指定页签；菜单「关于」不再走此路径，
-    // 改由 App.vue 弹独立对话框（src/lib/aboutDialog.ts）。
-    const tab = this.$route.query.tab
-    if (typeof tab === 'string' && this.nav.some((n) => n.key === tab)) this.active = tab
+    // 支持通过路由 query（例如外部/书签链接、便签窗「设置」按钮）直达指定页签；
+    // 菜单「关于」不再走此路径，改由 App.vue 弹独立对话框（src/lib/aboutDialog.ts）。
+    this.applyTabQuery()
+    // 预取已有快速启动项的图标（新增项在 addLaunch 里单独预取）
+    ensureAppIcons(this.store.settings.quickLaunch.map((i) => i.path))
   },
   beforeUnmount() {
     ;(this as any)._searchIndex = null
   },
   watch: {
+    // 主窗可能已停在设置页（组件复用、mounted 不再触发），故监听 query 变化重新定位分区。
+    '$route.query.tab'() {
+      this.applyTabQuery()
+    },
     searchQuery() {
       this.applySearch()
     },
@@ -177,6 +228,72 @@ greet('MarkLock');`
     /** 托盘相关文案取词：macOS 无「托盘/通知区域」概念，按 Mac 后缀取专属词条（菜单栏 / Dock 语义），其他平台用原键。 */
     trayT(key: string) {
       return this.$t(`settings.general.${key}${isMac ? 'Mac' : ''}`)
+    },
+    /** 根据路由 query.tab 定位到对应分区（无效值忽略，保持当前分区）。 */
+    applyTabQuery() {
+      const tab = this.$route.query.tab
+      if (typeof tab === 'string' && this.nav.some((n) => n.key === tab)) this.active = tab
+    },
+    /** 选择便签源文件：支持明文 md / 单文件加密 .mdl；.mdlb 是容器（内含多文件）不作为单便签。 */
+    async pickStickyFile() {
+      const path = await tauri.openStickyFileDialog()
+      if (!path) return
+      if (/\.mdlb$/i.test(path)) {
+        message.warning(this.$t('settings.sticky.noMdlb'))
+        return
+      }
+      const kind = /\.mdl$/i.test(path) ? 'mdl' : 'plain'
+      this.store.updateSettings({
+        stickyNote: { vaultId: kind === 'mdl' ? path : null, path, rel: null, kind },
+      })
+    },
+    clearStickyFile() {
+      this.store.updateSettings({ stickyNote: null })
+      // 便签窗口是独立 webview，store 不共享；清除文件后直接隐藏它，避免还显示旧内容
+      tauri.hideStickyNote().catch(() => {})
+    },
+    /** 添加快速启动项：无过滤器选任意本地应用 / 路径，名称取文件名去扩展名。 */
+    async addLaunch() {
+      const path = await tauri.openAnyFileDialog()
+      if (!path) return
+      const cur = this.store.settings.quickLaunch
+      if (cur.some((x) => x.path === path)) return
+      // 优先用系统层面的本地化应用名（macOS / Windows）；读不到时回退到文件名（去扩展名）
+      const fallback = (path.split(/[\\/]/).pop() || path).replace(/\.[^.]+$/, '')
+      const name = (await tauri.appDisplayName(path)) || fallback
+      this.store.updateSettings({ quickLaunch: [...cur, { name, path }] })
+      ensureAppIcons([path])
+    },
+    removeLaunch(i: number) {
+      const cur = [...this.store.settings.quickLaunch]
+      cur.splice(i, 1)
+      this.store.updateSettings({ quickLaunch: cur })
+    },
+    /** 进入快速启动项的内联重命名（记下当前名为草稿）。 */
+    startEditLaunch(i: number) {
+      this.editingLaunch = i
+      this.editingName = this.store.settings.quickLaunch[i]?.name ?? ''
+      // 下一帧自动聚焦并全选，便于一改版名
+      this.$nextTick(() => {
+        const el = this.$refs.launchNameInput as HTMLInputElement | undefined
+        if (el) { el.focus(); el.select() }
+      })
+    },
+    cancelLaunchEdit() {
+      this.editingLaunch = -1
+    },
+    /** 提交重命名：非空才写回并持久化（仅改 name，path 不变）；取消/重复 blur 需先判定仍在编辑态。 */
+    commitLaunchEdit(i: number) {
+      if (this.editingLaunch !== i) return
+      const name = this.editingName.trim()
+      if (name) {
+        const cur = [...this.store.settings.quickLaunch]
+        if (cur[i] && cur[i].name !== name) {
+          cur[i] = { ...cur[i], name }
+          this.store.updateSettings({ quickLaunch: cur })
+        }
+      }
+      this.editingLaunch = -1
     },
     /** 「显示托盘图标」开关：关闭时连带关闭「关闭最小化到托盘」，避免窗口隐藏后没有任何恢复入口。 */
     toggleTrayIcon() {
@@ -343,6 +460,7 @@ greet('MarkLock');`
             <svg v-else-if="item.icon === 'appear'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" opacity="0.25" /></svg>
             <svg v-else-if="item.icon === 'shield'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 4v5c0 5-3.5 9.4-8 11-4.5-1.6-8-6-8-11V6z" /><path d="M9 12l2 2 4-4" /></svg>
             <svg v-else-if="item.icon === 'keys'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2" /><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10" /></svg>
+            <svg v-else-if="item.icon === 'sticky'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v10l-6 6H4z" /><path d="M14 20v-6h6" /></svg>
             <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 11v5M12 8h.01" /></svg>
             {{ item.label }}
             <span v-if="item.core" class="tag tag-gold" style="margin-left:auto;height:18px;font-size:10px;">{{ $t('settings.coreTag') }}</span>
@@ -723,6 +841,98 @@ greet('MarkLock');`
           </div>
         </div>
 
+        <!-- 便携便签 -->
+        <div v-show="active === 'sticky'" class="s-pane" data-pane="sticky">
+          <h2>{{ $t('settings.sticky.h2') }}</h2>
+          <div class="desc">{{ $t('settings.sticky.desc') }}</div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.sticky.gFile') }}</div>
+            <div class="row" data-key="stickyNote" data-keywords="便签  sticky note">
+              <div class="info"><div class="t">{{ $t('settings.sticky.file') }}</div><div class="d">{{ stickyNoteLabel }}</div></div>
+              <div style="display:flex;gap:8px;">
+                <a-button size="small" @click="pickStickyFile">{{ $t('settings.sticky.choose') }}</a-button>
+                <a-button v-if="store.settings.stickyNote" size="small" danger @click="clearStickyFile">{{ $t('settings.sticky.clear') }}</a-button>
+              </div>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.sticky.gCorner') }}</div>
+            <div class="row" data-key="hotCornerEnabled" data-keywords="热角 角落 唤起 hot corner">
+              <div class="info"><div class="t">{{ $t('settings.sticky.cornerOn') }}</div><div class="d">{{ $t('settings.sticky.cornerOnD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.hotCorner.enabled }" @click="store.updateSettings({ hotCorner: { ...store.settings.hotCorner, enabled: !store.settings.hotCorner.enabled } })"></div>
+            </div>
+            <div class="row" data-key="hotCornerPos" data-keywords="角落 位置 corner">
+              <div class="info"><div class="t">{{ $t('settings.sticky.cornerPos') }}</div><div class="d">{{ $t('settings.sticky.cornerPosD') }}</div></div>
+              <a-select
+                :value="store.settings.hotCorner.corner"
+                style="width: 150px;"
+                :options="cornerOptions"
+                @change="(v: string) => store.updateSettings({ hotCorner: { ...store.settings.hotCorner, corner: v as 'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight' } })"
+              />
+            </div>
+            <div class="row" data-key="hotCornerDwell" data-keywords="停留 时长 dwell">
+              <div class="info"><div class="t">{{ $t('settings.sticky.dwell') }}</div><div class="d">{{ $t('settings.sticky.dwellD') }}</div></div>
+              <a-select
+                :value="store.settings.hotCorner.dwellMs"
+                style="width: 150px;"
+                :options="dwellOptions"
+                @change="(v: number) => store.updateSettings({ hotCorner: { ...store.settings.hotCorner, dwellMs: v } })"
+              />
+            </div>
+            <div class="row" data-key="hotCornerRequireMod" data-keywords="修饰键 按住 快捷键 modifier cmd">
+              <div class="info"><div class="t">{{ $t('settings.sticky.modOn') }}</div><div class="d">{{ $t('settings.sticky.modOnD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.hotCorner.requireModifier }" @click="store.updateSettings({ hotCorner: { ...store.settings.hotCorner, requireModifier: !store.settings.hotCorner.requireModifier } })"></div>
+            </div>
+            <div v-if="store.settings.hotCorner.requireModifier" class="row" data-key="hotCornerModifier" data-keywords="修饰键 选择 modifier">
+              <div class="info"><div class="t">{{ $t('settings.sticky.modKey') }}</div><div class="d">{{ $t('settings.sticky.modKeyD') }}</div></div>
+              <a-select
+                :value="store.settings.hotCorner.modifier"
+                style="width: 150px;"
+                :options="modifierOptions"
+                @change="(v: string) => store.updateSettings({ hotCorner: { ...store.settings.hotCorner, modifier: v as 'command' | 'shift' | 'control' | 'alt' } })"
+              />
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-head">{{ trayT('gStickyTray') }}</div>
+            <div class="row" data-key="trayStickyButton" data-keywords="托盘 点击 不弹出 左键 右键 便签 弹出 菜单 tray click off left right sticky menu 菜单栏">
+              <div class="info"><div class="t">{{ trayT('traySticky') }}</div><div class="d">{{ trayT('trayStickyD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.trayStickyButton === 'off' }" @click="store.updateSettings({ trayStickyButton: 'off' })">{{ $t('settings.general.trayOff') }}</span>
+                <span v-if="!isMac" :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
+                <span :class="{ on: store.settings.trayStickyButton === 'right' }" @click="store.updateSettings({ trayStickyButton: 'right' })">{{ $t('settings.general.trayRight') }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.sticky.gLaunch') }}</div>
+            <div v-for="(item, i) in store.settings.quickLaunch" :key="item.path" class="row">
+              <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
+              <div v-else class="ql-ico ql-ico-ph" aria-hidden="true"></div>
+              <div class="info">
+                <input
+                  v-if="editingLaunch === i"
+                  ref="launchNameInput"
+                  class="ql-rename"
+                  :value="editingName"
+                  @input="editingName = ($event.target as HTMLInputElement).value"
+                  @keydown.enter="commitLaunchEdit(i)"
+                  @keydown.esc="cancelLaunchEdit()"
+                  @blur="commitLaunchEdit(i)"
+                />
+                <div v-else class="t" :title="$t('settings.sticky.renameD')" @dblclick="startEditLaunch(i)">{{ item.name }}</div>
+                <div class="d">{{ item.path }}</div>
+              </div>
+              <a-button size="small" @click="startEditLaunch(i)">{{ $t('settings.sticky.rename') }}</a-button>
+              <a-button size="small" danger @click="removeLaunch(i)">{{ $t('settings.sticky.remove') }}</a-button>
+            </div>
+            <div class="row" data-key="quickLaunch" data-keywords="快速启动 应用 launch">
+              <div class="info"><div class="t">{{ $t('settings.sticky.addLaunch') }}</div><div class="d">{{ $t('settings.sticky.addLaunchD') }}</div></div>
+              <a-button size="small" @click="addLaunch">{{ $t('settings.sticky.choose') }}</a-button>
+            </div>
+          </div>
+        </div>
+
         <!-- 关于 -->
         <div v-show="active === 'about'" class="s-pane" data-pane="about">
           <AboutCard />
@@ -849,6 +1059,18 @@ greet('MarkLock');`
 .row .info { flex: 1; min-width: 0; }
 .row .info .t { font-size: 14px; }
 .row .info .d { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+/* 快速启动项图标缩略图；无图标时用同尺寸空占位保持行对齐 */
+.ql-ico { width: 32px; height: 32px; object-fit: contain; flex: none; }
+.ql-ico-ph { border-radius: 7px; background: var(--hover); }
+/* 内联重命名输入框：贴合原 .t 字号，复用主题变量 */
+.ql-rename {
+  width: 100%; max-width: 360px; font-size: 14px;
+  padding: 2px 8px; border: 1px solid var(--border-pop); border-radius: 6px;
+  background: var(--panel); color: var(--text); outline: none;
+}
+.ql-rename:focus { border-color: var(--primary); }
+.row .info .t { cursor: text; }
+.row .info .t:hover { color: var(--primary); }
 
 .fake-select {
   display: inline-flex; align-items: center; justify-content: space-between; gap: 10px;

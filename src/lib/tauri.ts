@@ -171,6 +171,65 @@ export function setTrayEnabled(enabled: boolean) {
   return invoke<void>('set_tray_enabled', { enabled })
 }
 
+/** 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端并即时生效。 */
+export function setTrayStickyButton(button: 'off' | 'left' | 'right') {
+  return invoke<void>('set_tray_sticky_button', { button })
+}
+
+// ==================== 便携便签 ====================
+
+/** 弹出便携便签窗口（取回/创建 → 定位 → 显示 → 聚焦）。 */
+export function showStickyNote() {
+  return invoke<void>('show_sticky_note')
+}
+
+/** 隐藏便携便签窗口（不销毁，下次弹出瞬时）。 */
+export function hideStickyNote() {
+  return invoke<void>('hide_sticky_note')
+}
+
+/** 便签「设置」：唤回主窗口（含托盘隐藏态）并跳转设置页。 */
+export function openSettings() {
+  return invoke<void>('open_settings')
+}
+
+/** 用户已点进便签：解除「移开即隐藏」，此后由 blur/Esc/关闭按钮收起。 */
+export function stickyEngage() {
+  return invoke<void>('sticky_engage')
+}
+
+/** 同步便签弹出角落到后端（'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight'），供定位与热角共用。 */
+export function setStickyCorner(
+  corner: 'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight',
+) {
+  return invoke<void>('set_sticky_corner', { corner })
+}
+
+/** 同步热角开关、停留时长、「按住修饰键触发」及修饰键到后端轮询线程。 */
+export function setHotCorner(
+  enabled: boolean,
+  dwellMs: number,
+  requireModifier: boolean,
+  modifier: 'command' | 'shift' | 'control' | 'alt',
+) {
+  return invoke<void>('set_hot_corner', { enabled, dwellMs, requireModifier, modifier })
+}
+
+/** 快速启动一个本地应用 / 路径（便签底部快速启动条）。 */
+export function launchLocal(path: string) {
+  return invoke<void>('launch_local', { path })
+}
+
+/** 取本地应用/路径在系统层面的显示名（macOS 本地化名；非 macOS 返回 null，由前端兜底）。 */
+export function appDisplayName(path: string) {
+  return invoke<string | null>('app_display_name', { path })
+}
+
+/** 取本地应用/路径图标的 PNG data URL（仅 macOS；其他平台返回 null）。 */
+export function appIcon(path: string) {
+  return invoke<string | null>('app_icon', { path })
+}
+
 // ==================== 文件读写 ====================
 
 /** 读取并解密一个已解锁文件的正文。 */
@@ -342,6 +401,25 @@ export async function openFileDialog(preferEncrypted = true) {
     multiple: false,
     filters: preferEncrypted ? [encrypted, plain, all] : [plain, encrypted, all],
   })
+  return typeof path === 'string' ? path : null
+}
+
+/**
+ * 便签源文件对话框：便签支持明文 md 或加密 mdl（.mdlb 是容器、不作单便签）。
+ * 默认首个过滤器为「Markdown / 加密」合并（md 与 mdl 一起列出），便于一眼选到任一类型；仍保留加密 / 文本 / 所有可切换。
+ */
+export async function openStickyFileDialog() {
+  const both = { name: t('common.fd.mdOrEnc'), extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt', 'mdl'] }
+  const encrypted = { name: t('common.fd.encFiles'), extensions: ['mdl', 'mdlb'] }
+  const plain = { name: t('common.fd.mdText'), extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] }
+  const all = { name: t('common.fd.all'), extensions: ['*'] }
+  const path = await open({ multiple: false, filters: [both, encrypted, plain, all] })
+  return typeof path === 'string' ? path : null
+}
+
+/** 无过滤器文件对话框（快速启动选择本地应用 / 任意路径）。 */
+export async function openAnyFileDialog() {
+  const path = await open({ multiple: false })
   return typeof path === 'string' ? path : null
 }
 

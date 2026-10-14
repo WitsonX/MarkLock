@@ -424,6 +424,14 @@ export default defineComponent({
       el.scrollTop = ratio * maxScroll
     }
 
+    /** 当前视口滚动比例（0~1）：供便签等按比例双向同步预览区滚动（源码块锚点同步属主编辑器专属）。 */
+    const getScrollRatio = (): number => {
+      if (!view) return 0
+      const el = view.scrollDOM
+      const maxScroll = el.scrollHeight - el.clientHeight
+      return maxScroll > 0 ? el.scrollTop / maxScroll : 0
+    }
+
     /** 将指定源码行滚动到视口顶部（分屏反向同步用）；越界自动夹取，不改变选区。 */
     const revealLine = (line: number) => {
       if (!view) return
@@ -509,7 +517,7 @@ export default defineComponent({
     /** 当前视口顶部所在源码行号；实例未创建时回退为 1，供父组件切页签时同步预览区。 */
     const getTopViewportLine = (): number => (view ? topViewportLine(view) : 1)
 
-    return { editorRef, scrollToRatio, revealLine, setCursorToLine, revealRange, openSearch, focus, requestMeasure, insertText, wrapSelection, setHeading, toggleLinePrefix, insertBlock, insertCodeBlock, insertLink, getTopViewportLine }
+    return { editorRef, scrollToRatio, getScrollRatio, revealLine, setCursorToLine, revealRange, openSearch, focus, requestMeasure, insertText, wrapSelection, setHeading, toggleLinePrefix, insertBlock, insertCodeBlock, insertLink, getTopViewportLine }
   },
 })
 </script>

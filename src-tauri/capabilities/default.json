@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "MarkLock 主窗口权限。窗口加载本地 dist 前端，通过 core 命令调用 Rust 加密核心。remote 仅为开发模式授权：npm run dev:app 打包的 debug .app 直连 vite dev server（http://localhost:1420）以实现前端热更新免重编；发布版从不对该 URL 加载窗口，此条目在正式产物中不生效。",
-  "windows": ["main"],
+  "windows": ["main", "sticky"],
   "remote": {
     "urls": ["http://localhost:1420"]
   },
