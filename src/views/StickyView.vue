@@ -7,6 +7,7 @@ import type { StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
+import appIcon from '../assets/about-icon.png'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
 
@@ -27,6 +28,12 @@ export default defineComponent({
       picking: false,
       syncingScroll: false,
       saving: false,
+      // 鼠标是否在便签窗内 + 便签窗是否获得焦点：两者共同决定模式切换段是否浮现
+      // （热角弹出走 focus=false 不夺焦，focused 仍为 false，故不能等同“可见即有焦点”）。
+      hovered: false,
+      focused: false,
+      // 主应用图标（与关于对话框同源）：标题栏「打开 MarkLock」按钮用
+      appIcon,
       // 预览模式勾选任务清单的确认弹窗（与主编辑器同语义）：pendingTaskSrc 为改好勾选的源码，
       // text/checked 仅供展示（哪条任务、要勾上还是取消）
       showTaskConfirm: false,
@@ -95,8 +102,14 @@ export default defineComponent({
       this.store.reloadSettings()
       await this.load()
     }).catch(() => {})
+    // 托盘菜单键点击：后端已立即隐藏窗口（避免盖住菜单），这里补一次静默落盘，未保存内容不丢
+    listen('marklock://sticky-hide', () => {
+      this.save(true)
+    }).catch(() => {})
     window.addEventListener('keydown', this.onKey)
     window.addEventListener('blur', this.onBlur)
+    // 初始焦点态：弹出时若已获焦则 focused=true（onEngage 己绑定 focus 事件补后续切换）。
+    this.focused = document.hasFocus()
     // 用户点进/聚焦便签即视为「要用它」：解除后端「移开即隐藏」，此后交回 blur/Esc 收起。
     window.addEventListener('pointerdown', this.onEngage)
     window.addEventListener('focus', this.onEngage)
@@ -191,6 +204,10 @@ export default defineComponent({
     },
     onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') {
+        // 编辑器持有焦点（光标在正文里、正在打字）时 Esc 不做操作，避免误触收起；
+        // 焦点不在编辑器（预览态、或编辑态但焦点已移开）时，Esc 照常保存并收起。
+        const cm = this.$refs.editorCm as unknown as { isFocused?: () => boolean } | null
+        if (cm?.isFocused?.()) return
         e.preventDefault()
         this.hide()
         return
@@ -242,6 +259,7 @@ export default defineComponent({
       setTimeout(() => { this.syncingScroll = false }, 60)
     },
     onBlur() {
+      this.focused = false
       // 打开系统文件选择框会让本窗短暂失焦，此时不能收起（否则选完文件回来窗已隐藏）。
       if (this.picking) return
       // 失焦即收起：先落盘再隐藏，保证便签内容不丢
@@ -268,11 +286,16 @@ export default defineComponent({
       }
     },
     onEngage() {
+      this.focused = true
       tauri.stickyEngage().catch(() => {})
     },
     /** 打开主窗口设置页：由 Rust 唤回主窗（含托盘隐藏态）并通知跳转。 */
     openSettings() {
       tauri.openSettings().catch(() => {})
+    },
+    /** 打开 MarkLock：由 Rust 唤回主窗（取消最小化 / 托盘隐藏态后显示并聚焦）。 */
+    openMain() {
+      tauri.showMainWindow().catch(() => {})
     },
     launch(path: string) {
       tauri.launchLocal(path).catch((e) => message.error(String(e)))
@@ -282,19 +305,21 @@ export default defineComponent({
 </script>
 
 <template>
-  <div class="sticky">
-    <!-- 自绘标题栏：整条可拖拽移动窗口（无边框窗靠它移动）；模式切换 / 设置 / 关闭集中在右上角 -->
+  <div class="sticky" @mouseenter="hovered = true" @mouseleave="hovered = false">
+    <!-- 自绘标题栏：整条可拖拽移动窗口（无边框窗靠它移动）；设置 / 关闭集中在右上角 -->
     <div class="sticky-bar" data-tauri-drag-region>
       <span class="grip" aria-hidden="true">⠿</span>
       <span class="title" data-tauri-drag-region>{{ fileName || $t('sticky.title') }}</span>
       <span v-if="dirty" class="dot" :title="$t('sticky.unsaved')"></span>
-      <div class="seg modes">
+      <!-- 模式切换：仅当鼠标悬停便签且便签获得焦点时浮现（热角不夺焦态不显示），避开常驻占用标题栏空间 -->
+      <div class="seg modes" v-show="hovered && focused">
         <span :class="{ on: mode === 'edit' }" @click="mode = 'edit'">{{ $t('sticky.edit') }}</span>
         <span :class="{ on: mode === 'split' }" @click="mode = 'split'">{{ $t('sticky.split') }}</span>
         <span :class="{ on: mode === 'preview' }" @click="mode = 'preview'">{{ $t('sticky.preview') }}</span>
       </div>
-      <button class="x" :title="$t('sticky.settings')" @click="openSettings">⚙</button>
-      <button class="x" :title="$t('sticky.close')" @click="hide">×</button>
+      <button class="x main-btn" v-tip="{ text: $t('sticky.main'), place: 'bottom' }" @click="openMain"><img :src="appIcon" alt="" /><span>{{ $t('sticky.mainBtn') }}</span></button>
+      <button class="x" v-tip="{ text: $t('sticky.settings'), place: 'bottom' }" @click="openSettings">⚙</button>
+      <button class="x" v-tip="{ text: $t('sticky.close'), place: 'bottom' }" @click="hide">×</button>
     </div>
 
     <div class="sticky-body">
@@ -396,6 +421,19 @@ export default defineComponent({
 }
 .x:hover { background: var(--border-pop); color: var(--text); }
 .x:active { background: var(--border-2); }
+/* 「打开 MarkLock」主图标按钮：常驻浅底 + 描边 + 短文字标签，图标与文字水平居中；PNG 自带留白取 18px */
+.main-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  background: var(--panel);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.main-btn img { display: block; width: 18px; height: 18px; }
+.main-btn:hover { background: var(--hover); border-color: var(--border-pop); }
 /* 模式切换分段控件：样式对齐主编辑器工具栏的 .seg（见 EditorView.vue），靠右贴关闭按钮 */
 .modes {
   margin-left: auto;

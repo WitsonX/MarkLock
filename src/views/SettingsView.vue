@@ -185,10 +185,6 @@ greet('MarkLock');`
     iconMap(): Record<string, string> {
       return appIcons
     },
-    /** 是否 macOS：模板中据此隐藏「左键弹便签」选项（mac 左键被系统保留给菜单栏菜单）。 */
-    isMac(): boolean {
-      return isMac
-    },
   },
   mounted() {
     // 便签窗（独立 webview）可能刚改过设置（如在便签内选定文件），本窗内存副本是启动时的旧值；
@@ -925,7 +921,7 @@ greet('MarkLock');`
               <div class="info"><div class="t">{{ trayT('traySticky') }}</div><div class="d">{{ trayT('trayStickyD') }}</div></div>
               <div class="seg">
                 <span :class="{ on: store.settings.trayStickyButton === 'off' }" @click="store.updateSettings({ trayStickyButton: 'off' })">{{ $t('settings.general.trayOff') }}</span>
-                <span v-if="!isMac" :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
+                <span :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
                 <span :class="{ on: store.settings.trayStickyButton === 'right' }" @click="store.updateSettings({ trayStickyButton: 'right' })">{{ $t('settings.general.trayRight') }}</span>
               </div>
             </div>

@@ -6,7 +6,6 @@
 
 import { defineStore } from 'pinia'
 import * as tauri from '../lib/tauri'
-import { isMac } from '../lib/platform'
 
 /** 一个已登记的库（元信息，不含密钥） */
 export interface VaultInfo {
@@ -168,7 +167,7 @@ export interface Settings {
   /** 点击关闭按钮时是否隐藏到系统托盘（后台常驻）而非退出应用 */
   closeToTray: boolean
   /** 托盘点击弹出便携便签的鼠标键：off=不弹出、left=左键弹（右键弹菜单）、right=右键弹（左键弹菜单）。
-   * 注：macOS 左键被系统保留给菜单栏菜单，故 mac 仅支持 off/right。 */
+   * 三键跨平台可用（macOS 经 set_show_menu_on_left_click 关闭默认弹菜单，左键同样派发 Click）。 */
   trayStickyButton: 'off' | 'left' | 'right'
   /** 剪贴板定时清除（秒） */
   clipboardClearSecs: number
@@ -248,8 +247,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showTrayIcon: true,
   // 关闭最小化到托盘默认开启：点关闭按钮隐藏到托盘（后台常驻）而非退出应用
   closeToTray: true,
-  // 托盘弹便签默认绑右键（左键弹菜单）；macOS 仅右键可用，与跨平台默认一致
-  trayStickyButton: 'right',
+  // 托盘弹便签默认绑左键（右键弹菜单），跨平台一致
+  trayStickyButton: 'left',
   clipboardClearSecs: 30,
   lockOnMinimize: true,
   lockOnSleep: true,
@@ -302,10 +301,6 @@ function loadSettings(): Settings {
       : { ...DEFAULT_SETTINGS }
     // 浅合并会让旧版本存档整体覆盖 hotCorner（缺少新字段），这里对其深合并补齐默认值
     merged.hotCorner = { ...DEFAULT_SETTINGS.hotCorner, ...(merged.hotCorner || {}) }
-    // macOS 不支持「左键弹便签」（左键被系统保留给菜单栏菜单）；旧存档若为 left 则迁移为 off
-    if (isMac && merged.trayStickyButton === 'left') {
-      merged.trayStickyButton = 'off'
-    }
     return merged
   } catch {
     return { ...DEFAULT_SETTINGS }

@@ -514,10 +514,15 @@ export default defineComponent({
       view.focus()
     }
 
-    /** 当前视口顶部所在源码行号；实例未创建时回退为 1，供父组件切页签时同步预览区。 */
+    /** 当前视口顶部所在的源码行号；实例未创建时回退为 1，供父组件切页签时同步预览区。 */
     const getTopViewportLine = (): number => (view ? topViewportLine(view) : 1)
 
-    return { editorRef, scrollToRatio, getScrollRatio, revealLine, setCursorToLine, revealRange, openSearch, focus, requestMeasure, insertText, wrapSelection, setHeading, toggleLinePrefix, insertBlock, insertCodeBlock, insertLink, getTopViewportLine }
+    /** 编辑器当前是否「正在编辑」：同时满足持有焦点与真可见（非收起/零宽）。
+     *  单看 hasFocus 不够：预览模式下 pane 仅 flex-basis 收成 0（非 display:none），
+     *  CodeMirror 实例仍存活、hasFocus 可能仍为 true，会导致父组件误判为「编辑中」而不响应 Esc。 */
+    const isFocused = (): boolean => (view?.hasFocus ?? false) && isVisible()
+
+    return { editorRef, scrollToRatio, getScrollRatio, revealLine, setCursorToLine, revealRange, openSearch, focus, requestMeasure, insertText, wrapSelection, setHeading, toggleLinePrefix, insertBlock, insertCodeBlock, insertLink, getTopViewportLine, isFocused }
   },
 })
 </script>

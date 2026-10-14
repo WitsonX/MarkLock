@@ -199,6 +199,11 @@ export function openSettings() {
   return invoke<void>('open_settings')
 }
 
+/** 便签「打开 MarkLock」：唤回主窗口（取消最小化 / 托盘隐藏态后显示并聚焦）。 */
+export function showMainWindow() {
+  return invoke<void>('show_main_window')
+}
+
 /** 用户已点进便签：解除「移开即隐藏」，此后由 blur/Esc/关闭按钮收起。 */
 export function stickyEngage() {
   return invoke<void>('sticky_engage')

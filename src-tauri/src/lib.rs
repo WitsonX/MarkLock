@@ -540,10 +540,10 @@ const TRAY_ID: &str = "main-tray";
 /// 而非走「未保存确认 → 退出」；为 false 时保持原退出语义。由前端经 set_close_to_tray 同步。
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
-/// 托盘点击弹出便签的鼠标键：0=不弹出 1=左键（右键弹菜单）2=右键（左键弹菜单，默认）。
+/// 托盘点击弹出便签的鼠标键：0=不弹出 1=左键（右键弹菜单，默认）2=右键（左键弹菜单）。
 /// 前端经 set_tray_sticky_button 同步；install_tray 初值与此一致。
-/// 注：macOS 上左键被系统保留给托盘菜单（左键点击不派发 Click 事件），故 mac 仅提供 0/2。
-static TRAY_STICKY_BUTTON: AtomicU8 = AtomicU8::new(2);
+/// macOS 左键经 apply_tray_click_mode 关闭默认弹菜单后同样派发 Click（Down），三键跨平台可选。
+static TRAY_STICKY_BUTTON: AtomicU8 = AtomicU8::new(1);
 
 /// 便签弹出角落：0=屏幕左上 1=屏幕左下 2=屏幕右上 3=屏幕右下。前端经 set_sticky_corner 同步设置项；
 /// 托盘左键唤出与（阶段二）热角定位共用，避免 Rust 侧回读前端 localStorage。
@@ -1016,6 +1016,17 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
                         TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
                     };
                     let _ = show_sticky_at(app, Some(anchor), true);
+                } else {
+                    // 菜单键（另一键或 off 双键）：系统即将弹菜单；若便签正显示，先立即隐藏
+                    // 避免叠在菜单上（菜单在托盘图标处弹出，与便签锚点重合），
+                    // 未保存内容由前端 marklock://sticky-hide 监听做静默落盘。
+                    let app = tray.app_handle();
+                    if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
+                        if win.is_visible().unwrap_or(false) {
+                            let _ = win.emit("marklock://sticky-hide", ());
+                            let _ = win.hide();
+                        }
+                    }
                 }
             }
         })
@@ -1239,6 +1250,16 @@ fn hide_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
         win.hide()?;
     }
     Ok(())
+}
+
+/// 便签「打开 MarkLock」主图标按钮：唤回主窗口（取消最小化 / 托盘隐藏态后显示并聚焦，不跳转页面）。
+#[tauri::command]
+fn show_main_window(app: tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
 }
 
 /// 便签「设置」按钮：唤回主窗口（隐藏到托盘 / 最小化后）并通知其跳转设置页。
@@ -2182,6 +2203,7 @@ pub fn run() {
             show_sticky_note,
             hide_sticky_note,
             open_settings,
+            show_main_window,
             sticky_engage,
             set_sticky_corner,
             set_hot_corner,
