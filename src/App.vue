@@ -2,6 +2,7 @@
 import { defineComponent } from 'vue'
 import { storeToRefs } from 'pinia'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { message } from 'ant-design-vue'
 import zhCN from 'ant-design-vue/es/locale/zh_CN'
 import enUS from 'ant-design-vue/es/locale/en_US'
@@ -72,6 +73,17 @@ export default defineComponent({
       tauri.setTrayEnabled(settings.value.showTrayIcon).catch(() => {})
       // 同步「托盘点击弹出便签」的鼠标键到后端（决定左/右键弹便签、另一键弹菜单）；启动时先同步一次。
       tauri.setTrayStickyButton(settings.value.trayStickyButton).catch(() => {})
+      // 开机自启：仅在设置为开启时重写系统启动项，避免默认（关闭）用户每次启动都去碰注册表 / plist。
+      // 主要兼容“用户先前开启后又从系统设置里手动删除启动项”的少见场景，确保 UI 与系统状态最终一致。
+      if (settings.value.autoStart) tauri.setAutoStart(true).catch(() => {})
+      // 自启启动时 Rust 已以隐藏态创建主窗（看到 --autostarted 参数），这里按设置决定是否弹出：
+      //   ① autoStartShowWindow=true → 用户显式要求弹窗；
+      //   ② 或 showTrayIcon=false → 托盘不可达，强制弹窗避免应用隐形。
+      // 手动启动时窗口本就可见，show()/setFocus() 为无害的 no-op，不需专门区分。
+      if (settings.value.autoStartShowWindow || !settings.value.showTrayIcon) {
+        const win = getCurrentWindow()
+        win.show().then(() => win.setFocus()).catch(() => {})
+      }
       // 同步便签弹出角落到后端（托盘左键定位 / 热角共用）；启动时先同步一次。
       tauri.setStickyCorner(settings.value.hotCorner.corner).catch(() => {})
       // 同步热角开关、停留时长与修饰键门控到后端轮询线程；启动时先同步一次。

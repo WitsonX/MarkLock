@@ -155,6 +155,14 @@ export interface Settings {
   showHiddenFiles: boolean
   /** 恢复上次打开的文件 */
   restoreLastSession: boolean
+  /** 登录系统时自动启动 MarkLock（写入 macOS LaunchAgent / Windows HKCU Run / Linux XDG autostart）。
+   *  默认关闭：尊重用户预期，避免安装后默默驻留开机项；由用户在设置页显式开启。 */
+  autoStart: boolean
+  /** 自启启动时是否显示主窗（仅在 autoStart=true 时生效）。
+   *  默认 false：与 showTrayIcon 默认 true 配合，登录后静默驻留托盘 / 菜单栏。
+   *  安全兼容：运行时实际“是否 show” = autoStartShowWindow || !showTrayIcon，
+   *  确保关闭托盘时不会出现「无窗口 + 无托盘」的不可达状态。 */
+  autoStartShowWindow: boolean
   /** 是否在系统托盘（菜单栏）显示 MarkLock 图标 */
   showTrayIcon: boolean
   /** 点击关闭按钮时是否隐藏到系统托盘（后台常驻）而非退出应用 */
@@ -230,6 +238,10 @@ export const DEFAULT_SETTINGS: Settings = {
   showOutline: true,
   showHiddenFiles: false,
   restoreLastSession: true,
+  // 开机自启默认关闭：需用户在设置页显式开启，避免安装后静默写入系统启动项
+  autoStart: false,
+  // 自启时默认不弹主窗（托盘默认开启，静默驻留更符合「开机自启」预期）；托盘关闭时运行时强制弹窗保可达
+  autoStartShowWindow: false,
   // 托盘图标默认显示：托盘是后台常驻与快捷操作的入口，后续托盘功能也以此为基建
   showTrayIcon: true,
   // 关闭最小化到托盘默认开启：点关闭按钮隐藏到托盘（后台常驻）而非退出应用

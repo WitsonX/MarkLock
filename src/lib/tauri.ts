@@ -176,6 +176,12 @@ export function setTrayStickyButton(button: 'off' | 'left' | 'right') {
   return invoke<void>('set_tray_sticky_button', { button })
 }
 
+/** 开关「登录时自动启动」：写入 / 移除系统级启动项（macOS LaunchAgent、Windows HKCU Run、Linux XDG autostart）。
+ *  失败时 Rust 侧返回底层错误字符串，供前端 toast 提示；成功即已生效，无需重启应用。 */
+export function setAutoStart(enabled: boolean) {
+  return invoke<void>('set_auto_start', { enabled })
+}
+
 // ==================== 便携便签 ====================
 
 /** 弹出便携便签窗口（取回/创建 → 定位 → 显示 → 聚焦）。 */

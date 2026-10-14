@@ -518,6 +518,10 @@ export default {
       gLaunch: 'Startup',
       restore: 'Restore last session on startup',
       restoreD: 'Reopen the tabs you had open last time (encrypted vaults still require a password)',
+      autoStart: 'Launch automatically at login',
+      autoStartD: 'Start MarkLock in the background after you sign in (writes to the macOS LaunchAgent / Windows per-user Run key / Linux XDG autostart). Off by default',
+      autoStartShowWindow: 'Show main window when auto-started',
+      autoStartShowWindowD: 'When off, MarkLock starts silently in the background at login (recall it from the tray / menu bar icon). Forced on if the tray icon is disabled so the app stays reachable',
       gTray: 'System tray',
       showTrayIcon: 'Show tray icon',
       showTrayIconD: 'Show the MarkLock icon in the tray; its menu can show the window, lock all, or quit. Turning it off also disables “Minimize to tray on close”',
@@ -675,6 +679,7 @@ export default {
       setDefaultSuccess: 'MarkLock is now the default app for .md / .mdl / .mdlb',
       setDefaultManual: 'Automatic setting failed. Right-click the file → “Open with” → choose MarkLock and check “Always use this app” (macOS: Get Info → Open with → Change All…)',
       resetFailed: 'Reset failed: {err}',
+      autoStartFailed: 'Failed to change auto-start: {err}',
     },
   },
   dialog: {

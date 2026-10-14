@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 /// macOS 锁屏检测。
 ///
@@ -859,6 +859,15 @@ fn set_tray_enabled(app: tauri::AppHandle, enabled: bool) {
     } else {
         app.remove_tray_by_id(TRAY_ID);
     }
+}
+
+/// 开关「登录时自动启动」：调用 tauri-plugin-autostart 写入 / 移除系统级启动项
+/// （macOS: LaunchAgent plist；Windows: HKCU Run 注册表；Linux: XDG autostart desktop 文件）。
+/// 出错时把底层错误串化返回给前端提示；成功即已生效，无需重启应用。
+#[tauri::command]
+fn set_auto_start(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    let mgr = app.autolaunch();
+    if enabled { mgr.enable() } else { mgr.disable() }.map_err(|e| e.to_string())
 }
 
 /// macOS 原生菜单需动态回写的句柄：可勾选项（id → CheckMenuItem）+ 库/工作目录切换项（按状态改标题）。
@@ -2142,7 +2151,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            // 标记位：自启启动时带上该参数，供 setup 判断是否隐藏主窗（前端再根据「自启时显示主窗」设置决定是否 show）。
+            Some(vec!["--autostarted"]),
         ))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -2168,6 +2178,7 @@ pub fn run() {
             set_close_to_tray,
             set_tray_enabled,
             set_tray_sticky_button,
+            set_auto_start,
             show_sticky_note,
             hide_sticky_note,
             open_settings,
@@ -2217,6 +2228,11 @@ pub fn run() {
             buffer_open_paths(argv_file_paths());
             let handle = app.handle();
 
+            // 开机自启启动（tauri-plugin-autostart 写入的 --autostarted 标记）：先以隐藏态创建主窗，
+            // 前端载入后由 App.vue 根据「自启时显示主窗」与「托盘图标」设置决定是否 show；
+            // 若托盘关闭则前端强制 show，避免「无窗口 + 无托盘」的不可达状态。手动启动（无此参数）时保持默认可见。
+            let autostarted = std::env::args().any(|a| a == "--autostarted");
+
             // 加载本地前端（dist/index.html）
             let mut builder = tauri::WebviewWindowBuilder::new(
                 handle,
@@ -2227,6 +2243,10 @@ pub fn run() {
             .inner_size(1280.0, 860.0)
             .min_inner_size(960.0, 640.0)
             .center();
+
+            if autostarted {
+                builder = builder.visible(false);
+            }
 
             // macOS：隐藏原生标题栏，红绿灯按钮叠加在应用自绘工具条左上角
             #[cfg(target_os = "macos")]

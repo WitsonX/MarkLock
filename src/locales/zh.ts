@@ -519,6 +519,10 @@ export default {
       gLaunch: '启动',
       restore: '启动时恢复上次会话',
       restoreD: '重新打开上次打开的页签（加密库仍需输入密码）',
+      autoStart: '开机时自动启动',
+      autoStartD: '登录系统后自动在后台启动 MarkLock（写入 macOS LaunchAgent / Windows 当前用户启动项 / Linux XDG autostart），默认关闭',
+      autoStartShowWindow: '自启时显示主窗口',
+      autoStartShowWindowD: '关闭后登录时静默启动到后台（可从托盘 / 菜单栏图标唤回）；若托盘图标已关闭则此项强制开启，避免应用不可达',
       gTray: '系统托盘',
       showTrayIcon: '显示托盘图标',
       showTrayIconD: '在系统托盘显示图标，菜单可显示窗口 / 全部锁定 / 退出；关闭后「最小化到托盘」一并停用',
@@ -676,6 +680,7 @@ export default {
       setDefaultSuccess: '已将 MarkLock 设为 .md / .mdl / .mdlb 的默认打开程序',
       setDefaultManual: '自动设置未成功。请右键文件 →「打开方式」→ 选择 MarkLock 并勾选「始终使用此应用」（macOS：显示简介 → 打开方式 → 全部更改…）',
       resetFailed: '重置失败：{err}',
+      autoStartFailed: '设置开机自启失败：{err}',
     },
   },
   dialog: {

@@ -295,6 +295,19 @@ greet('MarkLock');`
       }
       this.editingLaunch = -1
     },
+    /** 「开机自启」开关：调用 Rust 写入 / 移除系统启动项；失败时 toast 提示并回退开关。
+     *  与 store.settings.autoStart 双向绑定：先乐观更新 UI，后端拒绝时再回写。 */
+    async toggleAutoStart() {
+      const next = !this.store.settings.autoStart
+      this.store.updateSettings({ autoStart: next })
+      try {
+        await tauri.setAutoStart(next)
+      } catch (e) {
+        // 后端写入失败（权限 / 注册表 / plist 异常）：回写设置并提示，避免 UI 与系统状态脱节
+        this.store.updateSettings({ autoStart: !next })
+        message.error(this.$t('settings.toast.autoStartFailed', { err: String(e) }))
+      }
+    },
     /** 「显示托盘图标」开关：关闭时连带关闭「关闭最小化到托盘」，避免窗口隐藏后没有任何恢复入口。 */
     toggleTrayIcon() {
       const on = !this.store.settings.showTrayIcon
@@ -479,6 +492,19 @@ greet('MarkLock');`
             <div class="row" data-key="restoreLastSession" data-keywords="会话 页签 恢复 启动 session restore">
               <div class="info"><div class="t">{{ $t('settings.general.restore') }}</div><div class="d">{{ $t('settings.general.restoreD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.restoreLastSession }" @click="store.updateSettings({ restoreLastSession: !store.settings.restoreLastSession })"></div>
+            </div>
+            <div class="row" data-key="autoStart" data-keywords="开机 自启 自动启动 登录 启动项 开机启动 auto start startup login launch boot">
+              <div class="info"><div class="t">{{ $t('settings.general.autoStart') }}</div><div class="d">{{ $t('settings.general.autoStartD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.autoStart }" @click="toggleAutoStart"></div>
+            </div>
+            <div v-if="store.settings.autoStart" class="row" data-key="autoStartShowWindow" data-keywords="自启 显示 主窗 弹出 静默 后台 托盘 show window autostart hidden silent background">
+              <div class="info"><div class="t">{{ $t('settings.general.autoStartShowWindow') }}</div><div class="d">{{ $t('settings.general.autoStartShowWindowD') }}</div></div>
+              <!-- 托盘关闭时强制弹窗（避免不可达），开关视觉为 ON 且不可点；重新开启托盘后恢复为用户偏好 -->
+              <div
+                class="switch"
+                :class="{ on: store.settings.autoStartShowWindow || !store.settings.showTrayIcon, disabled: !store.settings.showTrayIcon }"
+                @click="store.settings.showTrayIcon && store.updateSettings({ autoStartShowWindow: !store.settings.autoStartShowWindow })"
+              ></div>
             </div>
           </div>
           <div class="group">
