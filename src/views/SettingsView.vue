@@ -932,6 +932,13 @@ greet('MarkLock');`
           </div>
           <div class="group">
             <div class="group-head">{{ $t('settings.sticky.gLaunch') }}</div>
+            <div class="row" data-key="stickyLaunchDisplay" data-keywords="快速启动 显示 图标 文字 launch display icon text">
+              <div class="info"><div class="t">{{ $t('settings.sticky.launchDisplay') }}</div><div class="d">{{ $t('settings.sticky.launchDisplayD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.stickyLaunchDisplay === 'icon' }" @click="store.updateSettings({ stickyLaunchDisplay: 'icon' })">{{ $t('settings.sticky.launchDisplayIcon') }}</span>
+                <span :class="{ on: store.settings.stickyLaunchDisplay === 'iconText' }" @click="store.updateSettings({ stickyLaunchDisplay: 'iconText' })">{{ $t('settings.sticky.launchDisplayIconText') }}</span>
+              </div>
+            </div>
             <div v-for="(item, i) in store.settings.quickLaunch" :key="item.path" class="row">
               <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
               <div v-else class="ql-ico ql-ico-ph" aria-hidden="true"></div>

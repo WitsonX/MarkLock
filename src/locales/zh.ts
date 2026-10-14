@@ -513,6 +513,10 @@ export default {
       remove: '移除',
       rename: '重命名',
       renameD: '显示名称默认取系统里的应用名（中文系统即中文名），可在此修改',
+      launchDisplay: '启动项显示',
+      launchDisplayD: '便签底部快捷方式展示图标还是图标加名称',
+      launchDisplayIcon: '仅图标',
+      launchDisplayIconText: '图标及文字',
     },
     general: {
       h2: '通用', desc: '启动行为与文件保存策略',

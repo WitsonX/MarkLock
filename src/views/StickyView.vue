@@ -47,6 +47,10 @@ export default defineComponent({
     quickLaunch() {
       return this.store.settings.quickLaunch
     },
+    /** 快速启动项是否显示文字（设置页「启动项显示」：仅图标 / 图标及文字）。 */
+    launchShowText(): boolean {
+      return this.store.settings.stickyLaunchDisplay === 'iconText'
+    },
     /** 视图模式读写到 store，跨会话记忆（编辑 / 分屏 / 预览）。 */
     mode: {
       get(): 'edit' | 'split' | 'preview' {
@@ -137,6 +141,9 @@ export default defineComponent({
       }
     },
     onInput(v: string) {
+      // 内容未变则不记脏：外部修改重载后 CodeMirror 会把新 doc 原样回吐一次，
+      // 若不过滤会把刚加载的磁盘版本误标为「未保存」（与主编辑器 setContentFor 同语义）。
+      if (this.content === v) return
       this.content = v
       this.dirty = true
     },
@@ -325,10 +332,10 @@ export default defineComponent({
       </template>
     </div>
 
-    <div v-if="quickLaunch.length" class="sticky-launch">
+    <div v-if="quickLaunch.length" class="sticky-launch" :class="{ 'icon-only': !launchShowText }">
       <button v-for="item in quickLaunch" :key="item.path" :title="item.path" @click="launch(item.path)">
         <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
-        <span>{{ item.name }}</span>
+        <span v-if="launchShowText">{{ item.name }}</span>
       </button>
     </div>
 
@@ -505,12 +512,14 @@ export default defineComponent({
   border: 1px solid var(--border);
   background: var(--panel);
   color: var(--text-2);
-  border-radius: 999px;
-  padding: 4px 12px;
+  border-radius: 8px;
+  padding: 4px 8px;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
 }
 .sticky-launch button:hover { color: var(--primary); border-color: var(--primary); }
-.ql-ico { width: 22px; height: 22px; object-fit: contain; flex: none; }
+.ql-ico { width: 28px; height: 28px; object-fit: contain; flex: none; }
+/* 纯图标：去掉文字后收紧为方形内边距，一排更紧凑 */
+.sticky-launch.icon-only button { padding: 4px 6px; gap: 0; }
 </style>

@@ -512,6 +512,10 @@ export default {
       remove: 'Remove',
       rename: 'Rename',
       renameD: 'Shown name defaults to the app name in your system (localized); edit it here if you prefer',
+      launchDisplay: 'Launch item display',
+      launchDisplayD: 'Show icons only, or icons with names, in the note’s bottom shortcut bar',
+      launchDisplayIcon: 'Icon only',
+      launchDisplayIconText: 'Icon & text',
     },
     general: {
       h2: 'General', desc: 'Startup behavior and file-saving policy',

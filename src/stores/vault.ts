@@ -220,6 +220,8 @@ export interface Settings {
   hotCorner: HotCornerSettings
   /** 便签底部快速启动的本地应用列表 */
   quickLaunch: QuickLaunchItem[]
+  /** 便签快速启动项的显示模式：仅图标 / 图标加文字 */
+  stickyLaunchDisplay: 'icon' | 'iconText'
 }
 
 // 导出供 UI 标注「默认」档位（如状态栏字号 / 自动锁定菜单），避免各处硬编码默认值
@@ -275,6 +277,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // 热角默认开启：左上角、停留 0.3s 即弹出便签
   hotCorner: { enabled: true, corner: 'topLeft', dwellMs: 300, requireModifier: false, modifier: 'command' },
   quickLaunch: [],
+  // 快速启动项默认「图标 + 文字」，语义最清晰；纯图标更紧凑可另行选择
+  stickyLaunchDisplay: 'iconText',
 }
 
 function loadRecent(): VaultInfo[] {
