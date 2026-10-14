@@ -14,71 +14,27 @@
 
 ---
 
-MarkLock is a desktop app built with Tauri 2 — Vue 3 + Ant Design Vue on the frontend, Rust for the shell and the entire crypto core.
+A Markdown tool that lives on your machine and reads plain `.md` like any editor — but **everything is ciphertext the moment it hits the disk**. Notes, finances, and plans you'd rather not hand to anyone can be locked into a single encrypted file and carried around; everyday notes stay ordinary `.md`.
 
-Every byte hits the disk already encrypted. **Keys never leave the device, never enter JavaScript, never get uploaded.**
+All key material is derived and used inside Rust. **Keys never leave the device, never enter JavaScript, never get uploaded** — no account, no cloud, no network call anywhere in the encryption path.
+
+## Why this one
+
+- **A vault is one file** — the whole tree, filenames and folder names included, encrypts into a single `.mdlb`. Drop it in iCloud, Dropbox, or an external drive; anyone who opens it sees an opaque blob.
+- **Changing the password doesn't re-encrypt** — the master password only wraps the data key, so switching it is instant even on a huge vault.
+- **Locking means amnesia** — idle timeout, screen lock, or sleep zeroizes the keys in memory, and tabs from a locked vault relabel themselves to `vault file` so even filenames stop leaking.
+- **Small** — the default Windows installer is 3.5MB, macOS ships a single small app. It uses the system WebView instead of bundling a browser.
+- **A note always at hand** — Sticky Notes pins one `.md` / `.mdl` file to a screen corner or the tray: hover, write, save — and what you save is still encrypted.
+- **Open source and auditable** — Apache-2.0, the crypto core is covered by unit tests. Read the source and verify every claim above.
 
 ## Download
 
-Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — pick the file matching your platform. From mainland China the [Gitee release page](https://gitee.com/Witson/MarkLock/releases) downloads faster and carries every installer except the offline build:
+Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/releases/latest) — pick the file matching your platform. From mainland China the [Gitee release page](https://gitee.com/Witson/MarkLock/releases) downloads faster and carries every installer except the offline build.
 
 - The default Windows build is only 3.5MB (it downloads the WebView2 runtime while installing). If the machine has no WebView2 and can't reach Microsoft's CDN, use `*-setup-offline.exe` instead (about 209MB, no network needed). Windows 11 and updated Windows 10 already ship the runtime, so the default build is fine.
 - The offline build is GitHub-only (Gitee caps attachments at 100MB per file). On a Gitee machine, install the official [WebView2 runtime](https://go.microsoft.com/fwlink/?linkid=2124701) first, then use the small build.
 
 > Installers carry an ad-hoc signature only — they aren't notarized by Apple, so the first-launch "Apple cannot check it" prompt is expected. One-time bypass: click **Done**, then in **System Settings → Privacy & Security → Security** click **Open Anyway** and confirm with your password — the same location won't ask again (on some builds right-click → **Open** works too). If macOS says the app is **"damaged"**, it's an older build without a resource seal — run `xattr -dr com.apple.quarantine /Applications/MarkLock.app`. Windows binaries are unsigned too: click **More info → Run anyway** on SmartScreen.
-
-## Core concepts
-
-| Concept | Description |
-|---|---|
-| Vault `.mdlb` | **MarkLock Bundle** — a single-file container holding an encrypted file tree. Filenames, directory structure, and contents are all ciphertext. One opaque blob you can drop into iCloud, Dropbox, or an external drive. |
-| File `.mdl` | **MarkDown Lock** — a single encrypted Markdown file, usable standalone (e.g. `investment-notes.mdl` on your Desktop). |
-| Master password | Lives only in your head. Derived into a KEK via Argon2id. Never written to disk, never transmitted. |
-| DEK | Random per-vault data key, wrapped by the KEK and stored in the file header. Changing your master password only re-wraps the DEK — no re-encryption of contents. |
-
-## Features
-
-- **Vaults as single files** — arbitrary nested folders inside; unlock once and every file in the vault reuses the session, no repeated password prompts
-- **Editor** — CodeMirror 6 with Markdown syntax highlighting, edit / split / preview modes, formatting toolbar, autosave (800 ms debounce, encrypted on write)
-- **Workspace** — multiple vaults and single files open at once; VSCode-style sidebar (open files, open vaults, starred, recent, working directory); tabs or list switching
-- **Privacy on lock** — once a vault locks, its open tabs, starred entries, and recent items show as `vault file` instead of leaking real filenames; contents and names restore on unlock
-- **External-change watching** — reloads when another program rewrites an open file (2 s polling plus on-focus checks); unsaved edits get an amber badge instead of being clobbered
-- **Full-text search** — decryption happens in memory only
-- **Security** — idle auto-lock (5 min default), lock on sleep/screen lock, key material zeroized on lock, clipboard cleared after 60 s
-- **Extras** — outline, starring, keyboard shortcuts, context menus, HTML export, plaintext export (double-confirmed as a destructive action)
-
-## Cryptography
-
-```
-master password + salt ──Argon2id──▶ KEK (32 B, zeroized on drop)
-                                        │  AES-256-GCM
-                                        ▼
-                                wrapped_dek ──▶ DEK (32 B, random)
-                                        │  AES-256-GCM
-                                        ▼
-                                  Markdown source (ciphertext)
-```
-
-- **AEAD**: AES-256-GCM — authenticated, tamper-evident
-- **KDF**: Argon2id (m = 64 MiB, t = 3, p = 4) — GPU/ASIC resistant
-- **Memory hygiene**: `zeroize` wipes key material on drop
-- **On-disk layout** (both `.mdl` and `.mdlb`): `[4-byte header length][header JSON][nonce][ciphertext]`, distinguished by the `format` field (`mlk/1` vs `mlk-vault/1`)
-- **Path traversal guarded**: in-vault paths reject absolute paths and `..`
-- Unlock is under 300 ms for personal-note-scale vaults
-
-All crypto runs in Rust. The frontend only ever sees plaintext views and ciphertext bytes — never key material.
-
-## Tech stack
-
-| Layer | Choice | Why |
-|---|---|---|
-| Shell | Tauri 2 | Far smaller than Electron, system WebView, native Rust crypto |
-| Frontend | Vue 3 + Vite + TypeScript | Options API components, mature ecosystem |
-| UI kit | Ant Design Vue | Good fit for a desktop tool |
-| Editor | CodeMirror 6 | Markdown highlighting, source mode, search / folding / completion |
-| Crypto | `aes-gcm`, `argon2`, `zeroize` | Everything key-related stays in Rust |
-
-> 📐 Full architecture design and evolution timeline: **[doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)** (Chinese).
 
 ## Interface
 
@@ -94,49 +50,88 @@ All crypto runs in Rust. The frontend only ever sees plaintext views and ciphert
 
 ![settings](doc/screenshots/settings.png)
 
-## Development
+**Sticky Notes** (left: the note window in preview mode with its app launcher; right: Settings → Sticky Notes)
 
-### Prerequisites
+![sticky](doc/screenshots/sticky.png)
 
-| | macOS | Windows |
-|---|---|---|
-| Rust | rustup (stable) | rustup-init.exe (stable, MSVC) |
-| Toolchain | Xcode Command Line Tools | Visual Studio Build Tools, "Desktop development with C++" workload |
-| Node | 18+ | 18+ |
-| WebView | System WKWebView | WebView2 Runtime (preinstalled on Win 11 / recent Win 10) |
+## Core concepts
 
-On Windows you need both Rust *and* Build Tools — rustup provides the compiler, `link.exe` comes from Build Tools.
+| Concept | Description |
+|---|---|
+| Vault `.mdlb` | **MarkLock Bundle** — a single-file container holding an encrypted file tree. Filenames, directory structure, and contents are all ciphertext. One opaque blob you can sync anywhere. |
+| File `.mdl` | **MarkDown Lock** — a single encrypted Markdown file, usable standalone (e.g. `investment-notes.mdl` on your Desktop). |
+| Master password | Lives only in your head. Derived into a KEK via Argon2id. Never written to disk, never transmitted. |
+| DEK | Random data key, wrapped by the KEK and stored in the file header. Changing your master password only re-wraps the DEK — contents are never re-encrypted. |
 
-### Run
+## Features
+
+### Encryption & vaults
+
+- Create and open vaults, with password hints, a recent list, and failed-attempt throttling
+- Arbitrarily nested folders inside a vault — create, rename, move, delete; unlock once and every file in it reuses the session
+- Standalone `.mdl` files keep their own password, for the "just this one" case
+- Plain `.md` opens and edits like normal, with right-click **Convert to encrypted file** (optionally deleting the plaintext); whole directories can be batch-encrypted
+- Change master password, switch the cipher scheme (full re-encryption), export to plaintext (double-confirmed as destructive)
+
+### Editing & browsing
+
+- CodeMirror 6 source editing with Markdown highlighting, edit / split / preview modes, formatting toolbar
+- Autosave with 800ms debounce, encrypted on write; can be turned off
+- Full-text search (decryption happens in memory only), outline navigation, starring, HTML export
+- VSCode-style sidebar — open files, open vaults, starred, recent, working directory; groups are reorderable and individually toggleable; switch documents by tabs or by list
+- Browse the local filesystem tree in the working-directory view, with vaults shown as atomic nodes
+- External-change watching reloads a file when another program rewrites it; if you have unsaved edits it only raises an amber badge instead of clobbering your work
+
+### Sticky Notes
+
+- Pin any `.md` / `.mdl` file as a sticky note, summoned by clicking the tray (menu-bar) icon
+- Or use a **hot corner**: hold the pointer in a chosen screen corner for a moment; optionally require a modifier key so brushing past the corner never triggers it
+- Edit / split / preview in one small window, saved straight to ciphertext; if the vault is locked you can type the password right in the note
+- A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label)
+
+### Security & polish
+
+- Idle auto-lock (5 min default), lock on minimize / sleep / screen lock, key material zeroized on lock, clipboard cleared after 60s
+- Light and dark themes, English / Chinese UI, adjustable editor font size plus preview font and spacing
+- Full keyboard shortcut set: save, tab navigation (`⌘1…8` jumps to the Nth tab), in-editor find & replace, global search, view-mode switching, formatting, lock-everything
+- One click to make MarkLock the default handler for `.md` / `.mdl` / `.mdlb`
+- Optional launch-at-login (can start silently in the background), close-to-tray
+- Restore the previous session on start; silent update checks with a one-click link to the release page
+
+## Technical docs
+
+Curious why filenames themselves are invisible in the ciphertext, why a password change skips re-encryption, or want to run and modify the code? Start here:
+
+- **[doc/TECHNICAL.en.md](doc/TECHNICAL.en.md)** — on-disk format and key hierarchy, Rust crypto modules, the Tauri command surface, how Sticky Notes and hot corners work, dev setup, packaging, and Windows / ARM64 build errors
+- **[doc/ARCHITECTURE.en.md](doc/ARCHITECTURE.en.md)** — architecture design and the feature evolution timeline
+- **[doc/ui-prototype/](doc/ui-prototype/)** — static high-fidelity prototypes, no dependencies, open `index.html` in a browser
+
+The Chinese originals ([doc/TECHNICAL.md](doc/TECHNICAL.md), [doc/ARCHITECTURE.md](doc/ARCHITECTURE.md)) are maintained in parallel; they are the authoritative versions if the two ever disagree.
+
+In one line: **Tauri 2 shell + Vue 3 (Options API) + Ant Design Vue + CodeMirror 6, with the crypto core in Rust (`aes-gcm`, `argon2`, `zeroize`)**. Tauri over Electron buys a tiny installer, the system WebView, and real Rust for the encryption.
+
+## Quick start
 
 ```bash
-npm ci             # install per package-lock.json (preferred, reproducible)
-npm install        # or a regular install; commit the lock file when deps change
-npm run dev        # Vite dev server only (http://localhost:1420)
-npm run build      # build frontend into dist/
-npm run dev:tauri  # frontend + Tauri shell together
-npm run dev:app    # build & launch a debug "MarkLock Dev.app" with live Vite HMR (frontend edits: no rebuild; Rust edits: ~5s rerun)
+npm ci              # install frontend dependencies
+npm run dev:tauri   # frontend + Tauri shell together (needs Rust)
+npm run dev:app     # macOS: build a debug app and launch it — tray / sticky notes work
+cd src-tauri && cargo test --lib   # crypto core unit tests
 ```
 
-On macOS 27+ the system refuses to place menu-bar status items owned by unbundled binaries, so the tray icon never appears under `dev:tauri` (the tray logic still runs normally) — a system limitation, not a bug. Use `npm run dev:app` to test tray / menu-bar features. It runs under a separate identity `com.marklock.dev` (see `src-tauri/tauri.dev.conf.json`) so it can coexist with an installed build without interference; this identity is dev-only and does not affect official releases. The Vite server started by `dev:app` stays in the background; `dev:tauri` automatically reuses it (see `scripts/dev-vite.mjs`), so switching between the two never clashes on port 1420.
+Prerequisites (macOS needs Xcode Command Line Tools; Windows needs both Rust and the "Desktop development with C++" workload from VS Build Tools) and per-error troubleshooting are in [doc/TECHNICAL.en.md](doc/TECHNICAL.en.md#development-and-debugging).
 
-The first compile builds roughly 400 crates — a few minutes on macOS, longer on Windows. Incremental builds after that are seconds.
+## Roadmap
 
-On Windows, every new terminal must have the MSVC environment injected before compiling; the easiest fix is to always use "Developer Command Prompt for VS".
+1.0 already covers both encrypted forms (vault and single file), the CodeMirror editor, full-text search, starring, outline, external-change watching, Sticky Notes, and packaged distribution.
 
-### Test
-
-```bash
-cd src-tauri
-cargo test --lib   # key round-trips, wrong password, tamper detection,
-                   # rewrap on password change, full vault lifecycles,
-                   # path traversal defense, plaintext directory search
-```
+Requests and feedback belong in [Issues](https://github.com/WitsonX/MarkLock/issues).
 
 ## Contributing
 
 Issues and PRs are welcome. For larger changes, please open an issue first to align on direction.
 
+- Dev environment and run commands: [doc/TECHNICAL.en.md](doc/TECHNICAL.en.md#development-and-debugging)
 - Frontend components use the **Options API** exclusively (no `<script setup>`, no Composition API)
 - Run `cargo test --lib` in `src-tauri/` before submitting to confirm no crypto regressions
 
