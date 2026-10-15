@@ -108,17 +108,20 @@ export default defineComponent({
     }).catch(() => {})
     window.addEventListener('keydown', this.onKey)
     window.addEventListener('blur', this.onBlur)
-    // 初始焦点态：弹出时若已获焦则 focused=true（onEngage 己绑定 focus 事件补后续切换）。
+    // 初始焦点态：弹出时若已获焦则 focused=true（onFocus 己绑定 focus 事件补后续切换）。
     this.focused = document.hasFocus()
-    // 用户点进/聚焦便签即视为「要用它」：解除后端「移开即隐藏」，此后交回 blur/Esc 收起。
+    // 用户点进便签（pointerdown）才视为「要用它」：解除后端「移开即隐藏」，此后交回 blur/Esc 收起。
+    // focus 事件仅更新 UI 焦点态，不调用 stickyEngage：热角路径 win.show() 不夺焦，
+    // 但 Windows 上系统可能自动激活窗口触发 focus，此时用户并未真正交互，
+    // 若解除 AUTOHIDE 会导致「移开即隐藏」失效（便签无法自动收起）。
     window.addEventListener('pointerdown', this.onEngage)
-    window.addEventListener('focus', this.onEngage)
+    window.addEventListener('focus', this.onFocus)
   },
   beforeUnmount() {
     window.removeEventListener('keydown', this.onKey)
     window.removeEventListener('blur', this.onBlur)
     window.removeEventListener('pointerdown', this.onEngage)
-    window.removeEventListener('focus', this.onEngage)
+    window.removeEventListener('focus', this.onFocus)
   },
   methods: {
     async load() {
@@ -285,6 +288,13 @@ export default defineComponent({
         this.picking = false
       }
     },
+    /** 窗口获得焦点：仅更新 UI 焦点态（模式切换段显隐），不解除后端 AUTOHIDE。
+     *  热角路径不夺焦，但 Windows 上 win.show() 可能自动激活窗口触发 focus，
+     *  此时用户并未真正交互，不应解除「移开即隐藏」。 */
+    onFocus() {
+      this.focused = true
+    },
+    /** 用户真正点进便签（pointerdown）：更新 UI + 解除 AUTOHIDE，此后由 blur/Esc/关闭按钮收起。 */
     onEngage() {
       this.focused = true
       tauri.stickyEngage().catch(() => {})
