@@ -172,6 +172,17 @@ export function setBackupEnabled(enabled: boolean) {
   return invoke<void>('set_backup_enabled', { enabled })
 }
 
+/** 用最近一份 `.mlk-bak` 备份恢复指定文件（当前版本先滚动为新备份，可再次撤销）；
+ *  `path` 为磁盘文件绝对路径，返回恢复后的字节数。无备份时后端返回可读错误。 */
+export function restoreBackup(path: string) {
+  return invoke<number>('restore_backup', { path })
+}
+
+/** 查询目标是否存在可恢复的最近一份 `.mlk-bak` 备份（供弹确认框前预检，避免空确认）。 */
+export function hasBackup(path: string) {
+  return invoke<boolean>('has_backup', { path })
+}
+
 /** 运行时开关系统托盘图标：关闭时移除托盘，开启时（若不存在）重建。 */
 export function setTrayEnabled(enabled: boolean) {
   return invoke<void>('set_tray_enabled', { enabled })

@@ -157,6 +157,12 @@ export default defineComponent({
       // 外部修改监控：「重新加载磁盘版本」的丢弃确认弹窗（监控器为模块级单例，见 lib/filewatch）
       showReloadConfirm: false,
       reloadTarget: '',
+      // 恢复上一版备份：确认弹窗（含「只在两版间来回切换」的提醒）
+      showRestoreConfirm: false,
+      restoreTarget: '',
+      // 恢复整个 .mdlb 库到上一版（整库回滚）：确认弹窗 + 待恢复库 id
+      showVaultRestoreConfirm: false,
+      vaultRestoreId: '',
       // 拖放高亮（拖入时提示可打开）
       dragOver: false,
       // 拖入资源（图片/文件）询问弹窗：待处理的一组非文档文件路径 + 忙态
@@ -2006,7 +2012,10 @@ export default defineComponent({
             run: () => this.reloadTab(p),
           },
           ...(isMdl && f && !f.isNew
-            ? [{ kind: 'item' as const, label: this.$t('menu.changePwd'), run: () => this.openChangePwd({ id: p, path: p }) }]
+            ? [
+                { kind: 'item' as const, label: this.$t('menu.changePwd'), run: () => this.openChangePwd({ id: p, path: p }) },
+                { kind: 'item' as const, label: this.$t('menu.restoreBackup'), run: () => this.askRestoreBackup(p) },
+              ]
             : []),
           { kind: 'sep' },
           ...(f && !f.isNew && !f.encrypted && !f.locked
@@ -2071,6 +2080,10 @@ export default defineComponent({
           { kind: 'item', label: this.store.isFavorite(id) ? this.$t('menu.unfav') : this.$t('menu.fav'), run: () => this.store.toggleFavorite(id) },
           { kind: 'item', label: isMdl ? this.$t('menu.changePwd') : this.$t('menu.changeMasterPwd'), run: () => this.openChangePwd({ id, path: v?.path || id, name: v?.name, isFileVault: v?.isFileVault }) },
           { kind: 'item', label: revealLabel(), run: () => this.revealTab(v?.path || id) },
+          // .mdlb 单文件库：整个库就是一个容器文件，恢复=整库回滚到上一版
+          ...(v?.isFileVault
+            ? [{ kind: 'item' as const, label: this.$t('menu.restoreVault'), run: () => this.askVaultRestore(id) }]
+            : []),
           { kind: 'sep' },
           // 锁定态：提供「解锁并打开」（跳解锁页）；已解锁：提供「锁定该库」
           ...(v?.unlocked
@@ -3691,6 +3704,98 @@ export default defineComponent({
       try {
         const f = await this.store.reloadFromDisk(path)
         message.success(this.$t('toast.reloaded', { name: this.fileDisplayName(f) }))
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+
+    /** 恢复独立 .mdl 的上一版备份：先预检有无备份，再弹确认框（提醒只在两版间来回切换），确认后执行。 */
+    async askRestoreBackup(path: string) {
+      const f = this.openFiles.find((x) => x.path === path)
+      if (!f || f.isNew) return
+      try {
+        if (!(await tauri.hasBackup(path))) {
+          message.info(this.$t('toast.noBackup'))
+          return
+        }
+      } catch (e) {
+        message.error(String(e))
+        return
+      }
+      this.restoreTarget = path
+      this.showRestoreConfirm = true
+    },
+    /** 实际执行恢复：直接把备份写回磁盘覆盖当前文件。
+     *  采用「直接恢复」，但绝不静默丢弃内存里的未保存修改：脏页签只改磁盘、保留编辑内容；
+     *  锁定态无明文可灌回，仅提示、留给重新解锁后查看。 */
+    async doRestoreBackup() {
+      const path = this.restoreTarget
+      this.showRestoreConfirm = false
+      this.restoreTarget = ''
+      const f = this.openFiles.find((x) => x.path === path)
+      if (!f || f.isNew) return
+      try {
+        await tauri.restoreBackup(path)
+        // 磁盘已被改写：刷新监控基线，避免轮询把这次恢复当成外部修改二次提示
+        externalChanges.sync([this.watchTargetOf(f)])
+        // 已解锁且无未保存修改 → 回灌磁盘明文刷新页签；否则保留内存编辑 / 留给重新解锁
+        if (!f.locked && !f.dirty) {
+          await this.store.reloadFromDisk(path)
+        }
+        message.success(this.$t('toast.restored', { name: this.fileDisplayName(f) }))
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+
+    /** 恢复整个 .mdlb 库到上一版：先预检有无备份，再弹确认框（明确告知整库回滚），确认后执行。 */
+    async askVaultRestore(id: string) {
+      const v = this.store.recent.find((x) => x.id === id)
+      if (!v || !v.isFileVault) return
+      const container = v.path || id
+      try {
+        if (!(await tauri.hasBackup(container))) {
+          message.info(this.$t('toast.noBackup'))
+          return
+        }
+      } catch (e) {
+        message.error(String(e))
+        return
+      }
+      this.vaultRestoreId = id
+      this.showVaultRestoreConfirm = true
+    },
+    /** 实际执行整库回滚：把 `.mdlb` 容器整体恢复到上一版备份。
+     *  会话只缓存 DEK、每读必从磁盘现取，故恢复后直接重列库树 + 重载已打开且未改的页签；
+     *  锁定态无明文可回灌，仅提示重新解锁查看。 */
+    async doVaultRestore() {
+      const id = this.vaultRestoreId
+      this.showVaultRestoreConfirm = false
+      this.vaultRestoreId = ''
+      const v = this.store.recent.find((x) => x.id === id)
+      if (!v || !v.isFileVault) return
+      const container = v.path || id
+      try {
+        await tauri.restoreBackup(container)
+        // 容器 mtime 变了：刷新监控基线（该库所有页签都监视容器路径），避免被当成外部修改
+        externalChanges.sync([container])
+        const name = v.name || container
+        if (v.unlocked) {
+          await this.refreshVaultTree(id, container)
+          for (const f of this.openFiles.filter((x) => x.vaultId === id)) {
+            if (f.dirty) continue // 有未保存修改：保留内存内容，不静默覆盖
+            try {
+              await this.store.reloadFromDisk(f.path)
+            } catch {
+              // 回滚后该文件可能已不存在（备份之后新增的）：标缺失、保留页签
+              f.external = 'missing'
+            }
+          }
+          message.success(this.$t('toast.vaultRestored', { name }))
+        } else {
+          // 锁定态：容器已恢复，但无明文可回灌，提示重新解锁查看
+          message.success(this.$t('toast.vaultRestoredRelock', { name }))
+        }
       } catch (e) {
         message.error(String(e))
       }
@@ -6412,6 +6517,31 @@ ${bodyHtml}
       <div class="modal-foot">
         <button class="btn" @click="showReloadConfirm = false">{{ $t('common.cancel') }}</button>
         <button class="btn btn-danger" @click="doReloadTab(reloadTarget)">{{ $t('editor.discardReload') }}</button>
+      </div>
+    </a-modal>
+
+    <!-- 恢复上一版：确认弹窗（含「只在两版间来回切换」的提醒） -->
+    <a-modal v-model:open="showRestoreConfirm" :title="$t('editor.restoreTitle')" :width="460" :footer="null">
+      <div class="saveas">
+        <div class="saveas-hint">{{ $t('editor.restoreMsg') }}</div>
+        <div class="saveas-hint" style="margin-top: 8px; color: #d48806;">{{ $t('editor.restoreToggleHint') }}</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="showRestoreConfirm = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" @click="doRestoreBackup">{{ $t('editor.restoreConfirm') }}</button>
+      </div>
+    </a-modal>
+
+    <!-- 恢复整个 .mdlb 库到上一版：整库回滚确认（破坏性更大，措辞需明确） -->
+    <a-modal v-model:open="showVaultRestoreConfirm" :title="$t('editor.vaultRestoreTitle')" :width="480" :footer="null">
+      <div class="saveas">
+        <div class="saveas-hint">{{ $t('editor.vaultRestoreMsg') }}</div>
+        <div class="saveas-hint" style="margin-top: 8px; color: #d48806;">{{ $t('editor.vaultRestoreWarn') }}</div>
+        <div class="saveas-hint" style="margin-top: 8px; color: #d48806;">{{ $t('editor.restoreToggleHint') }}</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="showVaultRestoreConfirm = false">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-danger" @click="doVaultRestore">{{ $t('editor.vaultRestoreConfirm') }}</button>
       </div>
     </a-modal>
 

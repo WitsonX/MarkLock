@@ -101,19 +101,31 @@ wrapped_dek ──▶ DEK（32B）
 src/
 ├── main.ts                  # 入口：挂 Vue + AntD + Pinia + v-tip 指令；平台检测写 data-platform
 ├── App.vue                  # 主题解析（light/dark/system + matchMedia 跟随系统）
-├── router/index.ts          # hash 四屏路由
+├── router/index.ts          # hash 五屏路由（便签窗加载同一前端，路由到 /sticky）
 ├── styles/global.css        # 全局样式（CSS 变量，含深色主题变量）
 ├── components/
 │   ├── TitleBar.vue         # 标题栏（macOS 红绿灯叠加 + 标题）
-│   └── VaultTreeNode.vue    # 库树递归节点（文件夹展开/折叠 + 悬停新建/重命名/删除）
+│   ├── VaultTreeNode.vue    # 库树递归节点（文件夹展开/折叠 + 悬停新建/重命名/删除）
+│   ├── WorkdirNode.vue      # 工作目录树递归节点
+│   ├── CodeMirrorEditor.vue # CodeMirror 6 编辑器封装（markdown 语言 + 语法高亮）
+│   ├── MarkdownPreview.vue  # marked 渲染的预览面板
+│   ├── EncIcon.vue          # 加密标识图标
+│   └── AboutCard.vue        # 关于卡片（版本/检查更新）
 ├── stores/vault.ts          # Pinia store（会话/打开文件/最近/收藏/设置）
 ├── lib/
 │   ├── tauri.ts             # Rust 命令 invoke 桥 + 文件对话框封装
 │   ├── filewatch.ts         # 外部修改监控（文件戳记轮询器）
-│   └── tooltip.ts           # 全局 v-tip 指令（单例气泡，不受滚动裁剪）
+│   ├── tooltip.ts           # 全局 v-tip 指令（单例气泡，不受滚动裁剪）
+│   ├── preview.ts           # marked 共享渲染层（代码高亮/复制/任务清单/图片 asset）
+│   ├── fonts.ts             # 预览字体内置清单（跨平台回退栈）
+│   ├── locales/             # 中英文语言包 + 语言切换
+│   ├── sticky.ts            # 便签窗判定 + 按文件类型读写便签正文
+│   ├── splash.ts            # 启动屏淡出控制
+│   └── update.ts            # 轻量检查更新（GitHub/Gitee 双源 + 频率门控）
 └── views/
     ├── UnlockView.vue       # 解锁（极简：目标库 + 密码 + 解锁/取消）
     ├── EditorView.vue       # 主编辑界面（核心）
+    ├── StickyView.vue       # 便携便签独立置顶小窗
     ├── SettingsView.vue     # 设置
     └── DialogsView.vue      # 弹窗集合（新建库/改密码/新建加密文件）
 ```
@@ -124,7 +136,7 @@ src/
 
 - 侧边栏五分组（可拖拽排序、可各自显隐）：**打开的文件 → 打开的库 → 收藏 → 最近打开 → 工作目录**
 - 顶部页签栏（可拖拽排序，独立开关）
-- 编辑模式：编辑 / 分屏 / 预览（手写轻量 markdown 渲染器）
+- 编辑模式：编辑 / 分屏 / 预览（marked 渲染，任务清单复选框可交互）
 - 「更多」菜单：新建文件 / 新建加密库 / 复制到加密库 / 偏好设置 / 侧边栏显隐开关
 
 ### 4.3 状态管理（Pinia + localStorage）
@@ -181,7 +193,8 @@ src/
 | `inspect_path` | 探测路径类型（目录/库/库内文件/明文） |
 | `unlocked_count` / `reap_expired` | 状态查询 / 回收过期会话 |
 | `search(query, workdirs?)` | 全局搜索（库 + 工作目录明文） |
-| `file_stamps(paths)` | 批量查文件 mtime + 大小（外部修改监控） |
+| `file_stamps(paths)` | 批量查文件 mtime + 大小（外部修改监控）|
+| `set_backup_enabled(enabled)` | 同步「保存时保留上一版备份」开关到 Rust 侧 |
 
 ### 5.4 外部修改监控
 
@@ -284,15 +297,22 @@ src/
 
 ---
 
-## 八、待办（当前状态）
+## 八、演进现状与待办
 
-- **M4 编辑器**：CodeMirror 接入（替换当前 textarea）、语法高亮、自动保存防抖链路
-- **M5 打磨**：历史快照、快捷键体系、打包分发
-- 已知技术债：
-  - `vue-tsc --noEmit` 有历史遗留类型错误（`unlockedVaults` getter、DragDropEvent 等，不影响 vite build）
-  - AntD 全量引入导致 chunk 偏大（>500KB），可做按需引入/manualChunks 优化
-  - 单文件 `.mdl` 会话 `dek=None`，Rust 侧 `search_vaults` 用 `dek.is_some()` 判库类型会误判（已解锁 `.mdl` 目前靠前端页签命中兜底，Rust 侧未修）
-  - macOS Overlay 模式窗口未聚焦时无法拖动（Tauri issue #4316）
+### 已完成（原 M4/M5 规划项）
+
+- **M4 编辑器**：CodeMirror 6 接入（替换 textarea，markdown 语言 + 语法高亮 + 主题）；自动保存定时器链路（`autoSaveSecs` 可配）
+- **M5 打磨**：快捷键体系（页签切换/撤销关闭等，设置页专设快捷键分区）；打包分发（GitHub Actions：`release.yml` + `release-win-offline.yml` 双工作流）；原子写盘 + 滚动备份（`.bak` 系列，「保存时保留上一版备份」开关），提供「恢复上一版」的数据基础
+
+### 剩余待办
+
+- 备份文件的**前端恢复入口**（当前仅 Rust 侧滚动备份落盘，暂无「一键恢复上一版」UI）
+
+### 已知技术债
+
+- AntD 全量引入导致 chunk 偏大（>500KB），可做按需引入/manualChunks 优化
+- 单文件 `.mdl` 会话 `dek=None`，Rust 侧 `search_vaults` 用 `dek.is_some()` 判库类型会误判（已解锁 `.mdl` 目前靠前端页签命中兜底，Rust 侧未修）
+- macOS Overlay 模式窗口未聚焦时无法拖动（Tauri issue #4316）
 
 ---
 

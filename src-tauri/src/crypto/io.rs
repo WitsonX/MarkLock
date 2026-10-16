@@ -166,6 +166,24 @@ fn sync_dir(dir: &Path) {
     }
 }
 
+/// 用最近一份备份 `.mlk-bak` 恢复目标；恢复前经原子写盘把当前版本滚动为新备份，故可再次撤销。
+/// 返回恢复后文件的字节数。
+pub fn restore_latest_backup(path: &Path) -> Result<usize> {
+    let bak = backup_path(path, 0);
+    if !bak.exists() {
+        return Err(CryptoError::Io("没有可恢复的上一版备份".into()));
+    }
+    let data = fs::read(&bak).map_err(|e| CryptoError::Io(format!("读取备份失败: {e}")))?;
+    // 当前目标 → 新 .bak，旧 .bak → .bak.1，备份内容 → 目标（仅当备份开关开启时才滚动）。
+    atomic_write(path, &data)?;
+    Ok(data.len())
+}
+
+/// 是否存在可恢复的最近一份备份（`.mlk-bak`）。供前端在弹确认框前做廉价预检。
+pub fn latest_backup_exists(path: &Path) -> bool {
+    backup_path(path, 0).exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +234,27 @@ mod tests {
             .count();
         assert_eq!(leftovers, 0);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_latest_backup_rolls_current() {
+        let dir = unique_tmp_dir("restore");
+        let path = dir.join("note.mdl");
+
+        atomic_write(&path, b"v1").unwrap();
+        atomic_write(&path, b"v2").unwrap(); // .bak = v1, target = v2
+        assert!(restore_latest_backup(&path).is_ok());
+        // 目标回到上一版 v1，恢复前的 v2 被滚动为新备份（可再次撤销）。
+        assert_eq!(fs::read(&path).unwrap(), b"v1");
+        assert_eq!(fs::read(backup_path(&path, 0)).unwrap(), b"v2");
+
+        // 无任何备份时恢复应报错（先删掉旁路备份）。
+        let dir2 = unique_tmp_dir("restore_none");
+        let fresh = dir2.join("x.mdl");
+        atomic_write(&fresh, b"only").unwrap(); // 新建不产生备份
+        assert!(restore_latest_backup(&fresh).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir2);
     }
 }

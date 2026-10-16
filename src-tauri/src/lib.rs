@@ -836,6 +836,19 @@ fn set_backup_enabled(enabled: bool) {
     crypto::io::set_backups_enabled(enabled);
 }
 
+/// 用最近一份 `.mlk-bak` 备份恢复指定文件（当前版本先滚动为新备份，故可再次撤销）。
+/// 返回恢复后文件的字节数。无备份时返回可读错误。
+#[tauri::command]
+async fn restore_backup(path: String) -> Result<u64, crypto::CryptoError> {
+    spawn_crypto(move || crypto::io::restore_latest_backup(Path::new(&path)).map(|n| n as u64)).await
+}
+
+/// 查询目标是否存在可恢复的最近一份 `.mlk-bak` 备份（廉价同步检查，供前端弹框前预检）。
+#[tauri::command]
+fn has_backup(path: String) -> bool {
+    crypto::io::latest_backup_exists(Path::new(&path))
+}
+
 /// 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端，并即时应用到现有托盘。
 #[tauri::command]
 fn set_tray_sticky_button(app: tauri::AppHandle, button: String) {
@@ -2203,6 +2216,8 @@ pub fn run() {
             quit_app,
             set_close_to_tray,
             set_backup_enabled,
+            restore_backup,
+            has_backup,
             set_tray_enabled,
             set_tray_sticky_button,
             set_auto_start,

@@ -101,19 +101,31 @@ Single-file vault (.mdlb)                    Single file (.mdl)
 src/
 ├── main.ts                  # Entry: mounts Vue + AntD + Pinia + the v-tip directive; writes data-platform for platform detection
 ├── App.vue                  # Theme resolution (light/dark/system + matchMedia follows the system)
-├── router/index.ts          # Hash-based four-screen routing
+├── router/index.ts          # Hash-based five-screen routing (the sticky window loads the same frontend, routed to /sticky)
 ├── styles/global.css        # Global styles (CSS variables, incl. dark-theme variables)
 ├── components/
 │   ├── TitleBar.vue         # Title bar (macOS traffic-light overlay + title)
-│   └── VaultTreeNode.vue    # Recursive vault-tree node (folder expand/collapse + hover create/rename/delete)
+│   ├── VaultTreeNode.vue    # Recursive vault-tree node (folder expand/collapse + hover create/rename/delete)
+│   ├── WorkdirNode.vue      # Recursive working-directory tree node
+│   ├── CodeMirrorEditor.vue # CodeMirror 6 editor wrapper (markdown language + syntax highlighting)
+│   ├── MarkdownPreview.vue  # Preview pane rendered by marked
+│   ├── EncIcon.vue          # Encryption badge icon
+│   └── AboutCard.vue        # About card (version / update check)
 ├── stores/vault.ts          # Pinia store (sessions / open files / recent / starred / settings)
 ├── lib/
 │   ├── tauri.ts             # invoke bridge for Rust commands + file dialog wrappers
 │   ├── filewatch.ts         # External-modification watcher (file-stamp poller)
-│   └── tooltip.ts           # Global v-tip directive (singleton bubble, never clipped by scrolling)
+│   ├── tooltip.ts           # Global v-tip directive (singleton bubble, never clipped by scrolling)
+│   ├── preview.ts           # Shared marked render layer (code highlight/copy/task lists/image assets)
+│   ├── fonts.ts             # Built-in preview font catalog (cross-platform fallback stacks)
+│   ├── locales/             # zh/en language packs + switching
+│   ├── sticky.ts            # Sticky-window detection + note body read/write by file type
+│   ├── splash.ts            # Splash screen fade-out control
+│   └── update.ts            # Lightweight update check (GitHub/Gitee dual source + rate gating)
 └── views/
     ├── UnlockView.vue       # Unlock (minimal: target vault + password + unlock/cancel)
     ├── EditorView.vue       # Main editing UI (the core)
+    ├── StickyView.vue       # Portable sticky note (independent always-on-top window)
     ├── SettingsView.vue     # Settings
     └── DialogsView.vue      # Dialog collection (new vault / change password / new encrypted file)
 ```
@@ -124,7 +136,7 @@ src/
 
 - Five sidebar groups (drag-reorderable, each individually toggleable): **Open Files → Open Vaults → Starred → Recent → Working Directory**
 - Top tab bar (drag-reorderable, independent toggle)
-- Editing modes: edit / split / preview (a hand-written lightweight Markdown renderer)
+- Editing modes: edit / split / preview (rendered by marked; task-list checkboxes are interactive)
 - "More" menu: new file / new encrypted vault / copy to vault / preferences / sidebar visibility toggles
 
 ### 4.3 State management (Pinia + localStorage)
@@ -182,6 +194,7 @@ Keys and plaintext never enter the store.
 | `unlocked_count` / `reap_expired` | Status query / reclaim expired sessions |
 | `search(query, workdirs?)` | Global search (vaults + plaintext files in the working directory) |
 | `file_stamps(paths)` | Batch-query file mtime + size (external-change monitoring) |
+| `set_backup_enabled(enabled)` | Sync the "keep previous version on save" toggle to the Rust side |
 
 ### 5.4 External-change monitoring
 
@@ -284,15 +297,22 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 
 ---
 
-## 8. To-do (current state)
+## 8. Progress & To-do (current state)
 
-- **M4 Editor**: CodeMirror integration (replacing the current textarea), syntax highlighting, autosave debounce pipeline
-- **M5 Polish**: history snapshots, keyboard shortcut system, packaged distribution
-- Known tech debt:
-  - `vue-tsc --noEmit` carries legacy type errors (`unlockedVaults` getter, DragDropEvent, etc. — doesn't affect vite build)
-  - The full AntD import produces oversized chunks (>500KB) — on-demand imports / manualChunks optimization possible
-  - The single-file `.mdl` session has `dek=None`, so Rust's `search_vaults` misclassifies the vault type when it tests `dek.is_some()` (unlocked `.mdl` currently relies on the frontend tab-hit fallback; unfixed on the Rust side)
-  - macOS Overlay windows can't be dragged while unfocused (Tauri issue #4316)
+### Done (former M4/M5 plan items)
+
+- **M4 Editor**: CodeMirror 6 integrated (replacing the textarea — markdown language, syntax highlighting, theme); autosave timer pipeline (`autoSaveSecs` configurable)
+- **M5 Polish**: keyboard shortcut system (tab switching / reopen closed tab, etc., with a dedicated shortcuts section in Settings); packaged distribution (GitHub Actions: `release.yml` + `release-win-offline.yml` workflows); atomic writes + rolling backups (`.bak` series, "keep previous version on save" toggle) — the data foundation for "restore previous version"
+
+### Remaining to-do
+
+- A **frontend restore entry** for backup files (currently the Rust side only rolls `.bak` files to disk; there is no one-click "restore previous version" UI yet)
+
+### Known tech debt
+
+- The full AntD import produces oversized chunks (>500KB) — on-demand imports / manualChunks optimization possible
+- The single-file `.mdl` session has `dek=None`, so Rust's `search_vaults` misclassifies the vault type when it tests `dek.is_some()` (unlocked `.mdl` currently relies on the frontend tab-hit fallback; unfixed on the Rust side)
+- macOS Overlay windows can't be dragged while unfocused (Tauri issue #4316)
 
 ---
 
