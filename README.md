@@ -29,6 +29,7 @@
 
 - 默认 Windows 包只有 3.5MB（WebView2 运行时安装时联网下载）；机器没有 WebView2 又连不上微软 CDN 时，改用 `*-setup-offline.exe`（约 209MB，全程免网）。Win11 和更新过的 Win10 一般自带运行时，用默认包就够。
 - 离线包只在 GitHub 提供（Gitee 附件单文件限 100MB）；Gitee 侧可先装官方 [WebView2 运行时](https://go.microsoft.com/fwlink/?linkid=2124701) 再装小包。
+- **绿色版**：想直接用最领先的构建，去 [canary 发行页](https://github.com/WitsonX/MarkLock/releases/tag/canary) 拿免安装包（macOS 解压即用的 `.app`，Windows 解压直接跑的 `.exe`）。每次推 master 自动重出，包名固定不用挑版本，「关于」里会标出 `Canary <commit>`；只在 GitHub 提供，且跟的是未发布主线，求稳仍建议用正式版。
 
 > 安装包未走 Apple 公证，首次打开提示「Apple 无法验证」属固定流程，放行只需一次：弹窗点「完成」→「系统设置 → 隐私与安全性 → 安全性」里点**「仍要打开」**→ 输密码，之后同一位置不再询问（部分版本右键 → 打开 也可）。若提示「已损坏」，是旧构建未做资源密封，执行 `xattr -dr com.apple.quarantine /Applications/MarkLock.app` 即可。Windows 同样未签名，SmartScreen 里点「更多信息 → 仍要运行」。
 
