@@ -133,6 +133,15 @@ jobs:
           MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
         run: npx tauri build --target ${{ matrix.target }} --bundles app
 
+      - name: Verify build stamp injected
+        shell: bash
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          grep -rq "$MARKLOCK_BUILD" dist/assets/
+          echo "绿色版构建号已注入前端：$MARKLOCK_BUILD"
+
       - name: Zip the app
         shell: bash
         run: |
@@ -178,6 +187,15 @@ jobs:
         env:
           MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
         run: npx tauri build --target x86_64-pc-windows-msvc --no-bundle
+
+      - name: Verify build stamp injected
+        shell: bash
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          grep -rq "$MARKLOCK_BUILD" dist/assets/
+          echo "绿色版构建号已注入前端：$MARKLOCK_BUILD"
 
       - name: Zip the executable
         shell: pwsh
