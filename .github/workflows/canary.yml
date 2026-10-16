@@ -1,0 +1,195 @@
+name: Canary portable builds
+
+# 绿色版（canary）滚动通道：产物永远是 master 最新提交，不需要打 release 标签。
+# 每次推到 master 或手动触发都会重跑，同名资产用 --clobber 直接覆盖，
+# 挂在一个固定名为 canary 的 prerelease 上，因此永远不会变成仓库的 "Latest"。
+# 与 release.yml 完全独立：那个管版本发布，这个管随手试用。
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canary
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Refresh canary release
+    runs-on: ubuntu-latest
+    outputs:
+      stamp: ${{ steps.meta.outputs.stamp }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          short="${GITHUB_SHA:0:7}"
+          echo "stamp=canary-${short}" >> "$GITHUB_OUTPUT"
+          echo "version=$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Move the canary tag onto this commit
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # canary 这个标签完全归本 workflow 所有，每次强制挪到最新提交，
+          # 这样发行页显示的 commit 就是下载到的那份代码。
+          git tag -f canary "$GITHUB_SHA"
+          git push --force origin canary
+
+      - name: Create or update the prerelease
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STAMP: ${{ steps.meta.outputs.stamp }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          notes=$(cat <<EOF
+          滚动绿色版，永远是 master 最新提交（当前 \`${STAMP}\`，基于 [\`${COMMIT:0:7}\`](https://github.com/${{ github.repository }}/commit/${COMMIT})，对应正式版 v${VERSION} 之后的构建）。
+
+          Rolling portable build, always the latest commit on master (currently \`${STAMP}\`, taken from [\`${COMMIT:0:7}\`](https://github.com/${{ github.repository }}/commit/${COMMIT}), past the stable v${VERSION}). Latest run: ${BUILD_URL}
+
+          ## 绿色版和正式版有何区别 / Portable vs. installer
+
+          | | 绿色版 / Portable | 正式版 / Stable |
+          | --- | --- | --- |
+          | 内容 | 解压即用，不写注册表、不装服务 | 安装程序（.dmg / .exe） |
+          | 更新 | 手动下新包，覆盖旧目录 | 检查更新 / 重新安装 |
+          | 稳定性 | master HEAD，随主线波动 | 打过标签、跑过加密核心测试 |
+
+          macOS：把 zip 解压后拖到「应用程序」或直接放在任意目录；未做 Apple 公证，首次打开仍需在「系统设置 → 隐私与安全性」点「仍要打开」。
+          Windows：解压后直接运行 \`MarkLock.exe\`，需要系统已装有 WebView2 运行时（Win 11 与更新过的 Win 10 自带）。
+          macOS builds are ad-hoc signed and never notarized, so Gatekeeper asks once; on Windows the extracted exe needs the WebView2 runtime, which current Windows 11 / updated 10 already ship.
+
+          ## 下载 / Downloads
+
+          | 平台 / Platform | 文件 / File |
+          | --- | --- |
+          | macOS（Apple Silicon） | \`MarkLock_Canary_macOS_aarch64.zip\` |
+          | macOS（Intel） | \`MarkLock_Canary_macOS_x64.zip\` |
+          | Windows x64 | \`MarkLock_Canary_Windows_x64.zip\` |
+
+          「关于」窗口里会显示 \`Canary <commit>\`，正式版不显示这一段。
+          The About card shows \`Canary <commit>\`; stable builds show nothing extra.
+          EOF
+          )
+          if gh release view canary >/dev/null 2>&1; then
+            gh release edit canary --prerelease --title "MarkLock ${STAMP}" --notes "$notes"
+          else
+            gh release create canary --prerelease --title "MarkLock ${STAMP}" --notes "$notes"
+          fi
+
+  macos:
+    name: Portable macOS (${{ matrix.label }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Apple Silicon
+            target: aarch64-apple-darwin
+            asset: MarkLock_Canary_macOS_aarch64.zip
+          - label: Intel
+            target: x86_64-apple-darwin
+            asset: MarkLock_Canary_macOS_x64.zip
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build .app bundle
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: npx tauri build --target ${{ matrix.target }} --bundles app
+
+      - name: Zip the app
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="src-tauri/target/${{ matrix.target }}/release/bundle/macos/MarkLock.app"
+          ditto -c -k --keepParent "$app" "${{ matrix.asset }}"
+          ls -lh "${{ matrix.asset }}"
+
+      - name: Attach to canary release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload canary "${{ matrix.asset }}" --clobber
+
+  windows:
+    name: Portable Windows (x64)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x86_64-pc-windows-msvc-canary
+
+      - name: Add Rust target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build unpacked exe
+        shell: bash
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: npx tauri build --target x86_64-pc-windows-msvc --no-bundle
+
+      - name: Zip the executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = 'src-tauri\target\x86_64-pc-windows-msvc\release'
+          $files = @(Join-Path $out 'MarkLock.exe') + (Get-ChildItem -Path $out -Filter '*.dll' -File | ForEach-Object { $_.FullName })
+          Compress-Archive -Path $files -DestinationPath 'MarkLock_Canary_Windows_x64.zip' -Force
+          Get-Item 'MarkLock_Canary_Windows_x64.zip' | Select-Object Name, Length
+
+      - name: Attach to canary release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload canary "MarkLock_Canary_Windows_x64.zip" --clobber

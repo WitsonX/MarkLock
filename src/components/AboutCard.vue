@@ -20,6 +20,8 @@ export default defineComponent({
       aboutIcon,
       // 版本号：运行时从 Tauri 读取（源自 tauri.conf.json），避免在文案里写死
       appVersion: '',
+      // 绿色版构建标识（正式版为空）：由 Vite define 注入，见 vite.config.ts
+      buildStamp: typeof __MARKLOCK_BUILD__ === 'string' ? __MARKLOCK_BUILD__ : '',
       // 手动「立即检查更新」进行中标志（禁用按钮、防重复点击）
       checking: false,
     }
@@ -28,6 +30,10 @@ export default defineComponent({
     /** 关于页展示与跳转的项目链接 */
     links() {
       return LINKS
+    },
+    /** 绿色版在版本号旁标出构建号，便于区分正式 release 与滚动构建 */
+    buildLabel(): string {
+      return this.buildStamp ? `Canary ${this.buildStamp.replace('canary-', '')}` : ''
     },
   },
   mounted() {
@@ -63,6 +69,10 @@ export default defineComponent({
     <div class="about-name">MarkLock</div>
     <div class="about-meta">
       <span class="about-ver">{{ $t('settings.about.version', { version: appVersion }) }}</span>
+      <template v-if="buildLabel">
+        <span class="about-sep"></span>
+        <span class="about-build">{{ buildLabel }}</span>
+      </template>
       <span class="about-sep"></span>
       <span class="about-tech">Tauri 2 · Vue 3</span>
     </div>
@@ -128,6 +138,7 @@ export default defineComponent({
 }
 .about-sep { width: 1px; height: 12px; background: var(--border); }
 .about-tech { font-size: 12px; color: var(--text-3); }
+.about-build { font-size: 12px; color: var(--text-3); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .about-desc {
   font-size: 13px; line-height: 1.85; color: var(--text-2);
   max-width: 460px; margin: 18px auto 22px;
