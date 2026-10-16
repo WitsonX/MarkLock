@@ -28,10 +28,9 @@ export default defineComponent({
       picking: false,
       syncingScroll: false,
       saving: false,
-      // 鼠标是否在便签窗内 + 便签窗是否获得焦点：两者共同决定模式切换段是否浮现
-      // （热角弹出走 focus=false 不夺焦，focused 仍为 false，故不能等同“可见即有焦点”）。
-      hovered: false,
+      // 便签窗是否获得焦点 + 鼠标是否在正文（编辑器/预览）区内：两者共同决定模式切换段是否浮现
       focused: false,
+      overBody: false,
       // 主应用图标（与关于对话框同源）：标题栏「打开 MarkLock」按钮用
       appIcon,
       // 预览模式勾选任务清单的确认弹窗（与主编辑器同语义）：pendingTaskSrc 为改好勾选的源码，
@@ -82,6 +81,11 @@ export default defineComponent({
     iconMap(): Record<string, string> {
       return appIcons
     },
+    /** 标题栏「锁定」按钮是否显示：便签指向加密文件（.mdl / .mdlb）且当前已成功解密读取时。 */
+    canLock(): boolean {
+      const t = this.target
+      return !!t && t.kind !== 'plain' && !this.needUnlock && !this.loading
+    },
   },
   watch: {
     // 快速启动列表变化（含弹出时 reloadSettings 拉到主窗口新增项）时预取图标；已缓存的路径会自行跳过。
@@ -108,20 +112,19 @@ export default defineComponent({
     }).catch(() => {})
     window.addEventListener('keydown', this.onKey)
     window.addEventListener('blur', this.onBlur)
-    // 初始焦点态：弹出时若已获焦则 focused=true（onFocus 己绑定 focus 事件补后续切换）。
+    // 初始焦点态：弹出时若已获焦则 focused=true（热角路径不夺焦，靠 focus 事件补后续切换）。
     this.focused = document.hasFocus()
-    // 用户点进便签（pointerdown）才视为「要用它」：解除后端「移开即隐藏」，此后交回 blur/Esc 收起。
-    // focus 事件仅更新 UI 焦点态，不调用 stickyEngage：热角路径 win.show() 不夺焦，
-    // 但 Windows 上系统可能自动激活窗口触发 focus，此时用户并未真正交互，
-    // 若解除 AUTOHIDE 会导致「移开即隐藏」失效（便签无法自动收起）。
-    window.addEventListener('pointerdown', this.onEngage)
     window.addEventListener('focus', this.onFocus)
+    // 用户点进便签（pointerdown）才视为「要用它」：解除后端「移开即隐藏」，此后交回 blur/Esc 收起。
+    // 仅 pointerdown 触发 stickyEngage：热角路径 win.show() 不夺焦，但 Windows 上系统可能自动激活
+    // 窗口，此时用户并未真正交互，不应解除 AUTOHIDE（否则「移开即隐藏」失效）。
+    window.addEventListener('pointerdown', this.onEngage)
   },
   beforeUnmount() {
     window.removeEventListener('keydown', this.onKey)
     window.removeEventListener('blur', this.onBlur)
-    window.removeEventListener('pointerdown', this.onEngage)
     window.removeEventListener('focus', this.onFocus)
+    window.removeEventListener('pointerdown', this.onEngage)
   },
   methods: {
     async load() {
@@ -155,6 +158,27 @@ export default defineComponent({
       } catch {
         this.unlockErr = true
       }
+    },
+    /** 锁定便签所在的加密库：先静默落盘避免丢数据，再清零内存密钥并回到就地解锁表单。 */
+    async lockNote() {
+      const t = this.target
+      const vaultId = t?.vaultId
+      if (!vaultId) return
+      // 锁定前先静默落盘（与 hide 收起同语义），未保存内容不随密钥清零丢失
+      await this.save(true)
+      try {
+        await tauri.lock(vaultId)
+      } catch (e) {
+        message.error(String(e))
+        return
+      }
+      // 回到锁定态：清空已解密的明文正文，显示就地解锁表单（下次弹出 / 输入密码重新解密）
+      this.content = ''
+      this.dirty = false
+      this.pwd = ''
+      this.unlockErr = false
+      this.needUnlock = true
+      message.info(this.$t('toast.locked'))
     },
     onInput(v: string) {
       // 内容未变则不记脏：外部修改重载后 CodeMirror 会把新 doc 原样回吐一次，
@@ -288,15 +312,12 @@ export default defineComponent({
         this.picking = false
       }
     },
-    /** 窗口获得焦点：仅更新 UI 焦点态（模式切换段显隐），不解除后端 AUTOHIDE。
-     *  热角路径不夺焦，但 Windows 上 win.show() 可能自动激活窗口触发 focus，
-     *  此时用户并未真正交互，不应解除「移开即隐藏」。 */
+    /** 窗口获得焦点：仅更新焦点态（模式段浮现条件之一），不解除后端 AUTOHIDE。 */
     onFocus() {
       this.focused = true
     },
-    /** 用户真正点进便签（pointerdown）：更新 UI + 解除 AUTOHIDE，此后由 blur/Esc/关闭按钮收起。 */
+    /** 用户真正点进便签（pointerdown）：解除后端 AUTOHIDE，此后由 blur/Esc/关闭按钮收起。 */
     onEngage() {
-      this.focused = true
       tauri.stickyEngage().catch(() => {})
     },
     /** 打开主窗口设置页：由 Rust 唤回主窗（含托盘隐藏态）并通知跳转。 */
@@ -315,24 +336,19 @@ export default defineComponent({
 </script>
 
 <template>
-  <div class="sticky" @mouseenter="hovered = true" @mouseleave="hovered = false">
+  <div class="sticky">
     <!-- 自绘标题栏：整条可拖拽移动窗口（无边框窗靠它移动）；设置 / 关闭集中在右上角 -->
     <div class="sticky-bar" data-tauri-drag-region>
       <span class="grip" aria-hidden="true">⠿</span>
       <span class="title" data-tauri-drag-region>{{ fileName || $t('sticky.title') }}</span>
       <span v-if="dirty" class="dot" :title="$t('sticky.unsaved')"></span>
-      <!-- 模式切换：仅当鼠标悬停便签且便签获得焦点时浮现（热角不夺焦态不显示），避开常驻占用标题栏空间 -->
-      <div class="seg modes" v-show="hovered && focused">
-        <span :class="{ on: mode === 'edit' }" @click="mode = 'edit'">{{ $t('sticky.edit') }}</span>
-        <span :class="{ on: mode === 'split' }" @click="mode = 'split'">{{ $t('sticky.split') }}</span>
-        <span :class="{ on: mode === 'preview' }" @click="mode = 'preview'">{{ $t('sticky.preview') }}</span>
-      </div>
+      <button class="x lock-btn" v-if="canLock" v-tip="{ text: $t('sticky.lock'), place: 'bottom' }" @click="lockNote"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></button>
       <button class="x main-btn" v-tip="{ text: $t('sticky.main'), place: 'bottom' }" @click="openMain"><img :src="appIcon" alt="" /><span>{{ $t('sticky.mainBtn') }}</span></button>
       <button class="x" v-tip="{ text: $t('sticky.settings'), place: 'bottom' }" @click="openSettings">⚙</button>
       <button class="x" v-tip="{ text: $t('sticky.close'), place: 'bottom' }" @click="hide">×</button>
     </div>
 
-    <div class="sticky-body">
+    <div class="sticky-body" @mouseenter="overBody = true" @mouseleave="overBody = false">
       <!-- 未设置便签文件：可直接在此选文件 -->
       <div v-if="!target" class="empty">
         <p>{{ $t('sticky.notSet') }}</p>
@@ -356,6 +372,12 @@ export default defineComponent({
       <!-- 正常三态：面板常驻布局流 + flex-basis 滑动过渡（对齐主编辑器 .panes 切换动画；不用 v-show，
            因 WKWebView 下 display 切换会中断 flex-basis 过渡） -->
       <template v-else>
+        <!-- 模式切换：仅当便签获得焦点且鼠标在正文区内时浮现（平时隐藏），浮现后半透明、悬停段本身转不透明 -->
+        <div class="seg modes modes-float" v-show="focused && overBody">
+          <span :class="{ on: mode === 'edit' }" @click="mode = 'edit'">{{ $t('sticky.edit') }}</span>
+          <span :class="{ on: mode === 'split' }" @click="mode = 'split'">{{ $t('sticky.split') }}</span>
+          <span :class="{ on: mode === 'preview' }" @click="mode = 'preview'">{{ $t('sticky.preview') }}</span>
+        </div>
         <div class="panes" :class="`mode-${mode}`">
           <div class="pane pane-editor" :class="{ collapsed: mode === 'preview' }">
             <CodeMirrorEditor ref="editorCm" :model-value="content" @update:model-value="onInput" :on-save="save" :on-scroll="onEditorScroll" />
@@ -431,6 +453,9 @@ export default defineComponent({
 }
 .x:hover { background: var(--border-pop); color: var(--text); }
 .x:active { background: var(--border-2); }
+/* 锁定按钮：内联 SVG 挂锁图标需 flex 居中（.x 默认按行高排布文本，SVG 会偏上） */
+.lock-btn { display: inline-flex; align-items: center; }
+.lock-btn svg { display: block; }
 /* 「打开 MarkLock」主图标按钮：常驻浅底 + 描边 + 短文字标签，图标与文字水平居中；PNG 自带留白取 18px */
 .main-btn {
   display: inline-flex;
@@ -444,9 +469,18 @@ export default defineComponent({
 }
 .main-btn img { display: block; width: 18px; height: 18px; }
 .main-btn:hover { background: var(--hover); border-color: var(--border-pop); }
-/* 模式切换分段控件：样式对齐主编辑器工具栏的 .seg（见 EditorView.vue），靠右贴关闭按钮 */
-.modes {
-  margin-left: auto;
+/* 模式切换分段控件：样式对齐主编辑器工具栏的 .seg（见 EditorView.vue）；
+   浮于正文区右上角，平时半透明、悬停转不透明，避免常驻标题栏挤占空间 */
+.modes-float {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 5;
+  opacity: 0.35;
+  transition: opacity 0.18s ease;
+}
+.modes-float:hover {
+  opacity: 1;
 }
 .seg {
   display: inline-flex;
@@ -474,6 +508,7 @@ export default defineComponent({
   flex: 1;
   display: flex;
   min-height: 0;
+  position: relative;
 }
 /* 编辑 / 分屏 / 预览 切换滑动动画：面板常驻，靠 flex-basis 过渡从边上滑入滑出（对齐主编辑器 .panes） */
 .panes {

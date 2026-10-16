@@ -38,6 +38,7 @@ export default {
     mainBtn: '主界面',
     settings: '设置',
     unsaved: '有未保存改动',
+    lock: '锁定该库',
   },
   editor: {
     // CodeMirror 插入占位文本
@@ -467,6 +468,7 @@ export default {
     emptyHintSuffix: '，或在编辑器右上菜单「＋ 新建加密库」',
     privacyTip: '密码仅用于本地解密，不会上传到任何服务器',
     prunedMsg: '库文件不存在，已从列表移除：{names}',
+    prunedFilesMsg: '文件不存在，已从打开列表移除：{names}',
     pickVaultFirst: '请先选择一个加密库',
     enterPassword: '请输入主密码',
     vaultMissing: '库文件不存在（可能已被移动或删除），已从库列表移除',
@@ -622,6 +624,8 @@ export default {
       lockOnMinimize: '窗口最小化时锁定',
       lockOnSleep: '系统休眠 / 锁屏时锁定',
       clearClipboard: '锁定后清除剪贴板', clearClipboardD: '防止解密内容残留（复制后也会定时清除）',
+      gData: '数据安全',
+      backup: '保存时保留上一版备份', backupD: '采用“临时文件 → 落盘 → 重命名”的原子方式写盘，并在覆盖前把上一版加密备份为隐藏文件，防崩溃/断电/云同步半写导致整库损坏；关闭后仍保留原子写盘，不再生成备份',
       gDanger: '危险操作',
       reset: '重置所有配置', resetD: '偏好设置回默认，并清空已登记的库、收藏、最近打开与工作目录等本地记录；磁盘上的文件不会删除',
       resetBtn: '重置…',

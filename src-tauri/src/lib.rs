@@ -624,8 +624,7 @@ async fn create_file_vault(
 ) -> Result<usize, crypto::CryptoError> {
     spawn_crypto(move || {
         let bytes = vault::create_file_vault(&password, hint)?;
-        std::fs::write(Path::new(&path), &bytes)
-            .map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+        crypto::io::atomic_write(Path::new(&path), &bytes)?;
         Ok(bytes.len())
     })
     .await
@@ -828,6 +827,13 @@ fn quit_app(app: tauri::AppHandle) {
 #[tauri::command]
 fn set_close_to_tray(enabled: bool) {
     CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
+}
+
+/// 同步「保存时保留上一版备份」开关到后端：为 false 时原子写盘不再生成 `.mlk-bak` 备份。
+/// 原子写盘（tmp → fsync → rename）本身始终生效，与开关无关。前端在启动及设置项变更时各调用一次。
+#[tauri::command]
+fn set_backup_enabled(enabled: bool) {
+    crypto::io::set_backups_enabled(enabled);
 }
 
 /// 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端，并即时应用到现有托盘。
@@ -1540,8 +1546,7 @@ async fn create_file(
 ) -> Result<usize, crypto::CryptoError> {
     spawn_crypto(move || {
         let bytes = vault::create_encrypted(&password, &content, hint)?;
-        std::fs::write(Path::new(&path), &bytes)
-            .map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+        crypto::io::atomic_write(Path::new(&path), &bytes)?;
         Ok(bytes.len())
     })
     .await
@@ -2197,6 +2202,7 @@ pub fn run() {
             lock_all,
             quit_app,
             set_close_to_tray,
+            set_backup_enabled,
             set_tray_enabled,
             set_tray_sticky_button,
             set_auto_start,

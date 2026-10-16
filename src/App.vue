@@ -69,6 +69,8 @@ export default defineComponent({
     if (!isStickyWindow()) {
       // 同步「关闭最小化到托盘」开关到后端（决定红叉是隐藏还是退出）；启动时先同步一次。
       tauri.setCloseToTray(settings.value.closeToTray).catch(() => {})
+      // 同步「保存时保留上一版备份」开关到后端（关闭后原子写盘不再生成 .mlk-bak）；启动时先同步一次。
+      tauri.setBackupEnabled(settings.value.backupEnabled).catch(() => {})
       // 同步「显示托盘图标」开关到后端（运行时创建/移除托盘）；启动时先同步一次。
       tauri.setTrayEnabled(settings.value.showTrayIcon).catch(() => {})
       // 同步「托盘点击弹出便签」的鼠标键到后端（决定左/右键弹便签、另一键弹菜单）；启动时先同步一次。
@@ -149,6 +151,21 @@ export default defineComponent({
         markChecked()
         runUpdateCheck(resolveLang(settings.value.language) === 'zh', { auto: true }).catch(() => {})
       }, 3000)
+
+      // 启动清理：把磁盘上已不存在的登记库/上次打开页签从列表中移除，
+      // 避免侧边栏出现点不开的库、或 restoreSession 为已删除的加密文件恢复出「锁定占位」。
+      // runStartupPrune 幂等，EditorView.restoreSession 内部也会 await 同一 Promise 保证时序。
+      store
+        .runStartupPrune()
+        .then(({ vaults, files }) => {
+          if (vaults.length) {
+            message.warning(t('unlock.prunedMsg', { names: vaults.map((v) => v.name).join('、') }))
+          }
+          if (files.length) {
+            message.warning(t('unlock.prunedFilesMsg', { names: files.join('、') }))
+          }
+        })
+        .catch(() => {})
     }
 
     return { settings, apply, applyLang, aboutDialogOpen, syncHotCorner }
@@ -168,6 +185,9 @@ export default defineComponent({
     },
     'settings.closeToTray'(enabled: boolean) {
       tauri.setCloseToTray(enabled).catch(() => {})
+    },
+    'settings.backupEnabled'(enabled: boolean) {
+      tauri.setBackupEnabled(enabled).catch(() => {})
     },
     'settings.showTrayIcon'(enabled: boolean) {
       tauri.setTrayEnabled(enabled).catch(() => {})

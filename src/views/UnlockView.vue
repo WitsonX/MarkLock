@@ -48,24 +48,11 @@ export default defineComponent({
     window.removeEventListener('keydown', this.onKeydown)
   },
   methods: {
-    /** 把文件/目录已不在磁盘上的库从登记与收藏快照中一并移除（被移动或删除）；已解锁会话不动。 */
+    /** 把文件/目录已不在磁盘上的库从登记与收藏快照中一并移除（被移动或删除）；已解锁会话不动。
+     *  具体剔除逻辑交给 store.pruneMissingVaults（与 App 启动清理共用），本页只负责弹提示与清目标选中。 */
     async pruneMissingVaults() {
-      // 候选 = 登记的库（锁定态）+ 收藏快照里未登记的库（收藏自持快照，移出登记后仍能被点回来）
-      const infos = new Map<string, { name: string; path: string }>()
-      for (const v of this.store.recent) infos.set(v.id, { name: v.name, path: v.path })
-      for (const f of this.store.favorites) if (!infos.has(f.id)) infos.set(f.id, { name: f.name, path: f.path })
-      const missing: { id: string; name: string }[] = []
-      for (const [id, info] of infos) {
-        if (this.store.recent.some((v) => v.id === id && v.unlocked)) continue
-        if (!(await tauri.pathExists(info.path))) missing.push({ id, name: info.name })
-      }
+      const missing = await this.store.pruneMissingVaults()
       if (!missing.length) return
-      missing.forEach((m) => {
-        this.store.removeVault(m.id)
-        const fi = this.store.favorites.findIndex((x) => x.id === m.id)
-        if (fi >= 0) this.store.favorites.splice(fi, 1)
-      })
-      this.store.persistFavorites()
       if (missing.some((m) => m.id === this.targetId)) this.targetId = ''
       message.warning(this.$t('unlock.prunedMsg', { names: missing.map((m) => m.name).join('、') }))
     },
@@ -94,10 +81,11 @@ export default defineComponent({
         this.$router.push('/editor')
       } catch (e) {
         this.error = String(e)
-        // 解锁失败后密码框重新可用，把焦点还给输入框方便重试
+        // 解锁失败后密码框重新可用，把焦点还给输入框并全选，方便直接覆盖重输
         this.$nextTick(() => {
           const el = this.$refs.pwdInput as HTMLInputElement | undefined
           el?.focus()
+          el?.select()
         })
       } finally {
         this.loading = false

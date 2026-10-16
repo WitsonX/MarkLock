@@ -177,6 +177,9 @@ export interface Settings {
   lockOnSleep: boolean
   /** 锁定后清除剪贴板 */
   clearClipboardOnLock: boolean
+  /** 保存时保留上一版备份（`.mlk-bak`）：崩溃/误存可就地恢复上一版，并降低整库半写损坏风险。
+   *  默认开启；关闭后仍保持原子写盘（tmp → fsync → rename），仅不再生成旁路备份文件。 */
+  backupEnabled: boolean
   /** 外观主题：浅色 / 深色 / 跟随系统 */
   theme: 'light' | 'dark' | 'system'
   /** 界面语言：跟随系统 / 简体中文 / English */
@@ -253,6 +256,8 @@ export const DEFAULT_SETTINGS: Settings = {
   lockOnMinimize: true,
   lockOnSleep: true,
   clearClipboardOnLock: false,
+  // 保存时默认保留上一版备份：与原子写盘配合，防崩溃/误存导致整库损坏；可在安全设置里关闭
+  backupEnabled: true,
   theme: 'system',
   language: 'system',
   codeTheme: 'github',
@@ -387,6 +392,14 @@ function loadOpenFiles(): OpenFileMeta[] {
     return []
   }
 }
+
+/**
+ * 启动清理任务共享 Promise：由 App.vue 首次触发，EditorView.restoreSession 复用同一实例，
+ * 保证「先剔除磁盘上已不存在的库/页签，再恢复会话」的顺序，避免为已删除的加密文件恢复出
+ * 「锁定占位」页签（openEncryptedFile / restoreVaultFileTab 都不做存在性检查）。
+ * 模块级变量而非 store state：Promise 无需响应式追踪，也避免污染持久化。
+ */
+let startupPrunePromise: Promise<{ vaults: { id: string; name: string }[]; files: string[] }> | null = null
 
 /** 载入侧边栏分组顺序；旧数据/缺失时回退默认顺序，并补齐可能新增的分组。 */
 function loadSectionOrder(): string[] {
@@ -618,6 +631,86 @@ export const useVaultStore = defineStore('vault', {
     removeVault(id: string) {
       this.recent = this.recent.filter((v) => v.id !== id)
       this.persistRecent()
+    },
+
+    /**
+     * 剔除磁盘上已不存在的登记库（含仅存在于收藏快照里的库）。
+     * 已解锁的库跳过：Rust 侧会话仍持密钥，路径可能只是暂时不可访问（外接盘掉线等），
+     * 强制移除会连带清掉未落盘的编辑内容。
+     * 返回被移除的库列表 `{id, name}`；不弹提示，由调用方决定是否通知用户。
+     */
+    async pruneMissingVaults(): Promise<{ id: string; name: string }[]> {
+      const infos = new Map<string, { name: string; path: string }>()
+      for (const v of this.recent) infos.set(v.id, { name: v.name, path: v.path })
+      for (const f of this.favorites) if (!infos.has(f.id)) infos.set(f.id, { name: f.name, path: f.path })
+      const missing: { id: string; name: string }[] = []
+      for (const [id, info] of infos) {
+        if (this.recent.some((v) => v.id === id && v.unlocked)) continue
+        let exists = true
+        try {
+          exists = await tauri.pathExists(info.path)
+        } catch {
+          // 探测失败（权限/IPC 异常）保守视为存在，避免误删
+          exists = true
+        }
+        if (!exists) missing.push({ id, name: info.name })
+      }
+      if (!missing.length) return []
+      missing.forEach((m) => {
+        this.removeVault(m.id)
+        const fi = this.favorites.findIndex((x) => x.id === m.id)
+        if (fi >= 0) this.favorites.splice(fi, 1)
+      })
+      this.persistFavorites()
+      return missing
+    },
+
+    /**
+     * 剔除 `savedOpenFiles` 中磁盘已不存在的条目（启动清理用）。
+     * 检查策略按页签类型分档：
+     * - 明文文件 / 单文件 .mdl / 目录库内文件：path 即绝对路径，直接探测；
+     * - 单文件库 .mdlb 内文件（path 含 `#`）：仅探测库容器；容器不存在才移除，
+     *   容器存在时内部条目留待 restoreSession 解锁后按读取结果决定（无法在不解锁时校验内部项）。
+     * 返回被移除条目的显示名数组；不弹提示，由调用方决定是否通知用户。
+     */
+    async pruneMissingSavedOpenFiles(): Promise<string[]> {
+      const removed: string[] = []
+      const kept: OpenFileMeta[] = []
+      for (const m of this.savedOpenFiles) {
+        const probe = m.path.includes('#') ? m.path.split('#')[0] : m.path
+        let exists = true
+        try {
+          exists = await tauri.pathExists(probe)
+        } catch {
+          exists = true
+        }
+        if (exists) kept.push(m)
+        else removed.push(m.name)
+      }
+      if (removed.length) {
+        this.savedOpenFiles = kept
+        localStorage.setItem(OPEN_FILES_KEY, JSON.stringify(kept))
+      }
+      return removed
+    },
+
+    /**
+     * 启动清理入口（幂等）：首次调用触发 prune 并缓存 Promise，后续调用直接返回同一 Promise。
+     * App.vue 主窗 setup 里 fire-and-forget 触发；EditorView.restoreSession 内部 await，
+     * 保证「恢复会话」总是发生在「剔除失效条目」之后。
+     */
+    runStartupPrune(): Promise<{ vaults: { id: string; name: string }[]; files: string[] }> {
+      if (!startupPrunePromise) {
+        startupPrunePromise = (async () => {
+          // 两个 prune 各自维护不同数据（recent/favorites vs savedOpenFiles），并行安全
+          const [vaults, files] = await Promise.all([
+            this.pruneMissingVaults(),
+            this.pruneMissingSavedOpenFiles(),
+          ])
+          return { vaults, files }
+        })()
+      }
+      return startupPrunePromise
     },
 
     // ---------- 解锁 / 锁定 ----------
@@ -1250,6 +1343,10 @@ export const useVaultStore = defineStore('vault', {
      * 返回本次成功恢复的页签数。
      */
     async restoreSession(): Promise<number> {
+      // 先等启动清理完成：磁盘已不存在的 savedOpenFiles 条目在 restoreSession 走「锁定占位」
+      // 分支时不会被 openEncryptedFile / restoreVaultFileTab 检出，只能靠预清理拦截。
+      // runStartupPrune 幂等，App.vue 已触发时这里直接复用同一 Promise。
+      await this.runStartupPrune()
       if (!this.settings.restoreLastSession) return 0
       let restored = 0
       const meta = this.savedOpenFiles.slice()

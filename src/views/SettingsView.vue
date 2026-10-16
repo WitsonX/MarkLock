@@ -769,6 +769,14 @@ greet('MarkLock');`
             </div>
           </div>
 
+          <div class="group">
+            <div class="group-head">{{ $t('settings.security.gData') }}</div>
+            <div class="row" data-key="backupEnabled" data-keywords="备份 上一版 恢复 崩溃 半写 backup restore recover crash atomic">
+              <div class="info"><div class="t">{{ $t('settings.security.backup') }}</div><div class="d">{{ $t('settings.security.backupD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.backupEnabled }" @click="store.updateSettings({ backupEnabled: !store.settings.backupEnabled })"></div>
+            </div>
+          </div>
+
           <div class="group danger-zone">
             <div class="group-head">{{ $t('settings.security.gDanger') }}</div>
             <div class="row" data-key="resetAll" data-keywords="重置 清空 恢复默认 配置 reset clear default">

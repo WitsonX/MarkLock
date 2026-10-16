@@ -3708,6 +3708,8 @@ export default defineComponent({
         message.success(this.$t('toast.unlocked'))
       } catch (e) {
         message.error(String(e))
+        // 解锁失败后把焦点送回密码框并全选，方便直接覆盖重输
+        this.focusPwdInput('filePwdInput')
       } finally {
         this.unlocking = false
       }
@@ -3728,6 +3730,8 @@ export default defineComponent({
         await this.openVaultToRoot(f.vaultId)
       } catch (e) {
         this.vaultUnlockError = String(e)
+        // 解锁失败后把焦点送回主密码框并全选，方便直接覆盖重输
+        this.focusPwdInput('vaultPwdInput')
       } finally {
         this.vaultUnlocking = false
       }

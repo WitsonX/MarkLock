@@ -12,6 +12,7 @@ use std::time::Duration;
 use super::error::{CryptoError, Result};
 use super::file;
 use super::format::{self, EncryptedBody, FileHeader, VaultMeta};
+use super::io;
 use super::keys::{self, Dek, Kek};
 use super::session::{SessionStore, UnlockedVault, DEFAULT_AUTO_LOCK};
 
@@ -119,7 +120,7 @@ pub fn create_vault_dir(
     let json = serde_json::to_vec_pretty(&meta)
         .map_err(|e| CryptoError::BadHeader(format!("序列化库元数据失败: {e}")))?;
     let meta_path = dir.join(format::VAULT_META_FILE);
-    fs::write(&meta_path, json).map_err(|e| CryptoError::Io(e.to_string()))
+    io::atomic_write(&meta_path, &json)
 }
 
 /// 解锁一个加密库目录。
@@ -197,7 +198,7 @@ pub fn create_file_in_vault(
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).map_err(|e| CryptoError::Io(e.to_string()))?;
         }
-        fs::write(&full, bytes).map_err(|e| CryptoError::Io(e.to_string()))
+        io::atomic_write(&full, &bytes)
     })
 }
 
@@ -323,7 +324,7 @@ pub fn write_file(
         file::serialize(&header, &body)
     })?;
 
-    fs::write(path, out).map_err(|e| CryptoError::Io(e.to_string()))
+    io::atomic_write(path, &out)
 }
 
 /// 修改库主密码：用旧密码验证，用新密码重包裹 DEK 并写回。
@@ -382,7 +383,7 @@ fn change_file_password(
     // 重新序列化：头变了，数据区原样保留
     let body = file::parse_body(rest)?;
     let out = file::serialize(&header, &body)?;
-    fs::write(path, out).map_err(|e| CryptoError::Io(e.to_string()))
+    io::atomic_write(path, &out)
 }
 
 /// 改目录库主密码：重包裹探针 + 所有 .mdl 文件的 wrapped_dek。
@@ -421,8 +422,7 @@ fn change_vault_dir_password(
     };
     let json = serde_json::to_vec_pretty(&new_meta)
         .map_err(|e| CryptoError::BadHeader(format!("序列化库元数据失败: {e}")))?;
-    fs::write(dir.join(format::VAULT_META_FILE), json)
-        .map_err(|e| CryptoError::Io(e.to_string()))?;
+    io::atomic_write(&dir.join(format::VAULT_META_FILE), &json)?;
 
     // 4) 更新会话（沿用原自动锁定时长）
     store.insert(
@@ -447,7 +447,8 @@ fn rewrite_dir_deks(dir: &Path, old_kek: &Kek, new_kek: &Kek) -> Result<()> {
         let entry = entry.map_err(|e| CryptoError::Io(e.to_string()))?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == format::VAULT_META_FILE {
+        // 跳过库元数据与原子写盘产生的旁路文件（临时 / 备份），它们不是有效笔记。
+        if name == format::VAULT_META_FILE || io::is_sidecar(&name) {
             continue;
         }
         if path.is_dir() {
@@ -459,7 +460,7 @@ fn rewrite_dir_deks(dir: &Path, old_kek: &Kek, new_kek: &Kek) -> Result<()> {
             header.wrapped_dek = dek.rewrap(new_kek)?;
             let body = file::parse_body(rest)?;
             let out = file::serialize(&header, &body)?;
-            fs::write(&path, out).map_err(|e| CryptoError::Io(e.to_string()))?;
+            io::atomic_write(&path, &out)?;
         }
     }
     Ok(())
@@ -610,7 +611,7 @@ fn write_plain_tree(
         let body = EncryptedBody { nonce, ct };
         file::serialize(&header, &body)
     })?;
-    fs::write(path, out).map_err(|e| CryptoError::Io(e.to_string()))
+    io::atomic_write(path, &out)
 }
 
 /// 递归排序 `FsNode` 列表：目录在前，文件在后，各自按名称（忽略大小写）排序。
@@ -947,7 +948,7 @@ pub fn change_file_vault_password(
 
     let body = file::parse_body(rest)?;
     let out = file::serialize(&header, &body)?;
-    fs::write(path, out).map_err(|e| CryptoError::Io(e.to_string()))
+    io::atomic_write(path, &out)
 }
 
 // ==================== 目录浏览 ====================
@@ -998,8 +999,8 @@ fn list_dir_inner(dir: &Path, recursive: bool, in_vault: bool) -> Result<Vec<FsN
         let entry = entry.map_err(|e| CryptoError::Io(e.to_string()))?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        // 跳过库元数据文件
-        if name == format::VAULT_META_FILE {
+        // 跳过库元数据文件与原子写盘产生的旁路文件（临时 / 备份）。
+        if name == format::VAULT_META_FILE || io::is_sidecar(&name) {
             continue;
         }
         let is_dir = path.is_dir();
@@ -1306,7 +1307,7 @@ fn search_dir_inner(
         let entry = entry.map_err(|e| CryptoError::Io(e.to_string()))?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name == format::VAULT_META_FILE {
+        if name == format::VAULT_META_FILE || io::is_sidecar(&name) {
             continue;
         }
         if path.is_dir() {
@@ -1616,7 +1617,7 @@ pub fn batch_encrypt(
             let body = EncryptedBody { nonce, ct };
             let bytes = file::serialize(&header, &body)?;
             let target = pick_mdl_target(src);
-            fs::write(&target, &bytes).map_err(|e| CryptoError::Io(format!("写入失败: {e}")))?;
+            io::atomic_write(&target, &bytes)?;
             Ok(target)
         })();
         let target = match enc {
@@ -2008,10 +2009,11 @@ mod tests {
         assert!(unlock_file_vault(&store2, "x", &path, "vaultpass123", None).is_err());
         assert!(unlock_file_vault(&store2, "y", &path, "newpass456", None).is_ok());
 
-        // 磁盘上只有一个文件，且文件名不含库内文件名（整包密文）
+        // 磁盘上除原子写盘的旁路备份外只有一个库文件，且文件名不含库内文件名（整包密文）
         let disk_files: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| !io::is_sidecar(n))
             .collect();
         assert_eq!(disk_files, vec!["notes.mdlb".to_string()]);
 

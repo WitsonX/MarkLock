@@ -37,6 +37,7 @@ export default {
     mainBtn: 'Main',
     settings: 'Settings',
     unsaved: 'Unsaved changes',
+    lock: 'Lock vault',
   },
   editor: {
     // CodeMirror inserted placeholder text
@@ -466,6 +467,7 @@ export default {
     emptyHintSuffix: ', or use “+ New Vault” in the editor’s top-right menu',
     privacyTip: 'The password is only used for local decryption and never uploaded to any server',
     prunedMsg: 'Vault file no longer exists, removed from list: {names}',
+    prunedFilesMsg: 'File no longer exists, removed from open list: {names}',
     pickVaultFirst: 'Please select a vault first',
     enterPassword: 'Please enter the master password',
     vaultMissing: 'Vault file does not exist (it may have been moved or deleted) and was removed from the vault list',
@@ -621,6 +623,8 @@ export default {
       lockOnMinimize: 'Lock when window is minimized',
       lockOnSleep: 'Lock on system sleep / screen lock',
       clearClipboard: 'Clear clipboard after lock', clearClipboardD: 'Prevents decrypted content from lingering (also cleared on a timer after copying)',
+      gData: 'Data safety',
+      backup: 'Keep previous version on save', backupD: 'Writes atomically (temp file → fsync → rename) and, before overwriting, keeps an encrypted hidden backup of the previous version—guarding against crashes, power loss, and half-written syncs that could corrupt the whole vault. When off, atomic writing still applies but no backups are created',
       gDanger: 'Danger zone',
       reset: 'Reset all settings', resetD: 'Restore preferences to defaults and clear local records such as registered vaults, favorites, recent files and working directories; files on disk are not deleted',
       resetBtn: 'Reset…',

@@ -166,6 +166,12 @@ export function setCloseToTray(enabled: boolean) {
   return invoke<void>('set_close_to_tray', { enabled })
 }
 
+/** 同步「保存时保留上一版备份」开关到后端：关闭后原子写盘不再生成 `.mlk-bak` 备份文件
+ *  （原子写盘本身始终生效，仅停掉旁路备份）。 */
+export function setBackupEnabled(enabled: boolean) {
+  return invoke<void>('set_backup_enabled', { enabled })
+}
+
 /** 运行时开关系统托盘图标：关闭时移除托盘，开启时（若不存在）重建。 */
 export function setTrayEnabled(enabled: boolean) {
   return invoke<void>('set_tray_enabled', { enabled })
