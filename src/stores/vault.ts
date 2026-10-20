@@ -268,7 +268,8 @@ export const DEFAULT_SETTINGS: Settings = {
   previewLineHeight: 1.7,
   showToolbar: true,
   showStatusbar: true,
-  previewDblClickToggle: true,
+  // 双击预览区切换视图默认关闭：需用户在显示设置里显式开启，避免无意双击导致视图切换
+  previewDblClickToggle: false,
   editorMode: 'split',
   assocPromptAsked: false,
   watchExternalChanges: true,

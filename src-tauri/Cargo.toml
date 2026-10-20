@@ -25,6 +25,7 @@ rand = "0.8"
 base64 = "0.22"
 # 密钥内存清零
 zeroize = { version = "1", features = ["derive"] }
+tauri-plugin-window-state = "2"
 
 # Windows 双击/右键打开文件：二次启动把参数转发给已运行实例（仅 Windows 启用）
 [target.'cfg(target_os = "windows")'.dependencies]

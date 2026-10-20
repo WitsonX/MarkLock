@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_window_state::AppHandleExt;
 
 /// macOS 锁屏检测。
 ///
@@ -104,8 +105,10 @@ mod hotcorner {
     pub static ENABLED: AtomicBool = AtomicBool::new(false);
     /// 停留触发时长（毫秒）。
     pub static DWELL_MS: AtomicU32 = AtomicU32::new(500);
-    /// 「鼠标移开即隐藏」是否已武装：仅热角唤出时置真（托盘/命令唤出是显式操作，不自动收起）。
-    /// 用户点进便签（前端 sticky_engage）或隐藏窗口时置假，交回 blur/Esc 收起逻辑。
+    /// 「未交互即隐藏」是否已武装：仅热角唤出时置真（托盘/命令唤出是显式操作，不自动收起）。
+    /// 保持可见需同时满足「光标在窗口或触发角落」与「窗口已获焦」——热角唤出不夺焦，
+    /// 若用户未在宽限期内点入便签，到时自动收起；用户点进后（pointerdown → sticky_engage）
+    /// 或隐藏窗口时置假，此后交回 blur/Esc 收起逻辑。
     pub static AUTOHIDE: AtomicBool = AtomicBool::new(false);
     /// 角落判定边长：光标距左边缘与上/下边缘均小于该值（像素/点）视为进入角落。
     const EDGE: f64 = 10.0;
@@ -114,9 +117,10 @@ mod hotcorner {
     /// 便签命中判定的外扩边距（像素/点）：把窗口矩形略微放大，
     /// 覆盖窗口 margin 与角落触发区之间的缝隙，避免鼠标停在缝里被误判为「已移开」。
     const HIT_PAD: f64 = 20.0;
-    /// 光标移出「保持区域」（便签窗口 ∪ 触发角落）后到收起的宽限（毫秒）：
-    /// 避免贴边抖动误收，也给足从角落移入窗口的时间。
-    const LEAVE_GRACE_MS: u128 = 600;
+    /// 「未交互」到自动收起的宽限（毫秒）：光标移出保持区域 或 便签未获得焦点时开始计时，
+    /// 任一条件回到满足即重置。3 秒既足够让用户从当前 App 点入便签（含 macOS first-mouse
+    /// 首击即夺焦），也避免忘在角落的便签长期遮挡桌面。
+    const LEAVE_GRACE_MS: u128 = 3000;
 
     #[cfg(target_os = "macos")]
     mod cursor {
@@ -264,20 +268,29 @@ mod hotcorner {
                     _ => false,
                 };
 
-                // ---- 移开即隐藏（仅热角武装时生效）----
+                // ---- 未交互即隐藏（仅热角武装时生效）----
                 if AUTOHIDE.load(Ordering::SeqCst) {
-                    // 「保持区域」= 便签窗口（外扩 HIT_PAD）∪ 触发角落；光标在其中即不计时。
-                    let in_window = cursor
-                        .and_then(|(cx, cy)| {
-                            sticky_bounds_logical(&app, scale).map(|(x, y, w, h)| {
-                                cx >= x - HIT_PAD
-                                    && cx <= x + w + HIT_PAD
-                                    && cy >= y - HIT_PAD
-                                    && cy <= y + h + HIT_PAD
+                    // 「保持区域」= 便签窗口（外扩 HIT_PAD）∪ 触发角落。
+                    let in_hold_zone = {
+                        let in_window = cursor
+                            .and_then(|(cx, cy)| {
+                                sticky_bounds_logical(&app, scale).map(|(x, y, w, h)| {
+                                    cx >= x - HIT_PAD
+                                        && cx <= x + w + HIT_PAD
+                                        && cy >= y - HIT_PAD
+                                        && cy <= y + h + HIT_PAD
+                                })
                             })
-                        })
+                            .unwrap_or(false);
+                        in_window || in_corner
+                    };
+                    // 「窗口已获焦」= 用户已把光标移入并点击（macOS accept_first_mouse 让首击即夺焦）
+                    // 或 Windows 上系统自动激活；未获焦即视作「未交互」，与「移出保持区」共同触发计时。
+                    let focused = app
+                        .get_webview_window(super::STICKY_WINDOW)
+                        .and_then(|w| w.is_focused().ok())
                         .unwrap_or(false);
-                    if in_window || in_corner {
+                    if in_hold_zone && focused {
                         left_at = None;
                     } else {
                         let now = Instant::now();
@@ -319,9 +332,8 @@ mod hotcorner {
                             >= DWELL_MS.load(Ordering::SeqCst) as u128 =>
                     {
                         fired = true;
-                        let _ = super::show_sticky(&app);
-                        // 热角唤出后武装「移开即隐藏」。
-                        AUTOHIDE.store(true, Ordering::SeqCst);
+                        // 热角唤出：不夺焦，并在显示后武装「未交互即隐藏」（整段已切到主线程串行执行）。
+                        let _ = super::show_sticky_at(&app, None, false, true);
                     }
                     Some(_) => {}
                     None => since = Some(now),
@@ -1034,7 +1046,7 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
                     } else {
                         TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
                     };
-                    let _ = show_sticky_at(app, Some(anchor), true);
+                    let _ = show_sticky_at(app, Some(anchor), true, false);
                 } else {
                     // 菜单键（另一键或 off 双键）：系统即将弹菜单；若便签正显示，先立即隐藏
                     // 避免叠在菜单上（菜单在托盘图标处弹出，与便签锚点重合），
@@ -1112,19 +1124,50 @@ fn sticky_modifier_held() -> bool {
     hotcorner::modifier_held(STICKY_MODIFIER.load(Ordering::SeqCst))
 }
 
+/// 读取 window-state 插件已持久化的便签尺寸（物理像素），换算为逻辑点返回；
+/// 无存档 / 解析失败 / 尺寸非法时返回 None。
+/// 直接读插件的状态文件（app_config_dir/<filename>）而非用 restore_state：restore_state 的
+/// set_size 作用在「刚创建、尚未显示」的隐藏窗上，尺寸要到显示后才生效，导致紧随其后的
+/// position_sticky 读到旧尺寸——下角触发时顶边出界、上角触发时底部留空，第二次弹出才对。
+/// 改为「创建时即按记住的尺寸建窗」，从根上消除这个首帧尺寸未就绪问题。
+fn saved_sticky_size(app: &tauri::AppHandle) -> Option<(f64, f64)> {
+    let file = app.path().app_config_dir().ok()?.join(app.filename());
+    let data = std::fs::read_to_string(file).ok()?;
+    let state = serde_json::from_str::<serde_json::Value>(&data)
+        .ok()?
+        .get(STICKY_WINDOW)?
+        .clone();
+    let w = state.get("width")?.as_u64()? as f64;
+    let h = state.get("height")?.as_u64()? as f64;
+    if w < 1.0 || h < 1.0 {
+        return None;
+    }
+    let scale = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(1.0);
+    // 存的是物理像素（便签无标题栏，inner==outer）；builder.inner_size 用逻辑点。
+    Some((w / scale, h / scale))
+}
+
 /// 取回或创建便签窗口。窗口常驻：首次创建后只显隐、不销毁，保证弹出瞬时（见性能考量）。
 /// 无边框 + 置顶 + 初始隐藏 + 不进任务栏，呈现为一张浮在桌面之上的轻窗口。
 fn ensure_sticky_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
         return Ok(win);
     }
+    // 首次创建即以「上次记住的尺寸」建窗（缺省 400×560），确保随后 position_sticky 读到正确宽高、
+    // 角落定位首帧就贴合（详见 saved_sticky_size）。尺寸仍由 window-state 插件跟踪保存，跨会话持久。
+    let (iw, ih) = saved_sticky_size(app).unwrap_or((400.0, 560.0));
     let win = tauri::WebviewWindowBuilder::new(
         app,
         STICKY_WINDOW,
         tauri::WebviewUrl::App("index.html".into()),
     )
     .title("MarkLock 便签")
-    .inner_size(400.0, 560.0)
+    .inner_size(iw, ih)
     .min_inner_size(300.0, 220.0)
     .always_on_top(true)
     .decorations(false)
@@ -1228,31 +1271,45 @@ fn position_sticky_near(win: &tauri::WebviewWindow, anchor: TrayAnchor) {
 
 /// 弹出便签（按「热角角落」设置定位）：取回/创建 → 定位 → 显示，并通知便签视图刷新内容
 /// （隐藏期间文件可能被外部改动、库可能被锁定，显示时重新读取最稳妥）。
-/// 热角 / 命令唤出均不夺焦：热角靠 AUTOHIDE「移开即隐藏」收起，命令由调用方自行处理焦点。
+/// 热角 / 命令唤出均不夺焦：热角靠 AUTOHIDE「未交互即隐藏」（移出保持区或未获焦 3 秒即收起）兜底，
+/// 命令由调用方自行处理焦点。
 fn show_sticky(app: &tauri::AppHandle) -> tauri::Result<()> {
-    show_sticky_at(app, None, false)
+    // 前端「弹出便签」命令路径：不夺焦、不武装「未交互即隐藏」（显式唤出应停留到用户主动收起）。
+    show_sticky_at(app, None, false, false)
 }
 
 /// 弹出便签的统一实现：anchor 为 Some 时就近摆在托盘/菜单栏图标旁（托盘路径），
 /// 为 None 时按角落设置定位（热角 / 前端命令路径）。
 /// focus=true 时显示后立即夺焦（托盘弹出路径）：让便签成为当前焦点窗口，之后点别处即触发
 /// 前端 `blur` → 自动保存并收起；否则「焦点原本在别的 App」时便签从未获焦、blur 不触发而收不掉。
-fn show_sticky_at(app: &tauri::AppHandle, anchor: Option<TrayAnchor>, focus: bool) -> tauri::Result<()> {
-    let win = ensure_sticky_window(app)?;
-    match anchor {
-        Some(a) => position_sticky_near(&win, a),
-        None => position_sticky(app, &win),
-    }
-    win.show()?;
-    // 托盘弹出：夺焦以便「点别处 → blur → 收起」生效；热角/命令不夺焦，避免打断当前工作。
-    if focus {
-        let _ = win.set_focus();
-    }
-    // 解除「移开即隐藏」（托盘/命令唤出是显式操作，应停留到用户主动收起）；
-    // 热角路径会在调用本函数后重新武装。
-    hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
-    let _ = win.emit("marklock://sticky-show", ());
-    Ok(())
+/// arm_autohide=true 时（仅热角路径）在显示后武装「未交互即隐藏」。
+///
+/// 关键：窗口的创建 / 尺寸恢复（window-state 的 restore_state）/ 定位 / 显示一律切到主线程串行执行。
+/// 热角在后台轮询线程触发，若在该线程直接调 restore_state，会在持有插件 cache 全局锁的同时阻塞
+/// 等待主线程处理 set_size；而隐藏便签首次弹出时主线程的 on_window_ready 又对同一把 cache 锁加锁
+/// → 跨线程「锁 + IPC」交叉等待，界面卡死。放到主线程串行执行即从根上消除该死锁。
+fn show_sticky_at(
+    app: &tauri::AppHandle,
+    anchor: Option<TrayAnchor>,
+    focus: bool,
+    arm_autohide: bool,
+) -> tauri::Result<()> {
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let Ok(win) = ensure_sticky_window(&handle) else { return };
+        match anchor {
+            Some(a) => position_sticky_near(&win, a),
+            None => position_sticky(&handle, &win),
+        }
+        let _ = win.show();
+        // 托盘弹出：夺焦以便「点别处 → blur → 收起」生效；热角/命令不夺焦，避免打断当前工作。
+        if focus {
+            let _ = win.set_focus();
+        }
+        // 热角路径武装「未交互即隐藏」；托盘/命令唤出是显式操作，解除武装（停留到用户主动收起）。
+        hotcorner::AUTOHIDE.store(arm_autohide, Ordering::SeqCst);
+        let _ = win.emit("marklock://sticky-show", ());
+    })
 }
 
 /// 前端 / 托盘 / 热角共用的「弹出便签」命令。
@@ -2194,6 +2251,20 @@ pub fn run() {
             Some(vec!["--autostarted"]),
         ))
         .plugin(tauri_plugin_dialog::init())
+        // 记住窗口上次关闭时的大小（主窗另记位置），下次启动恢复。
+        // 仅取 POSITION|SIZE：不纳入 VISIBLE，以免与「开机自启隐藏主窗」逻辑相互打架。
+        // 便签窗仍纳入跟踪以记住「大小」，但 skip_initial_state 关掉插件的自动恢复
+        // （其 on_window_ready 异步恢复会与「每次弹出按角落重算位置」冲突）；尺寸改由
+        // ensure_sticky_window 经 saved_sticky_size 直读状态文件，在创建窗口时即套用。
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::SIZE,
+                )
+                .skip_initial_state(STICKY_WINDOW)
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             unlock,
             unlock_vault,
