@@ -281,6 +281,11 @@ greet('MarkLock');`
       return this.$t(`settings.general.${key}${isMac ? 'Mac' : ''}`)
     },
 
+    /** 设置托盘某个鼠标键的动作（左/右键各一项，另一键保持不变）。 */
+    setTrayAction(key: 'trayLeftAction' | 'trayRightAction', action: 'menu' | 'main' | 'sticky') {
+      this.store.updateSettings({ [key]: action } as Pick<Settings, 'trayLeftAction' | 'trayRightAction'>)
+    },
+
     // ---------- 界面元素勾选清单 ----------
     /** 切换一个显示/隐藏项 */
     toggleArea(key: AreaKey) {
@@ -676,6 +681,24 @@ greet('MarkLock');`
               <div class="info"><div class="t">{{ trayT('closeToTray') }}</div><div class="d">{{ trayT('closeToTrayD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.closeToTray }" @click="toggleCloseToTray"></div>
             </div>
+            <div class="row" data-key="trayLeftAction" data-keywords="托盘 菜单栏 左键 点击 主界面 便签 菜单 tray left click main window sticky menu">
+              <div class="info"><div class="t">{{ $t('settings.general.trayLeftBtn') }}</div><div class="d">{{ trayT('trayLeftBtnD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.trayLeftAction === 'main' }" @click="setTrayAction('trayLeftAction', 'main')">{{ $t('settings.general.trayActMain') }}</span>
+                <span :class="{ on: store.settings.trayLeftAction === 'sticky' }" @click="setTrayAction('trayLeftAction', 'sticky')">{{ $t('settings.general.trayActSticky') }}</span>
+                <span :class="{ on: store.settings.trayLeftAction === 'menu' }" @click="setTrayAction('trayLeftAction', 'menu')">{{ $t('settings.general.trayActMenu') }}</span>
+              </div>
+            </div>
+            <div class="row" data-key="trayRightAction" data-keywords="托盘 菜单栏 右键 点击 主界面 便签 菜单 tray right click main window sticky menu">
+              <div class="info"><div class="t">{{ $t('settings.general.trayRightBtn') }}</div><div class="d">{{ trayT('trayRightBtnD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.trayRightAction === 'main' }" @click="setTrayAction('trayRightAction', 'main')">{{ $t('settings.general.trayActMain') }}</span>
+                <span :class="{ on: store.settings.trayRightAction === 'sticky' }" @click="setTrayAction('trayRightAction', 'sticky')">{{ $t('settings.general.trayActSticky') }}</span>
+                <span :class="{ on: store.settings.trayRightAction === 'menu' }" @click="setTrayAction('trayRightAction', 'menu')">{{ $t('settings.general.trayActMenu') }}</span>
+              </div>
+            </div>
+            <!-- 左右键都不弹菜单时，托盘菜单（全部锁定 / 退出）就再也打不开，给一行常驻提醒与找回路径 -->
+            <div v-if="store.trayMenuUnreachable" class="tray-warn">{{ trayT('trayNoMenuWarn') }}</div>
           </div>
           <div class="group">
             <div class="group-head">{{ $t('settings.general.gFiles') }}</div>
@@ -1089,14 +1112,6 @@ greet('MarkLock');`
                 <a-button v-if="store.settings.stickyNote" size="small" danger @click="clearStickyFile">{{ $t('settings.sticky.clear') }}</a-button>
               </div>
             </div>
-            <div class="row" data-key="trayStickyButton" data-keywords="托盘 菜单栏 点击 不弹出 左键 右键 便签 弹出 菜单 tray click off left right sticky menu">
-              <div class="info"><div class="t">{{ trayT('traySticky') }}</div><div class="d">{{ trayT('trayStickyD') }}</div></div>
-              <div class="seg">
-                <span :class="{ on: store.settings.trayStickyButton === 'off' }" @click="store.updateSettings({ trayStickyButton: 'off' })">{{ $t('settings.general.trayOff') }}</span>
-                <span :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
-                <span :class="{ on: store.settings.trayStickyButton === 'right' }" @click="store.updateSettings({ trayStickyButton: 'right' })">{{ $t('settings.general.trayRight') }}</span>
-              </div>
-            </div>
           </div>
           <div class="group">
             <div class="group-head">{{ $t('settings.sticky.gCorner') }}</div>
@@ -1363,6 +1378,14 @@ greet('MarkLock');`
 .row .info { flex: 1; min-width: 0; }
 .row .info .t { font-size: 14px; }
 .row .info .d { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+/* 托盘左右键都不弹菜单时的组内提醒（独占一行，跟 .row 左对齐同宽） */
+.tray-warn {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border-2);
+  font-size: 12px; color: var(--red);
+  background: var(--red-bg);
+}
+.tray-warn:last-child { border-bottom: none; }
 /* 「界面元素」：左侧小标题 + 右侧一行一项的勾选清单（勾选框与名称同色，说明作次要信息跟在后面） */
 .area { display: flex; align-items: flex-start; gap: 10px; border-bottom: 1px solid var(--border-2); }
 .area-label {

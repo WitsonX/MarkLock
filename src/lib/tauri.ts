@@ -188,9 +188,11 @@ export function setTrayEnabled(enabled: boolean) {
   return invoke<void>('set_tray_enabled', { enabled })
 }
 
-/** 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端并即时生效。 */
-export function setTrayStickyButton(button: 'off' | 'left' | 'right') {
-  return invoke<void>('set_tray_sticky_button', { button })
+/** 同步托盘左/右键点击的动作（menu=弹菜单 / main=显示主界面 / sticky=弹出便签）到后端并即时生效。
+ *  字面量与 `Settings.trayLeftAction` / `trayRightAction`（stores/vault 的 TrayClickAction）一致，
+ *  桥接层不反向依赖 store，此处只写内联联合类型。 */
+export function setTrayClickActions(left: 'menu' | 'main' | 'sticky', right: 'menu' | 'main' | 'sticky') {
+  return invoke<void>('set_tray_click_actions', { left, right })
 }
 
 /** 开关「登录时自动启动」：写入 / 移除系统级启动项（macOS LaunchAgent、Windows HKCU Run、Linux XDG autostart）。

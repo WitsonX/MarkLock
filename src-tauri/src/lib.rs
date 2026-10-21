@@ -565,10 +565,16 @@ const TRAY_ID: &str = "main-tray";
 /// 而非走「未保存确认 → 退出」；为 false 时保持原退出语义。由前端经 set_close_to_tray 同步。
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
-/// 托盘点击弹出便签的鼠标键：0=不弹出 1=左键（右键弹菜单，默认）2=右键（左键弹菜单）。
-/// 前端经 set_tray_sticky_button 同步；install_tray 初值与此一致。
-/// macOS 左键经 apply_tray_click_mode 关闭默认弹菜单后同样派发 Click（Down），三键跨平台可选。
-static TRAY_STICKY_BUTTON: AtomicU8 = AtomicU8::new(1);
+/// 托盘鼠标键的动作：0=弹出菜单、1=显示主界面、2=弹出便签。左右键各绑一个动作，
+/// 前端经 set_tray_click_actions 同步；两枚静态初值即平台默认（macOS 左键弹便签、
+/// 其它平台左键显示主界面，右键一律弹菜单），与前端 DEFAULT_SETTINGS 的平台分支保持一致。
+/// 非「弹出菜单」的键由 apply_tray_click_mode 关掉系统自动弹菜单，改由本托盘的 Click（Down）派发处理；
+/// macOS 左键同样能派发 Click，故三档动作跨平台皆可选。
+const TRAY_ACT_MENU: u8 = 0;
+const TRAY_ACT_MAIN: u8 = 1;
+const TRAY_ACT_STICKY: u8 = 2;
+static TRAY_LEFT_ACTION: AtomicU8 = AtomicU8::new(if cfg!(target_os = "macos") { TRAY_ACT_STICKY } else { TRAY_ACT_MAIN });
+static TRAY_RIGHT_ACTION: AtomicU8 = AtomicU8::new(TRAY_ACT_MENU);
 
 /// 便签弹出角落：0=屏幕左上 1=屏幕左下 2=屏幕右上 3=屏幕右下。前端经 set_sticky_corner 同步设置项；
 /// 托盘左键唤出与（阶段二）热角定位共用，避免 Rust 侧回读前端 localStorage。
@@ -874,17 +880,20 @@ fn has_backup(path: String) -> bool {
     crypto::io::latest_backup_exists(Path::new(&path))
 }
 
-/// 同步「托盘点击弹出便签」的鼠标键（'off' | 'left' | 'right'）到后端，并即时应用到现有托盘。
+/// 托盘键动作字符串 → 编码（'menu' | 'main' | 'sticky'，未知值按弹菜单兜底，语义最保守）。
+fn tray_action_code(s: &str) -> u8 {
+    match s {
+        "main" => TRAY_ACT_MAIN,
+        "sticky" => TRAY_ACT_STICKY,
+        _ => TRAY_ACT_MENU,
+    }
+}
+
+/// 同步托盘左/右键动作到后端，并即时应用到现有托盘。
 #[tauri::command]
-fn set_tray_sticky_button(app: tauri::AppHandle, button: String) {
-    TRAY_STICKY_BUTTON.store(
-        match button.as_str() {
-            "left" => 1,
-            "right" => 2,
-            _ => 0,
-        },
-        Ordering::SeqCst,
-    );
+fn set_tray_click_actions(app: tauri::AppHandle, left: String, right: String) {
+    TRAY_LEFT_ACTION.store(tray_action_code(&left), Ordering::SeqCst);
+    TRAY_RIGHT_ACTION.store(tray_action_code(&right), Ordering::SeqCst);
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         apply_tray_click_mode(&tray);
     }
@@ -994,22 +1003,30 @@ fn build_tray_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu
         .build()
 }
 
+/// 唤回主窗口：取消最小化 / 隐藏到托盘后显示并聚焦。托盘菜单项与左右键动作共用。
+fn reveal_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = win.unminimize();
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 /// 创建系统托盘（全平台）：显示主窗口 / 全部锁定 / 退出。菜单文案随 MENU_LANG 取中/英，
 /// 语言切换时由 set_native_menu_lang 按 TRAY_ID 取回托盘重建。图标用默认窗口图标。
 /// 托盘菜单事件由本托盘的 on_menu_event 就地处理（区别于 macOS 原生菜单的全局 handler）。
 /// setup 与 set_tray_enabled 共用本函数，保证「销毁后重建」与首次创建行为一致。
 ///
-/// 按 TRAY_STICKY_BUTTON 应用托盘左右键的「弹菜单 / 派发 Click」行为：
-/// 便签键不弹菜单（改由 Click 事件弹便签），其余情况（含 off）两键均弹菜单。
+/// 按 TRAY_LEFT_ACTION / TRAY_RIGHT_ACTION 应用托盘左右键的「弹菜单 / 派发 Click」行为：
+/// 只有绑「弹出菜单」的键才让系统弹菜单，绑主界面 / 便签的键不弹菜单（改由 Click 事件自行处理）。
 /// 右键菜单开关 Tauri 未封装，取内层 `tray_icon::TrayIcon` 设置（`with_inner_tray_icon`）。
 fn apply_tray_click_mode(tray: &tauri::tray::TrayIcon<tauri::Wry>) {
-    let mode = TRAY_STICKY_BUTTON.load(Ordering::SeqCst); // 0=off 1=left 2=right
-    let sticky_left = mode == 1;
-    let sticky_right = mode == 2;
-    // 左键：sticky 在左 → 不弹菜单（发 Click）；否则（含 off）弹菜单。
-    let _ = tray.set_show_menu_on_left_click(!sticky_left);
-    // 右键：sticky 在右 → 不弹菜单（发 Click）；否则（含 off）弹菜单。
-    let _ = tray.with_inner_tray_icon(move |inner| inner.set_show_menu_on_right_click(!sticky_right));
+    let left = TRAY_LEFT_ACTION.load(Ordering::SeqCst);
+    let right = TRAY_RIGHT_ACTION.load(Ordering::SeqCst);
+    // 左键：仅当绑「弹出菜单」时交给系统弹菜单，其余动作靠 Click 事件分派。
+    let _ = tray.set_show_menu_on_left_click(left == TRAY_ACT_MENU);
+    // 右键：同理（Tauri 未暴露右键菜单开关，走内层 tray_icon）。
+    let _ = tray.with_inner_tray_icon(move |inner| inner.set_show_menu_on_right_click(right == TRAY_ACT_MENU));
 }
 
 fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
@@ -1025,50 +1042,53 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
         .tooltip(WINDOW_TITLE)
         .icon(icon)
         // 左右键「弹菜单 / 派发 Click」由 apply_tray_click_mode 统一应用（构建后调用）；
-        // 这里先给左键一个与当前设置一致的初值（sticky 在左=mode1 时左键不弹菜单），避免短暂窗口期行为不符。
-        .show_menu_on_left_click(TRAY_STICKY_BUTTON.load(Ordering::SeqCst) != 1)
+        // 这里先给左键一个与当前设置一致的初值（左键不绑菜单时不弹），避免短暂窗口期行为不符。
+        .show_menu_on_left_click(TRAY_LEFT_ACTION.load(Ordering::SeqCst) == TRAY_ACT_MENU)
         .on_tray_icon_event(|tray, event| {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
             if let TrayIconEvent::Click { button, button_state, position, rect, .. } = event {
-                let mode = TRAY_STICKY_BUTTON.load(Ordering::SeqCst); // 0=off 1=left 2=right
                 // 在 Down 触发而非 Up：macOS 上 NSStatusItem 对左键的 mouseUp 常被系统菜单/跟踪环吞掉，
-                // 导致「左键弹便签」收不到 Up 而不生效；Down 是两键在菜单逻辑之前都会派发的首个事件，更可靠。
+                // 导致「左键执行动作」收不到 Up 而不生效；Down 是两键在菜单逻辑之前都会派发的首个事件，更可靠。
                 if button_state != MouseButtonState::Down {
                     return;
                 }
-                // 命中「便签键」（由 TRAY_STICKY_BUTTON 决定）才弹便签；off 或另一键交给系统弹菜单。
-                let hit = match button {
-                    MouseButton::Left => mode == 1,
-                    MouseButton::Right => mode == 2,
-                    _ => false,
+                // 当前键绑定的动作（中键等未开放自定义的键一律按「弹菜单」兜底）。
+                let action = match button {
+                    MouseButton::Left => TRAY_LEFT_ACTION.load(Ordering::SeqCst),
+                    MouseButton::Right => TRAY_RIGHT_ACTION.load(Ordering::SeqCst),
+                    _ => TRAY_ACT_MENU,
                 };
-                if hit {
-                    let app = tray.app_handle();
-                    // 就近摆在图标旁：rect 有效则用图标矩形（转物理像素；OS 上报的托盘 rect 实际为物理，
-                    // scale 仅对 Logical 回退有意义），退化（尺寸 0）时回退到光标位置。
-                    let scale = app
-                        .primary_monitor()
-                        .ok()
-                        .flatten()
-                        .map(|m| m.scale_factor())
-                        .unwrap_or(1.0);
-                    let rp: tauri::PhysicalPosition<i32> = rect.position.to_physical(scale);
-                    let rs: tauri::PhysicalSize<u32> = rect.size.to_physical(scale);
-                    let anchor = if rs.width > 0 && rs.height > 0 {
-                        TrayAnchor { x: rp.x as f64, y: rp.y as f64, w: rs.width as f64, h: rs.height as f64 }
-                    } else {
-                        TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
-                    };
-                    let _ = show_sticky_at(app, Some(anchor), true, false);
-                } else {
-                    // 菜单键（另一键或 off 双键）：系统即将弹菜单；若便签正显示，先立即隐藏
+                let app = tray.app_handle();
+                match action {
+                    // 显示主界面：与菜单「打开 MarkLock」同语义（唤回隐藏/最小化态并聚焦）。
+                    TRAY_ACT_MAIN => reveal_main_window(app),
+                    TRAY_ACT_STICKY => {
+                        // 就近摆在图标旁：rect 有效则用图标矩形（转物理像素；OS 上报的托盘 rect 实际为物理，
+                        // scale 仅对 Logical 回退有意义），退化（尺寸 0）时回退到光标位置。
+                        let scale = app
+                            .primary_monitor()
+                            .ok()
+                            .flatten()
+                            .map(|m| m.scale_factor())
+                            .unwrap_or(1.0);
+                        let rp: tauri::PhysicalPosition<i32> = rect.position.to_physical(scale);
+                        let rs: tauri::PhysicalSize<u32> = rect.size.to_physical(scale);
+                        let anchor = if rs.width > 0 && rs.height > 0 {
+                            TrayAnchor { x: rp.x as f64, y: rp.y as f64, w: rs.width as f64, h: rs.height as f64 }
+                        } else {
+                            TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
+                        };
+                        let _ = show_sticky_at(app, Some(anchor), true, false);
+                    }
+                    // 菜单键：系统即将弹菜单；若便签正显示，先立即隐藏
                     // 避免叠在菜单上（菜单在托盘图标处弹出，与便签锚点重合），
                     // 未保存内容由前端 marklock://sticky-hide 监听做静默落盘。
-                    let app = tray.app_handle();
-                    if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = win.emit("marklock://sticky-hide", ());
-                            let _ = win.hide();
+                    _ => {
+                        if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
+                            if win.is_visible().unwrap_or(false) {
+                                let _ = win.emit("marklock://sticky-hide", ());
+                                let _ = win.hide();
+                            }
                         }
                     }
                 }
@@ -1078,13 +1098,7 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
             let app = tray.app_handle();
             match event.id().0.as_str() {
                 // 显示主窗口：取消最小化 + 显示 + 聚焦（隐藏到托盘后从托盘唤回）。
-                "tray:show" => {
-                    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
-                        let _ = win.unminimize();
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
-                }
+                "tray:show" => reveal_main_window(app),
                 // 偏好设置：唤回主窗口并跳转设置页（通用 pane；区别于便签 ⚙ 的 open-settings→sticky tab）。
                 "tray:settings" => {
                     if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
@@ -1101,8 +1115,13 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
                     }
                 }
                 // 退出：复用现有「未保存确认 → quit_app」流程（发 close-requested 而非直接 exit）。
+                // 若窗口此前已最小化到托盘（隐藏/最小化），必须先唤回并聚焦，
+                // 否则前端弹出的「退出前保存」确认框会落在不可见窗口上，用户看不到。
                 "tray:quit" => {
                     if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                        let _ = win.unminimize();
+                        let _ = win.show();
+                        let _ = win.set_focus();
                         let _ = win.emit("marklock://close-requested", ());
                     }
                 }
@@ -2389,7 +2408,7 @@ pub fn run() {
             restore_backup,
             has_backup,
             set_tray_enabled,
-            set_tray_sticky_button,
+            set_tray_click_actions,
             set_auto_start,
             show_sticky_note,
             hide_sticky_note,
@@ -2532,8 +2551,12 @@ pub fn run() {
         .on_menu_event(|app, event| {
             let id = event.id().0.clone();
             // 接管自定义退出项（⌘Q / 菜单退出）：不直接退出，通知前端判断未保存并确认后 quit_app。
+            // 若窗口已隐藏到托盘，先唤回再发事件，否则未保存确认框落在不可见窗口上。
             if id == "quit-app" {
                 if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
                     let _ = win.emit("marklock://close-requested", ());
                 }
                 return;
@@ -2598,6 +2621,9 @@ pub fn run() {
                 }
                 api.prevent_exit();
                 if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+                    let _ = win.unminimize();
+                    let _ = win.show();
+                    let _ = win.set_focus();
                     let _ = win.emit("marklock://close-requested", ());
                 }
             }

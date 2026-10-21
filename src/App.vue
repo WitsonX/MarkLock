@@ -77,8 +77,8 @@ export default defineComponent({
       tauri.setBackupEnabled(settings.value.backupEnabled).catch(() => {})
       // 同步「显示托盘图标」开关到后端（运行时创建/移除托盘）；启动时先同步一次。
       tauri.setTrayEnabled(settings.value.showTrayIcon).catch(() => {})
-      // 同步「托盘点击弹出便签」的鼠标键到后端（决定左/右键弹便签、另一键弹菜单）；启动时先同步一次。
-      tauri.setTrayStickyButton(settings.value.trayStickyButton).catch(() => {})
+      // 同步托盘左/右键点击的动作到后端（各自决定弹菜单 / 唤回主界面 / 弹便签）；启动时先同步一次。
+      tauri.setTrayClickActions(settings.value.trayLeftAction, settings.value.trayRightAction).catch(() => {})
       // 开机自启：仅在设置为开启时重写系统启动项，避免默认（关闭）用户每次启动都去碰注册表 / plist。
       // 主要兼容“用户先前开启后又从系统设置里手动删除启动项”的少见场景，确保 UI 与系统状态最终一致。
       if (settings.value.autoStart) tauri.setAutoStart(true).catch(() => {})
@@ -202,8 +202,12 @@ export default defineComponent({
     'settings.showTrayIcon'(enabled: boolean) {
       tauri.setTrayEnabled(enabled).catch(() => {})
     },
-    'settings.trayStickyButton'(button: 'off' | 'left' | 'right') {
-      tauri.setTrayStickyButton(button).catch(() => {})
+    // 左右键属同一项设置，任一变更都整对下发（后端两个动作一起应用）。
+    'settings.trayLeftAction'(action: 'menu' | 'main' | 'sticky') {
+      tauri.setTrayClickActions(action, this.settings.trayRightAction).catch(() => {})
+    },
+    'settings.trayRightAction'(action: 'menu' | 'main' | 'sticky') {
+      tauri.setTrayClickActions(this.settings.trayLeftAction, action).catch(() => {})
     },
     'settings.hotCorner.corner'(corner: 'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight') {
       tauri.setStickyCorner(corner).catch(() => {})

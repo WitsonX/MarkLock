@@ -2048,8 +2048,8 @@ export default defineComponent({
             disabled: !f || f.isNew,
             run: () => this.store.toggleFavoriteFile(p),
           },
-          // 「设为便携便签」仅在存在唤出方式时提供（热角启用 或 托盘点击未关），否则设了也弹不出
-          ...(this.store.settings.hotCorner.enabled || this.store.settings.trayStickyButton !== 'off'
+          // 「设为便携便签」仅在存在唤出方式时提供（热角启用 或 托盘有任一键绑弹便签），否则设了也弹不出
+          ...(this.store.settings.hotCorner.enabled || this.store.trayStickyEnabled
             ? [
                 {
                   kind: 'item' as const,
@@ -5630,6 +5630,8 @@ ${bodyHtml}
             <div class="m-sep"></div>
             <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>{{ $t('menu.prefs') }}</div>
             <div class="m-item" @click="openAbout(); moreOpen = false"><span class="ck"></span>{{ $t('menu.about') }}</div>
+            <div class="m-sep"></div>
+            <div class="m-item" @click="handleAppClose(); moreOpen = false"><span class="ck"></span>{{ $t('menu.quit') }}</div>
           </div>
         </span>
       </div>

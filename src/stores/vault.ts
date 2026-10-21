@@ -6,7 +6,11 @@
 
 import { defineStore } from 'pinia'
 import * as tauri from '../lib/tauri'
+import { isMac } from '../lib/platform'
 import type { CustomSkin } from '../lib/skins'
+
+/** 托盘鼠标键的动作：menu=弹出菜单、main=显示主界面、sticky=弹出便签 */
+export type TrayClickAction = 'menu' | 'main' | 'sticky'
 
 /** 一个已登记的库（元信息，不含密钥） */
 export interface VaultInfo {
@@ -167,9 +171,11 @@ export interface Settings {
   showTrayIcon: boolean
   /** 点击关闭按钮时是否隐藏到系统托盘（后台常驻）而非退出应用 */
   closeToTray: boolean
-  /** 托盘点击弹出便携便签的鼠标键：off=不弹出、left=左键弹（右键弹菜单）、right=右键弹（左键弹菜单）。
-   * 三键跨平台可用（macOS 经 set_show_menu_on_left_click 关闭默认弹菜单，左键同样派发 Click）。 */
-  trayStickyButton: 'off' | 'left' | 'right'
+  /** 托盘左/右键点击的动作：menu=弹菜单、main=显示主界面、sticky=弹出便签（两键各自独立可配）。
+   *  非 menu 的键由 Rust 关掉系统自动弹菜单、改走 Click 事件，因此两键都可不弹菜单（见设置页提醒）。
+   *  默认按平台：macOS 左键弹便签、其余平台左键显示主界面，右键均弹菜单。 */
+  trayLeftAction: TrayClickAction
+  trayRightAction: TrayClickAction
   /** 剪贴板定时清除（秒） */
   clipboardClearSecs: number
   /** 窗口最小化时锁定 */
@@ -255,8 +261,10 @@ export const DEFAULT_SETTINGS: Settings = {
   showTrayIcon: true,
   // 关闭最小化到托盘默认开启：点关闭按钮隐藏到托盘（后台常驻）而非退出应用
   closeToTray: true,
-  // 托盘弹便签默认绑左键（右键弹菜单），跨平台一致
-  trayStickyButton: 'left',
+  // 托盘左右键默认：macOS 左键直接弹便签（菜单栏图标的主要用途），Windows/Linux 左键唤回主界面；
+  // 右键两平台都保持传统「弹出菜单」，避免用户找不到锁定 / 退出入口。
+  trayLeftAction: isMac ? 'sticky' : 'main',
+  trayRightAction: 'menu',
   clipboardClearSecs: 30,
   lockOnMinimize: true,
   lockOnSleep: true,
@@ -310,12 +318,34 @@ function loadRecent(): VaultInfo[] {
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
-    const merged = raw
-      ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) }
-      : { ...DEFAULT_SETTINGS }
+    const saved = raw ? JSON.parse(raw) : {}
+    const merged = { ...DEFAULT_SETTINGS, ...saved }
     // 浅合并会让旧版本存档整体覆盖 hotCorner（缺少新字段），这里对其深合并补齐默认值
     merged.hotCorner = { ...DEFAULT_SETTINGS.hotCorner, ...(merged.hotCorner || {}) }
-    return merged
+    // 旧版「托盘弹便签鼠标键」(off|left|right) → 新版左/右键动作的一次性迁移：
+    // 只在存档里有旧键、且尚未写入新键时换算，迁移后删除旧键，不影响用户之后的自定义。
+    const legacy = saved.trayStickyButton
+    if (legacy) {
+      if (!saved.trayLeftAction && !saved.trayRightAction) {
+        if (legacy === 'right') {
+          // 旧版「右键弹便签」是主动选择，原样保留（左键当时弹菜单）
+          merged.trayLeftAction = 'menu'
+          merged.trayRightAction = 'sticky'
+        } else if (legacy === 'off') {
+          // 旧版「不弹出」= 两键都只弹菜单
+          merged.trayLeftAction = 'menu'
+          merged.trayRightAction = 'menu'
+        } else {
+          // 旧版默认值就是 left（弹便签），存档里见到它绝大多数意味着「从没改过」而非主动选择，
+          // 因此直接落到新版平台默认（macOS 左键弹便签、其余平台左键显示主界面）；
+          // 真想在 Windows 上左键弹便签的用户在设置里重选一次即可。
+          merged.trayLeftAction = DEFAULT_SETTINGS.trayLeftAction
+          merged.trayRightAction = DEFAULT_SETTINGS.trayRightAction
+        }
+      }
+      delete merged.trayStickyButton
+    }
+    return merged as Settings
   } catch {
     return { ...DEFAULT_SETTINGS }
   }
@@ -461,6 +491,14 @@ export const useVaultStore = defineStore('vault', {
   }),
 
   getters: {
+    /** 托盘是否至少有「一键」绑定弹便签（供「设为便携便签」入口的存在性判断与设置页提醒） */
+    trayStickyEnabled(state): boolean {
+      return state.settings.trayLeftAction === 'sticky' || state.settings.trayRightAction === 'sticky'
+    },
+    /** 托盘左右键是否都不弹菜单（此时「全部锁定 / 退出」菜单项无法从托盘打开） */
+    trayMenuUnreachable(state): boolean {
+      return state.settings.trayLeftAction !== 'menu' && state.settings.trayRightAction !== 'menu'
+    },
     /** 已解锁的库列表（目录库 + 单文件库；单文件 .mdl 不是「库」，不在此列出） */
     unlockedVaults(state): VaultInfo[] {
       return state.recent.filter((v) => v.unlocked && (v.isDir || v.isFileVault))
