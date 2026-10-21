@@ -50,6 +50,41 @@
   --hl-attr: #953800;
   --hl-built: #953800;
   --hl-meta: #57606a;
+
+  /* ---------- 皮肤令牌 ----------
+     以下三组是「换肤面」：皮肤（html[data-skin]）只需覆盖颜色，
+     默认值一律引用上面的基础令牌，所以皮肤改 --bg 就连带改了预览代码块底色。
+     高级用户可在自定义皮肤里单独覆盖任意一项（见设置 → 外观 → 自定义皮肤）。 */
+
+  /* 选区底色（编辑器 / 全局），半透明以叠在任意底色上 */
+  --selection: rgba(22, 119, 255, 0.18);
+  --selection-focus: rgba(22, 119, 255, 0.30);
+
+  /* Markdown 预览版式配色 */
+  --md-link: var(--primary);
+  --md-heading-border: var(--border);
+  --md-code-bg: var(--hover);
+  --md-code-text: var(--text);
+  --md-pre-bg: var(--bg);
+  --md-pre-border: var(--border);
+  --md-quote-border: var(--primary);
+  --md-quote-bg: var(--hover);
+  --md-quote-text: var(--text-2);
+  --md-table-border: var(--border);
+  --md-th-bg: var(--bg);
+  --md-stripe: var(--hover);
+  --md-hr: var(--border);
+
+  /* 编辑器（CodeMirror）源码语法配色：Markdown 结构元素单独给令牌，
+     代码 token 复用上面的 --hl-*，与预览代码块同源 */
+  --cm-heading: var(--hl-title);
+  --cm-strong: var(--text);
+  --cm-em: var(--text);
+  --cm-link: var(--primary);
+  --cm-url: var(--text-3);
+  --cm-code: var(--hl-string);
+  --cm-quote: var(--text-3);
+  --cm-marker: var(--text-4); /* #、*、>、``` 等标记符号 */
 }
 
 /* ---------- 深色主题（Ant Design 暗色系，与亮色结构一一对应） ---------- */
@@ -85,6 +120,10 @@ html[data-theme='dark'] {
   --hl-attr: #ffa657;
   --hl-built: #ffa657;
   --hl-meta: #8b949e;
+
+  /* 深色底下选区要更亮才看得见，其余皮肤令牌沿用 :root 的派生关系 */
+  --selection: rgba(22, 119, 255, 0.28);
+  --selection-focus: rgba(22, 119, 255, 0.42);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -101,7 +140,7 @@ body {
   overflow: hidden;
 }
 
-::selection { background: rgba(22, 119, 255, 0.18); }
+::selection { background: var(--selection); }
 
 /* 细滚动条 */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -199,14 +238,14 @@ html[data-platform='macos'] .titlebar {
 /* 字体族与行间距由预览设置驱动（见 --preview-font-family / --preview-line-height，在 EditorView 内联到 .md），未设置时回退默认：跟随界面字体、1.7 行距 */
 .md { padding: 20px 26px 40px; line-height: var(--preview-line-height, 1.7); font-family: var(--preview-font-family, inherit); color: var(--text); font-size: calc(var(--editor-font-size, 14px) + 1px); }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
-.md h1 { font-size: 1.8em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
-.md h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: 0.3em; }
+.md h1 { font-size: 1.8em; border-bottom: 1px solid var(--md-heading-border); padding-bottom: 0.3em; }
+.md h2 { font-size: 1.5em; border-bottom: 1px solid var(--md-heading-border); padding-bottom: 0.3em; }
 .md h3 { font-size: 1.25em; }
 .md p { margin: 0.8em 0; }
-.md a { color: var(--primary); text-decoration: none; }
+.md a { color: var(--md-link); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
-.md code { background: var(--hover); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: var(--mono); }
-.md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; position: relative; }
+.md code { background: var(--md-code-bg); color: var(--md-code-text); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: var(--mono); }
+.md pre { background: var(--md-pre-bg); border: 1px solid var(--md-pre-border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; position: relative; }
 .md pre code { background: transparent; padding: 0; font-size: 0.85em; tab-size: var(--code-indent, 4); }
 /* 预览代码块右上角复制按钮：悬停代码块时显现，复制成功后 .copied 切换为对勾 + 主色 */
 .code-copy-btn {
@@ -262,7 +301,7 @@ html[data-platform='macos'] .titlebar {
 .md .codespan-wrap:hover > .code-copy-btn,
 .codespan-wrap > .code-copy-btn:focus-visible { opacity: 1; }
 .md .codespan-wrap > .code-copy-btn.copied { border-color: var(--green); }
-.md blockquote { border-left: 4px solid var(--primary); padding: 0.5em 1em; margin: 1em 0; background: var(--hover); color: var(--text-2); }
+.md blockquote { border-left: 4px solid var(--md-quote-border); padding: 0.5em 1em; margin: 1em 0; background: var(--md-quote-bg); color: var(--md-quote-text); }
 .md ul, .md ol { padding-left: 2em; margin: 0.8em 0; }
 .md li { margin: 0.3em 0; }
 /* 任务清单复选框：替换浏览器默认的灰色禁用态，对齐 Ant Design Checkbox */
@@ -293,11 +332,11 @@ html[data-theme='dark'] .md input[type="checkbox"]:checked {
 }
 .md li:has(> input[type="checkbox"]:checked) > p { color: var(--text-3); text-decoration: line-through; }
 .md table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-.md th, .md td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
-.md th { background: var(--bg); font-weight: 600; }
-.md tr:nth-child(even) { background: var(--hover); }
+.md th, .md td { border: 1px solid var(--md-table-border); padding: 8px 12px; text-align: left; }
+.md th { background: var(--md-th-bg); font-weight: 600; }
+.md tr:nth-child(even) { background: var(--md-stripe); }
 .md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
-.md hr { border: none; border-top: 1px solid var(--border); margin: 2em 0; }
+.md hr { border: none; border-top: 1px solid var(--md-hr); margin: 2em 0; }
 
 /* ---------- highlight.js token 颜色（随主题切换，替代官方主题包） ---------- */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }

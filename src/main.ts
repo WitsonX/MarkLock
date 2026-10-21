@@ -9,6 +9,7 @@ import { t } from './locales'
 import { isMac } from './lib/platform'
 import { dismissSplash } from './lib/splash'
 import './styles/global.css'
+import './styles/skins.css'
 
 // 平台标记：macOS 用隐藏原生标题栏方案（红绿灯叠加到自绘工具条），
 // Windows/Linux 保留系统原生标题栏，自绘工具条左侧无需预留红绿灯空间。

@@ -100,9 +100,10 @@ wrapped_dek ──▶ DEK（32B）
 ```
 src/
 ├── main.ts                  # 入口：挂 Vue + AntD + Pinia + v-tip 指令；平台检测写 data-platform
-├── App.vue                  # 主题解析（light/dark/system + matchMedia 跟随系统）
+├── App.vue                  # 主题与皮肤解析（light/dark/system + matchMedia 跟随系统；data-skin + 自定义皮肤 CSS 注入）
 ├── router/index.ts          # hash 五屏路由（便签窗加载同一前端，路由到 /sticky）
-├── styles/global.css        # 全局样式（CSS 变量，含深色主题变量）
+├── styles/global.css        # 全局样式（CSS 变量，含深色主题变量与预览/编辑器派生 token）
+├── styles/skins.css         # 内置配色皮肤（蓝灰 Nord / 夜蓝 Nocturne / 卡布奇诺 Catppuccin / 纸色 Sepia / 日光 Solarized / 暖棕 Gruvbox，每套各含亮暗两版）
 ├── components/
 │   ├── TitleBar.vue         # 标题栏（macOS 红绿灯叠加 + 标题）
 │   ├── VaultTreeNode.vue    # 库树递归节点（文件夹展开/折叠 + 悬停新建/重命名/删除）
@@ -118,6 +119,7 @@ src/
 │   ├── tooltip.ts           # 全局 v-tip 指令（单例气泡，不受滚动裁剪）
 │   ├── preview.ts           # marked 共享渲染层（代码高亮/复制/任务清单/图片 asset）
 │   ├── fonts.ts             # 预览字体内置清单（跨平台回退栈）
+│   ├── skins.ts             # 皮肤注册表：内置清单、token 分组、自定义皮肤 CSS 生成/注入/实时预览
 │   ├── locales/             # 中英文语言包 + 语言切换
 │   ├── sticky.ts            # 便签窗判定 + 按文件类型读写便签正文
 │   ├── splash.ts            # 启动屏淡出控制
@@ -134,7 +136,7 @@ src/
 
 ### 4.2 主界面（EditorView）信息架构
 
-- 侧边栏五分组（可拖拽排序、可各自显隐）：**打开的文件 → 打开的库 → 收藏 → 最近打开 → 工作目录**
+- 侧边栏六分组（可拖拽排序、可各自显隐，显隐开关在设置 → 外观 → 界面元素）：**打开的文件 → 加密库 → 工作目录 → 收藏 → 最近打开 → 大纲**
 - 顶部页签栏（可拖拽排序，独立开关）
 - 编辑模式：编辑 / 分屏 / 预览（marked 渲染，任务清单复选框可交互）
 - 「更多」菜单：新建文件 / 新建加密库 / 复制到加密库 / 偏好设置 / 侧边栏显隐开关
@@ -234,10 +236,14 @@ src/
 - **外部文件/目录拖入**：`getCurrentWebviewWindow().onDragDropEvent()`，仅在右侧主面板触发（侧边栏区域留给排序）；路由：明文→打开、目录→挂工作目录、`.mdl`/`.mdlb`→登记+解锁。
 - **列表排序**：纯鼠标事件（HTML5 draggable 在 WKWebView 失效），移动超阈值判定拖动，elementFromPoint 命中目标。
 
-### 6.3 主题
+### 6.3 主题与皮肤
 
-- 三档 `light` / `dark` / `system`；`system` 用 `matchMedia('(prefers-color-scheme: dark)')` 跟随系统。
-- 深色变量覆盖在 `global.css` 的 `html[data-theme='dark']`；各组件硬编码浅色已替换为 CSS 变量。
+- **主题（明暗）**：三档 `light` / `dark` / `system`；`system` 用 `matchMedia('(prefers-color-scheme: dark)')` 跟随系统。深色变量覆盖在 `global.css` 的 `html[data-theme='dark']`；各组件硬编码浅色已替换为 CSS 变量。
+- **皮肤（配色）**：与明暗**正交**，落在 `html[data-skin]`。`skins.css` 里每套皮肤都写成 `[data-skin='x'][data-theme='light']` 与 `…[data-theme='dark']` 两份，避免亮色值渗进深色。
+- **派生 token**：`:root` 把预览用的 `--md-*`、编辑器用的 `--cm-*` 默认值声明成 `var(--bg)` 之类的基础变量，皮肤只改基础色就能自动级联到预览与 CodeMirror；需要微调时可直接覆盖派生 token。
+- **自定义皮肤**：存于 `settings.customSkins`（localStorage），由 `lib/skins.ts` 的 `buildCustomSkinCss` 生成与内置同形状的 CSS，用 `textContent` 写入 `<style id="marklock-custom-skins">`（不走 innerHTML，变量名与值均经白名单/`;{}<>` 过滤）。编辑时用独立的 `<style id="marklock-skin-preview">` + `data-skin="__preview__"` 做所见即所得，取消 / 保存 / 组件卸载时清理。
+- **CodeMirror**：不再引 `oneDark`，改用 `EditorView.theme(spec, { dark })` 直接读 CSS 变量，语法色由 `HighlightStyle.define` 走 `--cm-*` / `--hl-*`，`defaultHighlightStyle` 仅作 fallback。
+- **导出 HTML**：`buildStandaloneHtml` 通过 `cssVar()` 读运行时变量，导出件跟随当前皮肤。
 
 ### 6.4 搜索
 

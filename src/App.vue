@@ -14,6 +14,7 @@ import { isMac } from './lib/platform'
 import { isStickyWindow } from './lib/sticky'
 import { LINKS } from './lib/links'
 import { runUpdateCheck, shouldAutoCheck, markChecked } from './lib/update'
+import { applyCustomSkins } from './lib/skins'
 import AboutCard from './components/AboutCard.vue'
 import { aboutDialogOpen, openAboutDialog } from './lib/aboutDialog'
 
@@ -48,11 +49,14 @@ export default defineComponent({
         .catch(() => {})
     }
 
-    // 把「跟随系统」解析成实际的 light/dark，写入 <html data-theme>
+    // 把「跟随系统」解析成实际的 light/dark，写入 <html data-theme>；
+    // 皮肤与明暗正交，另写 <html data-skin>，自定义皮肤的 CSS 需先注入才有对应规则。
     const apply = () => {
       const t = settings.value.theme
       const dark = t === 'dark' || (t === 'system' && !!(getSysMedia()?.matches))
       document.documentElement.dataset.theme = dark ? 'dark' : 'light'
+      applyCustomSkins(settings.value.customSkins)
+      document.documentElement.dataset.skin = settings.value.skin || 'default'
     }
     apply()
     getSysMedia()?.addEventListener('change', apply)
@@ -178,6 +182,12 @@ export default defineComponent({
   },
   watch: {
     'settings.theme'() {
+      this.apply()
+    },
+    'settings.skin'() {
+      this.apply()
+    },
+    'settings.customSkins'() {
       this.apply()
     },
     'settings.language'() {

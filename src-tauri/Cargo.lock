@@ -2131,6 +2131,8 @@ dependencies = [
  "aes-gcm",
  "argon2",
  "base64 0.22.1",
+ "objc2",
+ "objc2-app-kit",
  "rand 0.8.8",
  "serde",
  "serde_json",

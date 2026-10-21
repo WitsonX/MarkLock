@@ -100,9 +100,10 @@ Single-file vault (.mdlb)                    Single file (.mdl)
 ```
 src/
 ├── main.ts                  # Entry: mounts Vue + AntD + Pinia + the v-tip directive; writes data-platform for platform detection
-├── App.vue                  # Theme resolution (light/dark/system + matchMedia follows the system)
+├── App.vue                  # Theme & skin resolution (light/dark/system + matchMedia follows the system; data-skin + custom-skin CSS injection)
 ├── router/index.ts          # Hash-based five-screen routing (the sticky window loads the same frontend, routed to /sticky)
-├── styles/global.css        # Global styles (CSS variables, incl. dark-theme variables)
+├── styles/global.css        # Global styles (CSS variables, incl. dark-theme variables and derived preview/editor tokens)
+├── styles/skins.css         # Built-in color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox — each shipping a light and a dark variant)
 ├── components/
 │   ├── TitleBar.vue         # Title bar (macOS traffic-light overlay + title)
 │   ├── VaultTreeNode.vue    # Recursive vault-tree node (folder expand/collapse + hover create/rename/delete)
@@ -118,6 +119,7 @@ src/
 │   ├── tooltip.ts           # Global v-tip directive (singleton bubble, never clipped by scrolling)
 │   ├── preview.ts           # Shared marked render layer (code highlight/copy/task lists/image assets)
 │   ├── fonts.ts             # Built-in preview font catalog (cross-platform fallback stacks)
+│   ├── skins.ts             # Skin registry: built-in list, token groups, custom-skin CSS generation/injection/live preview
 │   ├── locales/             # zh/en language packs + switching
 │   ├── sticky.ts            # Sticky-window detection + note body read/write by file type
 │   ├── splash.ts            # Splash screen fade-out control
@@ -134,7 +136,7 @@ src/
 
 ### 4.2 Main interface (EditorView) information architecture
 
-- Five sidebar groups (drag-reorderable, each individually toggleable): **Open Files → Open Vaults → Starred → Recent → Working Directory**
+- Six sidebar groups (drag-reorderable, each individually toggleable; the toggles live in Settings → Appearance → Interface elements): **Open Files → Encrypted Vaults → Working Directory → Favorites → Recently Opened → Outline**
 - Top tab bar (drag-reorderable, independent toggle)
 - Editing modes: edit / split / preview (rendered by marked; task-list checkboxes are interactive)
 - "More" menu: new file / new encrypted vault / copy to vault / preferences / sidebar visibility toggles
@@ -234,10 +236,14 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **Files/directories dragged in from outside**: `getCurrentWebviewWindow().onDragDropEvent()`, triggered only on the right-hand main panel (the sidebar area is reserved for reordering); routing: plaintext → open, directory → attach as working directory, `.mdl`/`.mdlb` → register + unlock.
 - **List reordering**: pure mouse events (HTML5 draggable doesn't work in WKWebView) — movement past a threshold counts as a drag, `elementFromPoint` hits the target.
 
-### 6.3 Theme
+### 6.3 Theme & skins
 
-- Three settings: `light` / `dark` / `system`; `system` follows the OS via `matchMedia('(prefers-color-scheme: dark)')`.
-- Dark-theme variables override under `html[data-theme='dark']` in `global.css`; hardcoded light colors in components were replaced with CSS variables.
+- **Theme (light/dark)**: three settings `light` / `dark` / `system`; `system` follows the OS via `matchMedia('(prefers-color-scheme: dark)')`. Dark-theme variables override under `html[data-theme='dark']` in `global.css`; hardcoded light colors in components were replaced with CSS variables.
+- **Skins (palette)**: **orthogonal** to light/dark, carried by `html[data-skin]`. Every skin in `skins.css` is written twice — `[data-skin='x'][data-theme='light']` and `…[data-theme='dark']` — so light values can never leak into dark mode.
+- **Derived tokens**: `:root` declares the preview tokens `--md-*` and editor tokens `--cm-*` in terms of base variables (`var(--bg)` and friends), so a skin that only overrides base colors cascades into the preview and CodeMirror automatically; fine-tuning can override a derived token directly.
+- **Custom skins**: stored in `settings.customSkins` (localStorage). `buildCustomSkinCss` in `lib/skins.ts` emits CSS with the same selector shape as the built-ins and writes it via `textContent` into `<style id="marklock-custom-skins">` (never innerHTML; variable names and values pass an allow-list / `;{}<>` filter). Editing uses a separate `<style id="marklock-skin-preview">` plus `data-skin="__preview__"` for WYSIWYG, cleaned up on cancel / save / unmount.
+- **CodeMirror**: `oneDark` is gone; the theme is now `EditorView.theme(spec, { dark })` reading CSS variables, with syntax colors from `HighlightStyle.define` over `--cm-*` / `--hl-*` and `defaultHighlightStyle` kept only as a fallback.
+- **HTML export**: `buildStandaloneHtml` reads runtime variables through `cssVar()`, so exports follow the active skin.
 
 ### 6.4 Search
 

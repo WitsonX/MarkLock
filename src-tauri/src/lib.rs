@@ -106,10 +106,15 @@ mod hotcorner {
     /// 停留触发时长（毫秒）。
     pub static DWELL_MS: AtomicU32 = AtomicU32::new(500);
     /// 「未交互即隐藏」是否已武装：仅热角唤出时置真（托盘/命令唤出是显式操作，不自动收起）。
-    /// 保持可见需同时满足「光标在窗口或触发角落」与「窗口已获焦」——热角唤出不夺焦，
-    /// 若用户未在宽限期内点入便签，到时自动收起；用户点进后（pointerdown → sticky_engage）
+    /// 保持可见只需满足其一：「光标在便签窗口内」或「窗口已获焦」——热角唤出不夺焦，
+    /// 鼠标悬停进便签即算保持；停在触发角落不算（弹出后仍留角落视为未交互）。
+    /// 两者都不满足才计时收起。用户点进后（pointerdown → sticky_engage）
     /// 或隐藏窗口时置假，此后交回 blur/Esc 收起逻辑。
     pub static AUTOHIDE: AtomicBool = AtomicBool::new(false);
+    /// 热角唤出的「弹出即起 2 秒硬倒计时」阶段：弹出瞬间开始计时，期间不看 focused
+    /// （Windows 上 show() 可能自动激活窗口，否则会被假焦点永久撑住），
+    /// 鼠标进入便签即退出本阶段、回到常规「保持区或聚焦」语义；超时收起时置假。
+    pub static POPUP_PENDING: AtomicBool = AtomicBool::new(false);
     /// 角落判定边长：光标距左边缘与上/下边缘均小于该值（像素/点）视为进入角落。
     const EDGE: f64 = 10.0;
     /// 轮询间隔（毫秒）。0.5s 级停留手势无需更高精度，也几乎不占 CPU。
@@ -117,10 +122,10 @@ mod hotcorner {
     /// 便签命中判定的外扩边距（像素/点）：把窗口矩形略微放大，
     /// 覆盖窗口 margin 与角落触发区之间的缝隙，避免鼠标停在缝里被误判为「已移开」。
     const HIT_PAD: f64 = 20.0;
-    /// 「未交互」到自动收起的宽限（毫秒）：光标移出保持区域 或 便签未获得焦点时开始计时，
-    /// 任一条件回到满足即重置。3 秒既足够让用户从当前 App 点入便签（含 macOS first-mouse
-    /// 首击即夺焦），也避免忘在角落的便签长期遮挡桌面。
-    const LEAVE_GRACE_MS: u128 = 3000;
+    /// 「未交互」到自动收起的宽限（毫秒）：仅当「光标离开便签窗口」且「窗口未获焦」同时成立
+    /// 才开始计时，任一条件回到满足即重置。2 秒足够让用户从当前 App 点入便签（含 macOS
+    /// first-mouse 首击即夺焦），也让停在触发角落不前的鼠标不会把便签长期撑在桌面上。
+    const LEAVE_GRACE_MS: u128 = 2000;
 
     #[cfg(target_os = "macos")]
     mod cursor {
@@ -270,27 +275,32 @@ mod hotcorner {
 
                 // ---- 未交互即隐藏（仅热角武装时生效）----
                 if AUTOHIDE.load(Ordering::SeqCst) {
-                    // 「保持区域」= 便签窗口（外扩 HIT_PAD）∪ 触发角落。
-                    let in_hold_zone = {
-                        let in_window = cursor
-                            .and_then(|(cx, cy)| {
-                                sticky_bounds_logical(&app, scale).map(|(x, y, w, h)| {
-                                    cx >= x - HIT_PAD
-                                        && cx <= x + w + HIT_PAD
-                                        && cy >= y - HIT_PAD
-                                        && cy <= y + h + HIT_PAD
-                                })
+                    // 「保持区域」= 便签窗口（外扩 HIT_PAD）。触发角落不算：弹出后鼠标仍停在
+                    // 角落视为未交互，宽限到点照样收起。
+                    let in_hold_zone = cursor
+                        .and_then(|(cx, cy)| {
+                            sticky_bounds_logical(&app, scale).map(|(x, y, w, h)| {
+                                cx >= x - HIT_PAD
+                                    && cx <= x + w + HIT_PAD
+                                    && cy >= y - HIT_PAD
+                                    && cy <= y + h + HIT_PAD
                             })
-                            .unwrap_or(false);
-                        in_window || in_corner
-                    };
+                        })
+                        .unwrap_or(false);
                     // 「窗口已获焦」= 用户已把光标移入并点击（macOS accept_first_mouse 让首击即夺焦）
-                    // 或 Windows 上系统自动激活；未获焦即视作「未交互」，与「移出保持区」共同触发计时。
+                    // 或 Windows 上系统自动激活。
                     let focused = app
                         .get_webview_window(super::STICKY_WINDOW)
                         .and_then(|w| w.is_focused().ok())
                         .unwrap_or(false);
-                    if in_hold_zone && focused {
+                    // 两阶段判定：弹出初期（POPUP_PENDING）忽略焦点只看鼠标——移出触发角不算保持，
+                    // 鼠标 2 秒内没进便签就收起；进入过便签后回到「保持区或聚焦」或语义，
+                    // 鼠标移出便签且未聚焦，2 秒后收起。
+                    let pending = POPUP_PENDING.load(Ordering::SeqCst);
+                    if in_hold_zone {
+                        POPUP_PENDING.store(false, Ordering::SeqCst);
+                        left_at = None;
+                    } else if focused && !pending {
                         left_at = None;
                     } else {
                         let now = Instant::now();
@@ -299,6 +309,9 @@ mod hotcorner {
                                 if let Some(w) = app.get_webview_window(super::STICKY_WINDOW) {
                                     let _ = w.hide();
                                 }
+                                // 收起即解除武装：下次弹出由唤出路径重新置位，避免隐藏后反复空转计时。
+                                AUTOHIDE.store(false, Ordering::SeqCst);
+                                POPUP_PENDING.store(false, Ordering::SeqCst);
                                 left_at = None;
                             }
                             Some(_) => {}
@@ -1182,7 +1195,78 @@ fn ensure_sticky_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewW
     Ok(win)
 }
 
-/// 按当前角落设置把便签窗口摆到主显示器对应角落（逻辑坐标，避开菜单栏 / 任务栏）。
+/// 主屏「系统保留区」四边内缩（逻辑点）：macOS 菜单栏 + Dock、Windows 任务栏（无论贴哪条边）。
+/// 注意：Tauri 的 `available_monitors` 在两端其实都等价于 `monitors`（tao 上报的是整屏几何，
+/// 不剔除系统保留区），必须自行问系统：macOS 用 `NSScreen.visibleFrame`，Windows 用 `SPI_GETWORKAREA`。
+/// Dock / 任务栏自动隐藏时工作区等于整屏，内缩自然为 0；取不到时返回全 0（等价旧行为）。
+/// macOS 分支要求在主线程调用（AppKit 非线程安全），唯一调用方 position_sticky 经
+/// show_sticky_at 已切到主线程，满足此前提。
+fn system_insets(mon: &tauri::Monitor, scale: f64) -> (f64, f64, f64, f64) {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSScreen;
+        // macOS 分支直接拿 AppKit 逻辑点，不需整屏尺寸与 scale。
+        let _ = (&mon, scale);
+        // MainThreadMarker 编译期固化「仅主线程可用」前提；非主线程时返回全 0 兜底。
+        let Some(mtm) = MainThreadMarker::new() else {
+            return (0.0, 0.0, 0.0, 0.0);
+        };
+        // screens 首项即带菜单栏的主屏，与 tauri primary_monitor（CGDisplay::main）一致。
+        let screens = NSScreen::screens(mtm);
+        let Some(screen) = screens.firstObject() else {
+            return (0.0, 0.0, 0.0, 0.0);
+        };
+        let full = screen.frame();
+        let vis = screen.visibleFrame();
+        // NSRect 为左下角原点：visibleFrame.origin.y 即 Dock 在底部占用的高度。
+        let left = (vis.origin.x - full.origin.x).max(0.0);
+        let bottom = (vis.origin.y - full.origin.y).max(0.0);
+        let right = (full.origin.x + full.size.width - vis.origin.x - vis.size.width).max(0.0);
+        let top = (full.origin.y + full.size.height - vis.origin.y - vis.size.height).max(0.0);
+        // frame/visibleFrame 本身就是逻辑点，无需再除 scale。
+        (left, top, right, bottom)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct WinRect {
+            left: i32,
+            top: i32,
+            right: i32,
+            bottom: i32,
+        }
+        extern "system" {
+            fn SystemParametersInfoW(
+                ui_action: u32,
+                ui_param: u32,
+                pv_param: *mut WinRect,
+                f_win_ini: u32,
+            ) -> i32;
+        }
+        const SPI_GETWORKAREA: u32 = 48;
+        let mut work = WinRect::default();
+        let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work, 0) };
+        if ok == 0 {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        // 主屏坐标原点即 (0,0)，work 左上角即左/上内缩；返回物理像素，除 scale 换算逻辑点。
+        (
+            work.left.max(0) as f64 / scale,
+            work.top.max(0) as f64 / scale,
+            (mon.size().width as i32 - work.right).max(0) as f64 / scale,
+            (mon.size().height as i32 - work.bottom).max(0) as f64 / scale,
+        )
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (mon, scale);
+        (0.0, 0.0, 0.0, 0.0)
+    }
+}
+
+/// 按当前角落设置把便签窗口摆到主显示器对应角落（逻辑坐标，避开菜单栏 / 任务栏 / Dock）。
 fn position_sticky(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
     let Ok(Some(mon)) = app.primary_monitor() else { return };
     let scale = mon.scale_factor();
@@ -1190,21 +1274,32 @@ fn position_sticky(app: &tauri::AppHandle, win: &tauri::WebviewWindow) {
     let screen_h = mon.size().height as f64 / scale;
     // 取窗口当前真实尺寸（逻辑像素）：便签可被用户拖动 resize，不能用创建时的固定值，
     // 否则靠边 / 靠下角定位会按旧尺寸算 top / left，实际边越过屏幕沿导致出界。
-    let (w, h) = win
+    let (w0, h0) = win
         .inner_size()
         .map(|s| (s.width as f64 / scale, s.height as f64 / scale))
         .unwrap_or((400.0, 560.0));
     const MARGIN: f64 = 16.0;
+    // 系统保留区内缩：下角必须抬到 Dock / 底部任务栏之上——二者的窗口层级都高于应用置顶窗，
+    // 只留 MARGIN 会被盖住底边；上角用菜单栏实际高度取代原硬编码 24。
+    let (inset_l, inset_t, inset_r, inset_b) = system_insets(&mon, scale);
+    // 便签比工作区还大（记住的尺寸来自更大的屏 / 用户手动拉得很高）时，任何角落定位都避不开
+    // Dock / 任务栏：弹出时先收缩到工作区内再按角落摆位（window-state 会保存修正后的尺寸）。
+    let avail_w = (screen_w - inset_l - inset_r - MARGIN * 2.0).max(1.0);
+    let avail_h = (screen_h - inset_t - inset_b - MARGIN * 2.0).max(1.0);
+    let (w, h) = (w0.min(avail_w), h0.min(avail_h));
+    if w0 - w > 0.5 || h0 - h > 0.5 {
+        let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
+    }
     let y = if sticky_corner_is_bottom() {
-        (screen_h - h - MARGIN).max(MARGIN)
+        (screen_h - inset_b - h - MARGIN).max(inset_t + MARGIN)
     } else {
         // 上沿：下移避开 macOS 菜单栏 / Windows 顶部任务栏
-        MARGIN + 24.0
+        inset_t + MARGIN
     };
     let x = if sticky_corner_is_right() {
-        (screen_w - w - MARGIN).max(MARGIN)
+        (screen_w - inset_r - w - MARGIN).max(inset_l + MARGIN)
     } else {
-        MARGIN
+        inset_l + MARGIN
     };
     let _ = win.set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)));
 }
@@ -1306,8 +1401,10 @@ fn show_sticky_at(
         if focus {
             let _ = win.set_focus();
         }
-        // 热角路径武装「未交互即隐藏」；托盘/命令唤出是显式操作，解除武装（停留到用户主动收起）。
+        // 热角路径武装「未交互即隐藏」，并从弹出瞬间起算 2 秒硬倒计时；
+        // 托盘/命令唤出是显式操作，解除武装（停留到用户主动收起）。
         hotcorner::AUTOHIDE.store(arm_autohide, Ordering::SeqCst);
+        hotcorner::POPUP_PENDING.store(arm_autohide, Ordering::SeqCst);
         let _ = win.emit("marklock://sticky-show", ());
     })
 }
@@ -1322,6 +1419,7 @@ fn show_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
 #[tauri::command]
 fn hide_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
     hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
+    hotcorner::POPUP_PENDING.store(false, Ordering::SeqCst);
     if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
         win.hide()?;
     }
@@ -1355,6 +1453,7 @@ fn open_settings(app: tauri::AppHandle) {
 #[tauri::command]
 fn sticky_engage() {
     hotcorner::AUTOHIDE.store(false, Ordering::SeqCst);
+    hotcorner::POPUP_PENDING.store(false, Ordering::SeqCst);
 }
 
 /// 同步便签弹出角落（'topLeft' | 'bottomLeft' | 'topRight' | 'bottomRight'）到后端，供定位与热角共用。

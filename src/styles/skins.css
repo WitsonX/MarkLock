@@ -1,0 +1,403 @@
+/* ============================================================
+   内置皮肤（配色方案）
+   与外观模式正交：html[data-theme] 定明暗基线，html[data-skin] 换配色。
+   这里只覆盖颜色令牌，选择器一律带 [data-theme] 以避免浅色值漏进深色模式；
+   未列出的令牌继承 global.css 的基线（含 --md-* / --cm-* 的派生关系）。
+   自定义皮肤由 src/lib/skins.ts 生成同构选择器注入，规则见该文件。
+   ============================================================ */
+
+/* ---------- 蓝灰 Nord（北欧极地） ---------- */
+html[data-skin='nord'][data-theme='light'] {
+  --primary: #5e81ac;
+  --primary-hover: #6f92bd;
+  --primary-active: #4c6d99;
+  --primary-bg: #e6eef8;
+
+  --text: #2e3440;
+  --text-2: #4c566a;
+  --text-3: #7b88a1;
+  --text-4: #a3adc0;
+
+  --border: #d8dee9;
+  --border-2: #e5e9f0;
+  --border-pop: #c7d0dd;
+  --bg: #eceff4;
+  --editor-bg: #fbfcfe;
+  --panel: #ffffff;
+  --hover: #e5e9f0;
+  --sidebar-bg: #e5e9f0;
+
+  --selection: rgba(94, 129, 172, 0.18);
+  --selection-focus: rgba(94, 129, 172, 0.32);
+
+  --hl-comment: #8291a8;
+  --hl-keyword: #bf616a;
+  --hl-string: #628a52;
+  --hl-number: #d08770;
+  --hl-title: #b48ead;
+  --hl-attr: #3f7f8f;
+  --hl-built: #3f7f8f;
+  --hl-meta: #8291a8;
+}
+html[data-skin='nord'][data-theme='dark'] {
+  --primary: #88c0d0;
+  --primary-hover: #97ccdb;
+  --primary-active: #6fb0c2;
+  --primary-bg: #2b3d45;
+
+  --text: #eceff4;
+  --text-2: #c6cfdd;
+  --text-3: #8a95a8;
+  --text-4: #5f6a7d;
+
+  --border: #434c5e;
+  --border-2: #3b4453;
+  --border-pop: #4c566a;
+  --bg: #2e3440;
+  --editor-bg: #2e3440;
+  --panel: #3b4252;
+  --hover: #434c5e;
+  --sidebar-bg: #272c36;
+
+  --selection: rgba(136, 192, 208, 0.26);
+  --selection-focus: rgba(136, 192, 208, 0.40);
+
+  --hl-comment: #616e88;
+  --hl-keyword: #81a1c1;
+  --hl-string: #a3be8c;
+  --hl-number: #b48ead;
+  --hl-title: #88c0d0;
+  --hl-attr: #8fbcbb;
+  --hl-built: #8fbcbb;
+  --hl-meta: #616e88;
+}
+
+/* ---------- 夜蓝 Nocturne ---------- */
+html[data-skin='nocturne'][data-theme='light'] {
+  --primary: #3465d4;
+  --primary-hover: #4d7ce4;
+  --primary-active: #2a54b8;
+  --primary-bg: #dbe6fb;
+
+  --text: #343b58;
+  --text-2: #4f5778;
+  --text-3: #7980a0;
+  --text-4: #a8aeb8;
+
+  --border: #c2c8d4;
+  --border-2: #d2d7e0;
+  --border-pop: #adb6c6;
+  --bg: #dfe2e8;
+  --editor-bg: #fafbfd;
+  --panel: #f3f5f9;
+  --hover: #d3d8e2;
+  --sidebar-bg: #d5d9e2;
+
+  --selection: rgba(52, 101, 212, 0.18);
+  --selection-focus: rgba(52, 101, 212, 0.32);
+
+  --hl-comment: #9699a3;
+  --hl-keyword: #945e80;
+  --hl-string: #485e30;
+  --hl-number: #b15c00;
+  --hl-title: #3465d4;
+  --hl-attr: #8c6c3e;
+  --hl-built: #007197;
+  --hl-meta: #565a6e;
+}
+html[data-skin='nocturne'][data-theme='dark'] {
+  --primary: #7aa2f7;
+  --primary-hover: #8fb5ff;
+  --primary-active: #5d8ae0;
+  --primary-bg: #1f2c52;
+
+  --text: #c0caf5;
+  --text-2: #a9b1d6;
+  --text-3: #787c99;
+  --text-4: #4e5173;
+
+  --border: #2f344d;
+  --border-2: #24283b;
+  --border-pop: #3b4261;
+  --bg: #1a1b26;
+  --editor-bg: #1a1b26;
+  --panel: #16161e;
+  --hover: #292e42;
+  --sidebar-bg: #131420;
+
+  --selection: rgba(122, 162, 247, 0.28);
+  --selection-focus: rgba(122, 162, 247, 0.42);
+
+  --hl-comment: #565f89;
+  --hl-keyword: #bb9af7;
+  --hl-string: #9ece6a;
+  --hl-number: #ff9e64;
+  --hl-title: #7aa2f7;
+  --hl-attr: #e0af68;
+  --hl-built: #7dcfff;
+  --hl-meta: #f7768e;
+}
+
+/* ---------- 卡布奇诺 Catppuccin（浅色 Latte / 深色 Mocha） ---------- */
+html[data-skin='catppuccin'][data-theme='light'] {
+  --primary: #8839ef;
+  --primary-hover: #9c58f5;
+  --primary-active: #6f25c9;
+  --primary-bg: #ece0fb;
+
+  --text: #4c4f69;
+  --text-2: #5c5f77;
+  --text-3: #7c7f93;
+  --text-4: #9ca0b0;
+
+  --border: #ccd0da;
+  --border-2: #dbe0ea;
+  --border-pop: #bcc0cc;
+  --bg: #e6e9ef;
+  --editor-bg: #fbfbfe;
+  --panel: #eff1f5;
+  --hover: #dce0e8;
+  --sidebar-bg: #dfe2e9;
+
+  --selection: rgba(136, 57, 239, 0.18);
+  --selection-focus: rgba(136, 57, 239, 0.32);
+
+  --hl-comment: #7c7f93;
+  --hl-keyword: #8839ef;
+  --hl-string: #40a02b;
+  --hl-number: #fe640b;
+  --hl-title: #1e66f5;
+  --hl-attr: #df8e1d;
+  --hl-built: #04a5e5;
+  --hl-meta: #dd7878;
+}
+html[data-skin='catppuccin'][data-theme='dark'] {
+  --primary: #cba6f7;
+  --primary-hover: #d8b6ff;
+  --primary-active: #b383e0;
+  --primary-bg: #392c57;
+
+  --text: #cdd6f4;
+  --text-2: #bac2de;
+  --text-3: #a6adc8;
+  --text-4: #6c7086;
+
+  --border: #313244;
+  --border-2: #28283d;
+  --border-pop: #45475a;
+  --bg: #181825;
+  --editor-bg: #1e1e2e;
+  --panel: #1e1e2e;
+  --hover: #313244;
+  --sidebar-bg: #11111b;
+
+  --selection: rgba(203, 166, 247, 0.26);
+  --selection-focus: rgba(203, 166, 247, 0.40);
+
+  --hl-comment: #6c7086;
+  --hl-keyword: #cba6f7;
+  --hl-string: #a6e3a1;
+  --hl-number: #fab387;
+  --hl-title: #89b4fa;
+  --hl-attr: #f9e2af;
+  --hl-built: #89dceb;
+  --hl-meta: #f2cdcd;
+}
+
+/* ---------- 纸色 Sepia（护眼暖调） ---------- */
+html[data-skin='sepia'][data-theme='light'] {
+  --primary: #a9662a;
+  --primary-hover: #c07c3a;
+  --primary-active: #8a5220;
+  --primary-bg: #f6e8d5;
+
+  --text: #43341f;
+  --text-2: #6b5a42;
+  --text-3: #96846a;
+  --text-4: #b9ab93;
+
+  --border: #e2d5bb;
+  --border-2: #ece1cc;
+  --border-pop: #d3c3a4;
+  --bg: #f4ecdb;
+  --editor-bg: #fbf6ea;
+  --panel: #fdf9f0;
+  --hover: #efe5d0;
+  --sidebar-bg: #ece1ca;
+
+  --selection: rgba(169, 102, 42, 0.18);
+  --selection-focus: rgba(169, 102, 42, 0.32);
+
+  --hl-comment: #9a8b73;
+  --hl-keyword: #a3382c;
+  --hl-string: #4c6b2f;
+  --hl-number: #8a5a00;
+  --hl-title: #7a4ea8;
+  --hl-attr: #95561c;
+  --hl-built: #95561c;
+  --hl-meta: #8a7b63;
+}
+html[data-skin='sepia'][data-theme='dark'] {
+  --primary: #d99a4e;
+  --primary-hover: #e5ac66;
+  --primary-active: #c07f33;
+  --primary-bg: #3a2c18;
+
+  --text: #ece0c8;
+  --text-2: #c3b49a;
+  --text-3: #8f8168;
+  --text-4: #6b6049;
+
+  --border: #3d3427;
+  --border-2: #332c20;
+  --border-pop: #4e432f;
+  --bg: #211c15;
+  --editor-bg: #211c15;
+  --panel: #2a241b;
+  --hover: #352e22;
+  --sidebar-bg: #1b1710;
+
+  --selection: rgba(217, 154, 78, 0.26);
+  --selection-focus: rgba(217, 154, 78, 0.40);
+
+  --hl-comment: #9c8f77;
+  --hl-keyword: #e88b7d;
+  --hl-string: #d6c48c;
+  --hl-number: #e0a76b;
+  --hl-title: #c3a6d8;
+  --hl-attr: #d9a05b;
+  --hl-built: #d9a05b;
+  --hl-meta: #9c8f77;
+}
+
+/* ---------- 日光 Solarized（Solarized Light / Dark） ---------- */
+html[data-skin='solarized'][data-theme='light'] {
+  --primary: #268bd2;
+  --primary-hover: #3d9adf;
+  --primary-active: #1d6fa8;
+  --primary-bg: #e3eef5;
+
+  --text: #586e75;
+  --text-2: #657b83;
+  --text-3: #839496;
+  --text-4: #a8b3b4;
+
+  --border: #e0d9c3;
+  --border-2: #ebe4cf;
+  --border-pop: #cfc7ad;
+  --bg: #eee8d5;
+  --editor-bg: #fdf6e3;
+  --panel: #fdf6e3;
+  --hover: #e7e0ca;
+  --sidebar-bg: #e7e0ca;
+
+  --selection: rgba(38, 139, 210, 0.18);
+  --selection-focus: rgba(38, 139, 210, 0.32);
+
+  --hl-comment: #93a1a1;
+  --hl-keyword: #859900;
+  --hl-string: #2aa198;
+  --hl-number: #d33682;
+  --hl-title: #268bd2;
+  --hl-attr: #b58900;
+  --hl-built: #b58900;
+  --hl-meta: #6c71c4;
+}
+html[data-skin='solarized'][data-theme='dark'] {
+  --primary: #3d9ee0;
+  --primary-hover: #58aee8;
+  --primary-active: #268bd2;
+  --primary-bg: #0a3547;
+
+  --text: #93a1a1;
+  --text-2: #839496;
+  --text-3: #657b83;
+  --text-4: #4c6269;
+
+  --border: #0f414e;
+  --border-2: #0a3541;
+  --border-pop: #1a5566;
+  --bg: #002b36;
+  --editor-bg: #002b36;
+  --panel: #073642;
+  --hover: #0d414e;
+  --sidebar-bg: #00232c;
+
+  --selection: rgba(38, 139, 210, 0.30);
+  --selection-focus: rgba(38, 139, 210, 0.44);
+
+  --hl-comment: #586e75;
+  --hl-keyword: #859900;
+  --hl-string: #2aa198;
+  --hl-number: #d33682;
+  --hl-title: #268bd2;
+  --hl-attr: #b58900;
+  --hl-built: #b58900;
+  --hl-meta: #6c71c4;
+}
+
+/* ---------- 暖棕 Gruvbox（Gruvbox Dark 系） ---------- */
+html[data-skin='gruvbox'][data-theme='light'] {
+  --primary: #076678;
+  --primary-hover: #0a7d94;
+  --primary-active: #05525f;
+  --primary-bg: #dceaec;
+
+  --text: #3c3836;
+  --text-2: #5c564f;
+  --text-3: #7c6f64;
+  --text-4: #a89984;
+
+  --border: #d5c4a1;
+  --border-2: #e0d2b4;
+  --border-pop: #c2b08c;
+  --bg: #f2e5bc;
+  --editor-bg: #fbf1c7;
+  --panel: #fbf1c7;
+  --hover: #ebdbb2;
+  --sidebar-bg: #ede0b8;
+
+  --selection: rgba(7, 102, 120, 0.16);
+  --selection-focus: rgba(7, 102, 120, 0.30);
+
+  --hl-comment: #928374;
+  --hl-keyword: #9d0006;
+  --hl-string: #79740e;
+  --hl-number: #8f3f71;
+  --hl-title: #076678;
+  --hl-attr: #b57614;
+  --hl-built: #af3a03;
+  --hl-meta: #928374;
+}
+html[data-skin='gruvbox'][data-theme='dark'] {
+  --primary: #83a598;
+  --primary-hover: #96b6aa;
+  --primary-active: #6c8b80;
+  --primary-bg: #2f3d3a;
+
+  --text: #ebdbb2;
+  --text-2: #d5c4a1;
+  --text-3: #a89984;
+  --text-4: #7c6f64;
+
+  --border: #3c3836;
+  --border-2: #343130;
+  --border-pop: #504a45;
+  --bg: #282828;
+  --editor-bg: #282828;
+  --panel: #32302f;
+  --hover: #3c3836;
+  --sidebar-bg: #1d2021;
+
+  --selection: rgba(131, 165, 152, 0.26);
+  --selection-focus: rgba(131, 165, 152, 0.40);
+
+  --hl-comment: #928374;
+  --hl-keyword: #fb4934;
+  --hl-string: #b8bb26;
+  --hl-number: #d3869b;
+  --hl-title: #83a598;
+  --hl-attr: #fabd2f;
+  --hl-built: #8ec07c;
+  --hl-meta: #928374;
+}

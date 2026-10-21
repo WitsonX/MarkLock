@@ -6,6 +6,7 @@
 
 import { defineStore } from 'pinia'
 import * as tauri from '../lib/tauri'
+import type { CustomSkin } from '../lib/skins'
 
 /** 一个已登记的库（元信息，不含密钥） */
 export interface VaultInfo {
@@ -182,11 +183,15 @@ export interface Settings {
   backupEnabled: boolean
   /** 外观主题：浅色 / 深色 / 跟随系统 */
   theme: 'light' | 'dark' | 'system'
+  /** 配色皮肤 id：内置皮肤见 BUILTIN_SKINS，其余为用户自定义皮肤（customSkins 里的 id） */
+  skin: string
+  /** 用户自定义皮肤（色板令牌 + 高级 CSS），CSS 由 lib/skins.ts 注入 */
+  customSkins: CustomSkin[]
   /** 界面语言：跟随系统 / 简体中文 / English */
   language: 'system' | 'zh' | 'en'
-  /** 代码高亮主题 */
+  /** 预览区代码块的高亮配色 */
   codeTheme: 'github' | 'monokai' | 'dracula' | 'atom-one-dark'
-  /** 代码 Tab 缩进空格数 */
+  /** 预览区代码块的 Tab 缩进空格数 */
   codeIndent: 2 | 4
   /** 编辑器与预览字体大小（px），范围 10–28，⌘+/⌘- 可调 */
   editorFontSize: number
@@ -259,6 +264,9 @@ export const DEFAULT_SETTINGS: Settings = {
   // 保存时默认保留上一版备份：与原子写盘配合，防崩溃/误存导致整库损坏；可在安全设置里关闭
   backupEnabled: true,
   theme: 'system',
+  // 皮肤默认走 global.css 基线（Ant Design 蓝），用户可在状态栏或设置里换内置配色 / 自定义
+  skin: 'default',
+  customSkins: [],
   language: 'system',
   codeTheme: 'github',
   codeIndent: 4,

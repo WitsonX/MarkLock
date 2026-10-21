@@ -4,10 +4,10 @@ import { EditorView, keymap, lineNumbers, highlightActiveLineGutter, highlightSp
 import { EditorState, Compartment, Transaction, ChangeSet } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
-import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput } from '@codemirror/language'
+import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, foldGutter, indentOnInput, HighlightStyle } from '@codemirror/language'
 import { searchKeymap, highlightSelectionMatches, search, openSearchPanel } from '@codemirror/search'
 import { autocompletion, completionKeymap, closeBrackets, closeBracketsKeymap } from '@codemirror/autocomplete'
-import { oneDark } from '@codemirror/theme-one-dark'
+import { tags } from '@lezer/highlight'
 import { t, lang } from '../locales'
 
 export default defineComponent({
@@ -64,7 +64,10 @@ export default defineComponent({
 
     const isDark = computed(() => document.documentElement.dataset.theme === 'dark')
 
-    const customLightTheme = EditorView.theme({
+    // 皮肤令牌驱动的编辑器主题：颜色全部走 CSS 变量，换肤（html[data-skin]）时浏览器自动重算，
+    // 不需要重建主题；只有明暗切换要重配 Compartment（dark 标记影响 CodeMirror 内置 UI 与 color-scheme）。
+    // 字号也走变量（--editor-font-size 由 EditorView 写在 documentElement 上），改字号同样无需 reconfigure。
+    const skinTheme = (dark: boolean) => EditorView.theme({
       '&': {
         backgroundColor: 'var(--editor-bg)',
         color: 'var(--text)',
@@ -73,25 +76,17 @@ export default defineComponent({
       '.cm-content': {
         caretColor: 'var(--primary)',
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        // 字号跟随全局设置变量（--editor-font-size 由 EditorView 写在 documentElement 上），
-        // 避免改字号时重建主题/重新配置 Compartment
         fontSize: 'var(--editor-font-size, 14px)',
         lineHeight: '1.6',
       },
       '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },
-      // 选中背景：用半透明主色蓝，明显区别于编辑器底色与当前行底色；聚焦态更深、失焦态更浅
-      '.cm-selectionBackground': {
-        backgroundColor: 'rgba(22, 119, 255, 0.16)',
-      },
-      '&.cm-focused .cm-selectionBackground': {
-        backgroundColor: 'rgba(22, 119, 255, 0.30)',
-      },
-      '.cm-content ::selection': {
-        backgroundColor: 'rgba(22, 119, 255, 0.30)',
-      },
+      // 选区：半透明皮肤令牌，聚焦态更深；未聚焦与聚焦分开写，避免失焦后仍是最深色
+      '.cm-selectionBackground': { backgroundColor: 'var(--selection)' },
+      '&.cm-focused .cm-selectionBackground': { backgroundColor: 'var(--selection-focus)' },
+      '.cm-content ::selection': { backgroundColor: 'var(--selection-focus)' },
       '.cm-gutters': {
-        backgroundColor: 'var(--editor-bg, #f5f5f5)',
-        color: 'var(--text-4, #999)',
+        backgroundColor: 'var(--editor-bg)',
+        color: 'var(--text-4)',
         border: 'none',
         borderRight: '1px solid var(--border)',
       },
@@ -99,41 +94,43 @@ export default defineComponent({
         backgroundColor: 'var(--hover)',
         color: 'var(--text)',
       },
-      '.cm-foldGutter .cm-gutterElement': {
-        color: 'var(--text-4, #999)',
+      '.cm-foldGutter .cm-gutterElement': { color: 'var(--text-4)' },
+      // 查找/替换面板与搜索命中也跟随皮肤（原先深色走 oneDark 时由它自带）
+      '.cm-panels': {
+        backgroundColor: 'var(--panel)',
+        color: 'var(--text)',
+        borderBottom: '1px solid var(--border)',
       },
-    }, { dark: false })
+      '.cm-searchMatch': { backgroundColor: 'var(--selection)' },
+      '.cm-searchMatch-selected': { backgroundColor: 'var(--selection-focus)' },
+    }, { dark })
 
-    const customDarkTheme = EditorView.theme({
-      '&': {
-        backgroundColor: 'var(--editor-bg)',
-        color: 'var(--text)',
-        height: '100%',
-      },
-      '.cm-content': {
-        caretColor: 'var(--primary)',
-        fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        fontSize: 'var(--editor-font-size, 14px)',
-        lineHeight: '1.6',
-      },
-      '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },
-      '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
-        backgroundColor: 'var(--primary-bg, rgba(22, 119, 255, 0.25))',
-      },
-      '.cm-gutters': {
-        backgroundColor: 'var(--editor-bg, #1f1f1f)',
-        color: 'var(--text-4, #666)',
-        border: 'none',
-        borderRight: '1px solid var(--border)',
-      },
-      '.cm-activeLineGutter': {
-        backgroundColor: 'var(--hover)',
-        color: 'var(--text)',
-      },
-      '.cm-foldGutter .cm-gutterElement': {
-        color: 'var(--text-4, #666)',
-      },
-    }, { dark: true })
+    const lightTheme = skinTheme(false)
+    const darkTheme = skinTheme(true)
+
+    // 源码语法配色：Markdown 结构元素用 --cm-*，代码 token 复用预览区的 --hl-*，
+    // 编辑区与预览区因此同源；未覆盖的 tag 由 defaultHighlightStyle 兜底。
+    const skinHighlightStyle = HighlightStyle.define([
+      { tag: [tags.heading, tags.heading1, tags.heading2, tags.heading3, tags.heading4, tags.heading5, tags.heading6], color: 'var(--cm-heading)', fontWeight: '600' },
+      { tag: tags.strong, color: 'var(--cm-strong)', fontWeight: '700' },
+      { tag: tags.emphasis, color: 'var(--cm-em)', fontStyle: 'italic' },
+      { tag: tags.strikethrough, color: 'var(--text-3)', textDecoration: 'line-through' },
+      { tag: tags.link, color: 'var(--cm-link)' },
+      { tag: tags.url, color: 'var(--cm-url)', textDecoration: 'underline' },
+      { tag: tags.monospace, color: 'var(--cm-code)' },
+      { tag: tags.quote, color: 'var(--cm-quote)', fontStyle: 'italic' },
+      { tag: [tags.processingInstruction, tags.contentSeparator, tags.list, tags.punctuation, tags.brace, tags.operator], color: 'var(--cm-marker)' },
+      { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment], color: 'var(--hl-comment)', fontStyle: 'italic' },
+      { tag: [tags.keyword, tags.operatorKeyword, tags.controlKeyword, tags.definitionKeyword, tags.moduleKeyword], color: 'var(--hl-keyword)' },
+      { tag: [tags.string, tags.docString, tags.attributeValue], color: 'var(--hl-string)' },
+      { tag: [tags.number, tags.bool, tags.regexp], color: 'var(--hl-number)' },
+      { tag: [tags.function(tags.variableName), tags.definition(tags.variableName), tags.className], color: 'var(--hl-title)' },
+      { tag: [tags.attributeName, tags.propertyName], color: 'var(--hl-attr)' },
+      { tag: [tags.typeName, tags.standard(tags.name)], color: 'var(--hl-built)' },
+      { tag: [tags.meta, tags.documentMeta], color: 'var(--hl-meta)' },
+      { tag: tags.inserted, color: 'var(--green)' },
+      { tag: tags.deleted, color: 'var(--red)' },
+    ])
 
     // 当前行背景必须半透明：CodeMirror 选中图层 zIndex 为 -1，画在行内背景之下，
     // 若当前行用不透明色会把落在当前行上的多行选区高亮整个盖住
@@ -304,6 +301,7 @@ export default defineComponent({
       dropCursor(),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
+      syntaxHighlighting(skinHighlightStyle),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       bracketMatching(),
       closeBrackets(),
@@ -324,7 +322,7 @@ export default defineComponent({
       saveKeymap,
       formatKeymap,
       markdown({ base: markdownLanguage }),
-      themeCompartment.of(dark ? oneDark : customLightTheme),
+      themeCompartment.of(dark ? darkTheme : lightTheme),
       activeLineCompartment.of(dark ? activeLineDark : activeLineLight),
       updateListener,
       scrollListener,
@@ -399,7 +397,7 @@ export default defineComponent({
       if (!view) return
       view.dispatch({
         effects: [
-          themeCompartment.reconfigure(dark ? oneDark : customLightTheme),
+          themeCompartment.reconfigure(dark ? darkTheme : lightTheme),
           activeLineCompartment.reconfigure(dark ? activeLineDark : activeLineLight),
         ],
       })

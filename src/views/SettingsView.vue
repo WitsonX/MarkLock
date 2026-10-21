@@ -4,12 +4,15 @@ import { message } from 'ant-design-vue'
 import TitleBar from '../components/TitleBar.vue'
 import AboutCard from '../components/AboutCard.vue'
 import { useVaultStore } from '../stores/vault'
+import type { Settings } from '../stores/vault'
 import { lang } from '../locales'
 import { isMac } from '../lib/platform'
 import { PREVIEW_FONTS, fontLabel, resolveFontStack } from '../lib/fonts'
 import * as tauri from '../lib/tauri'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
 import { runUpdateCheck } from '../lib/update'
+import { BUILTIN_SKINS, SKIN_TOKEN_GROUPS, newCustomSkin, forkSkin, previewCustomSkin, skinSwatch } from '../lib/skins'
+import type { CustomSkin } from '../lib/skins'
 import hljs from 'highlight.js'
 
 interface NavItem {
@@ -18,6 +21,14 @@ interface NavItem {
   core?: boolean
   icon: string
 }
+
+/** 「加密方案」组里默认折叠的四行；搜索结果命中它们时先展开再定位 */
+const SCHEME_ROWS = ['e2e', 'tamper', 'perFileKey', 'bruteForce']
+
+/** 「界面元素」勾选清单能切换的显示/隐藏项，值即 settings 字段名 */
+type AreaKey =
+  | 'showTabs' | 'showToolbar' | 'showStatusbar'
+  | 'showOpenFiles' | 'showUnlockedVaults' | 'showFavorites' | 'showRecent' | 'showWorkdir' | 'showOutline'
 
 export default defineComponent({
   name: 'SettingsView',
@@ -32,11 +43,19 @@ export default defineComponent({
       // 「重置所有配置」确认弹窗
       resetModalOpen: false,
       resetting: false,
+      // 「加密方案」四项说明的展开态（默认折成一行，避免只读信息挤占设置项）
+      schemeOpen: false,
       // 编辑器字体大小选项（px，与 ⌘+/⌘- 的 2px 步进对齐，10–28）
       fontSizeOptions: Array.from({ length: 10 }, (_, i) => ({ label: `${10 + i * 2} px`, value: 10 + i * 2 })),
       // 快速启动项内联重命名：当前编辑行的下标（-1 表示无）与草稿名
       editingLaunch: -1,
       editingName: '',
+      // 自定义皮肤编辑器：草稿（null=关闭）、正在编辑的明暗档位、删除确认目标
+      skinDraft: null as CustomSkin | null,
+      skinDraftMode: 'light' as 'light' | 'dark',
+      skinDeleteId: '',
+      // 色板分组（静态清单，直接引用 lib/skins 的定义）
+      skinGroups: SKIN_TOKEN_GROUPS,
     }
   },
   computed: {
@@ -49,8 +68,8 @@ export default defineComponent({
         { key: 'general', label: this.$t('settings.nav.general'), icon: 'gear' },
         { key: 'appear', label: this.$t('settings.nav.appear'), icon: 'appear' },
         { key: 'security', label: this.$t('settings.nav.security'), icon: 'shield', core: true },
-        { key: 'keys', label: this.$t('settings.nav.keys'), icon: 'keys' },
         { key: 'sticky', label: this.$t('settings.nav.sticky'), icon: 'sticky' },
+        { key: 'keys', label: this.$t('settings.nav.keys'), icon: 'keys' },
         { key: 'about', label: this.$t('settings.nav.about'), icon: 'about' },
       ]
     },
@@ -185,6 +204,33 @@ greet('MarkLock');`
     iconMap(): Record<string, string> {
       return appIcons
     },
+    /** 当前实际生效的明暗档位（皮肤色卡按此取色；「跟随系统」时读媒体查询） */
+    resolvedTheme(): 'light' | 'dark' {
+      const th = this.store.settings.theme
+      if (th === 'light' || th === 'dark') return th
+      return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    },
+    /** 皮肤色卡列表：内置在前、自定义在后；三色为底色 / 面板 / 主色 */
+    skinCards() {
+      const mode = this.resolvedTheme
+      const customs = this.store.settings.customSkins
+      return [
+        ...BUILTIN_SKINS.map((s) => ({ id: s.id, name: this.$t(s.nameKey), builtin: true, swatch: skinSwatch(s.id, mode, customs) })),
+        ...customs.map((s) => ({ id: s.id, name: s.name, builtin: false, swatch: skinSwatch(s.id, mode, customs) })),
+      ]
+    },
+    /** 自定义皮肤编辑弹窗：有草稿即打开 */
+    skinModalOpen(): boolean {
+      return !!this.skinDraft
+    },
+    /** 待删除的自定义皮肤（删除确认弹窗用） */
+    skinDeleteTarget(): CustomSkin | null {
+      return this.store.settings.customSkins.find((s) => s.id === this.skinDeleteId) || null
+    },
+    /** 草稿当前档位（浅色/深色）的令牌表 */
+    skinDraftTokens(): Record<string, string> {
+      return this.skinDraft ? this.skinDraft.tokens[this.skinDraftMode] : {}
+    },
   },
   mounted() {
     // 便签窗（独立 webview）可能刚改过设置（如在便签内选定文件），本窗内存副本是启动时的旧值；
@@ -199,8 +245,17 @@ greet('MarkLock');`
   },
   beforeUnmount() {
     ;(this as any)._searchIndex = null
+    // 编辑到一半直接离开设置页：撤掉预览样式，避免 data-skin 停在 __preview__ 上
+    if (this.skinDraft) previewCustomSkin(null, this.store.settings.skin)
   },
   watch: {
+    // 草稿任何改动（令牌、名称、高级 CSS）即时预览，所见即所得
+    skinDraft: {
+      deep: true,
+      handler(v: CustomSkin | null) {
+        if (v) previewCustomSkin(v)
+      },
+    },
     // 主窗可能已停在设置页（组件复用、mounted 不再触发），故监听 query 变化重新定位分区。
     '$route.query.tab'() {
       this.applyTabQuery()
@@ -224,6 +279,103 @@ greet('MarkLock');`
     /** 托盘相关文案取词：macOS 无「托盘/通知区域」概念，按 Mac 后缀取专属词条（菜单栏 / Dock 语义），其他平台用原键。 */
     trayT(key: string) {
       return this.$t(`settings.general.${key}${isMac ? 'Mac' : ''}`)
+    },
+
+    // ---------- 界面元素勾选清单 ----------
+    /** 切换一个显示/隐藏项 */
+    toggleArea(key: AreaKey) {
+      this.store.updateSettings({ [key]: !this.store.settings[key] } as Pick<Settings, AreaKey>)
+    },
+
+    // ---------- 皮肤（配色方案） ----------
+    /** 应用某个皮肤（内置或自定义） */
+    applySkin(id: string) {
+      this.store.updateSettings({ skin: id })
+    },
+    /** 打开自定义皮肤编辑器：传 id 编辑现有皮肤（拷一份草稿改），不传则新建。
+     *  默认停在当前明暗档位上编辑，另一档位的令牌互不影响。 */
+    openSkinEditor(id?: string) {
+      const existing = id ? this.store.settings.customSkins.find((s) => s.id === id) : null
+      this.skinDraft = existing
+        ? { ...existing, tokens: { light: { ...existing.tokens.light }, dark: { ...existing.tokens.dark } } }
+        : newCustomSkin(this.$t('skin.defaultName'))
+      this.skinDraftMode = this.resolvedTheme
+      previewCustomSkin(this.skinDraft)
+    },
+    /** 复制某个皮肤（内置或自定义）为新草稿并打开编辑器，在其基础上改；不立即落盘，保存后才新增。 */
+    duplicateSkin(id: string) {
+      const src = this.store.settings.customSkins.find((s) => s.id === id)
+      const builtin = BUILTIN_SKINS.find((s) => s.id === id)
+      const baseName = src ? src.name : builtin ? this.$t(builtin.nameKey) : id
+      this.skinDraft = forkSkin(id, this.$t('skin.duplicateName', { name: baseName }), this.store.settings.customSkins)
+      this.skinDraftMode = this.resolvedTheme
+      previewCustomSkin(this.skinDraft)
+    },
+    /** 关闭编辑器且不保存：撤预览样式、恢复原皮肤 */
+    cancelSkinDraft() {
+      const restore = this.store.settings.skin
+      this.skinDraft = null
+      previewCustomSkin(null, restore)
+    },
+    /** 保存草稿：写入 customSkins 并立即应用。
+     *  先落设置（App.vue 的 watcher 会注入正式样式），再撤预览样式，避免出现无规则的空档。 */
+    saveSkinDraft() {
+      const d = this.skinDraft
+      if (!d) return
+      const name = (d.name || '').trim() || this.$t('skin.defaultName')
+      const list = this.store.settings.customSkins.filter((s) => s.id !== d.id)
+      list.push({ ...d, name, tokens: { light: { ...d.tokens.light }, dark: { ...d.tokens.dark } } })
+      this.store.updateSettings({ customSkins: list, skin: d.id })
+      this.skinDraft = null
+      previewCustomSkin(null, d.id)
+      message.success(this.$t('skin.saved', { name }))
+    },
+    /** 把当前档位的令牌整套复制到另一档位（浅深同色的皮肤不必填两遍） */
+    copyTokensToOtherMode() {
+      const d = this.skinDraft
+      if (!d) return
+      const to = this.skinDraftMode === 'light' ? 'dark' : 'light'
+      d.tokens[to] = { ...d.tokens[this.skinDraftMode] }
+    },
+    /** 写入一个令牌值；空串表示清除该覆盖、继承基线 */
+    setSkinToken(key: string, value: string) {
+      const d = this.skinDraft
+      if (!d) return
+      const v = (value || '').trim()
+      if (v) d.tokens[this.skinDraftMode][key] = v
+      else delete d.tokens[this.skinDraftMode][key]
+    },
+    onSkinTokenPick(key: string, e: Event) {
+      this.setSkinToken(key, (e.target as HTMLInputElement).value)
+    },
+    /** 文本框写入令牌值（可填 rgba() / 渐变 / var() 等取色器表达不了的值） */
+    onSkinTokenText(key: string, e: Event) {
+      this.setSkinToken(key, (e.target as HTMLInputElement).value)
+    },
+    /** 令牌的十六进制值，供 <input type="color"> 显示；非十六进制（rgba / 渐变等）给中性灰占位，
+     *  真实值以旁边的文本框为准——原生取色器只能表达 #rrggbb。 */
+    skinTokenHex(key: string): string {
+      const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec((this.skinDraftTokens[key] || '').trim())
+      if (!m) return '#808080'
+      const h = m[1].toLowerCase()
+      return '#' + (h.length === 3 ? h.split('').map((c) => c + c).join('') : h)
+    },
+    /** 令牌的中文/英文说明（词条键去掉 `--` 前缀） */
+    skinTokenLabel(key: string): string {
+      return this.$t(`skin.tokens.${key.slice(2)}`)
+    },
+    askDeleteSkin(id: string) {
+      this.skinDeleteId = id
+    },
+    /** 确认删除自定义皮肤；若正在使用则回落默认皮肤 */
+    confirmDeleteSkin() {
+      const id = this.skinDeleteId
+      const name = this.skinDeleteTarget?.name || ''
+      if (!id) return
+      const customSkins = this.store.settings.customSkins.filter((s) => s.id !== id)
+      this.store.updateSettings(this.store.settings.skin === id ? { customSkins, skin: 'default' } : { customSkins })
+      this.skinDeleteId = ''
+      message.success(this.$t('skin.deleted', { name }))
     },
     /** 根据路由 query.tab 定位到对应分区（无效值忽略，保持当前分区）。 */
     applyTabQuery() {
@@ -323,11 +475,18 @@ greet('MarkLock');`
       const rows = Array.from(document.querySelectorAll('.s-pane .row[data-key]'))
       const index = rows.map((el) => {
         const pane = el.closest('.s-pane') as HTMLElement
+        // 分组标题是行的兄弟节点；「界面元素」这类行嵌在 .area 里，所以要沿着父级往上找
         let groupLabel = ''
-        let p = el.previousElementSibling
-        while (p) {
-          if (p.classList && p.classList.contains('group-head')) { groupLabel = p.textContent!.trim(); break }
-          p = p.previousElementSibling
+        let node: HTMLElement | null = el as HTMLElement
+        const groupEl = el.closest('.group')
+        while (node && groupEl && !groupLabel) {
+          let p = node.previousElementSibling
+          while (p) {
+            if (p.classList && p.classList.contains('group-head')) { groupLabel = p.textContent!.trim(); break }
+            p = p.previousElementSibling
+          }
+          if (node === groupEl) break
+          node = node.parentElement
         }
         const t = el.querySelector('.t')?.textContent?.trim() ?? ''
         const d = el.querySelector('.d')?.textContent?.trim() ?? ''
@@ -341,6 +500,9 @@ greet('MarkLock');`
           text: `${t} ${d} ${kw} ${groupLabel}`.toLowerCase(),
         }
       })
+      // 结果顺序跟左侧导航一致（模板里 pane 的先后可能与会调整，故不依赖 DOM 顺序）；sort 稳定，pane 内保持原序
+      const paneOrder = this.nav.map((n) => n.key)
+      index.sort((a, b) => paneOrder.indexOf(a.pane) - paneOrder.indexOf(b.pane))
       ;(this as any)._searchIndex = index
     },
     /** 按关键词过滤：命中行加 .hit 高亮，未命中行加 .dim 淡化 */
@@ -375,6 +537,7 @@ greet('MarkLock');`
       const hit = index.find((it) => it.key === key)
       if (!hit) return
       this.active = hit.pane
+      if (SCHEME_ROWS.includes(key)) this.schemeOpen = true
       this.$nextTick(() => {
         const el = document.querySelector<HTMLElement>(`.s-pane[data-pane="${hit.pane}"] .row[data-key="${key}"]`)
         if (!el) return
@@ -515,16 +678,12 @@ greet('MarkLock');`
             </div>
           </div>
           <div class="group">
-            <div class="group-head">{{ $t('settings.general.gTabs') }}</div>
-            <div class="row" data-key="showTabs" data-keywords="页签 tab 标签栏 顶部 tabs bar">
-              <div class="info"><div class="t">{{ $t('settings.general.showTabs') }}</div><div class="d">{{ $t('settings.general.showTabsD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showTabs }" @click="store.updateSettings({ showTabs: !store.settings.showTabs })"></div>
-            </div>
-            <div class="row" data-key="watchExternalChanges" data-keywords="监控 外部修改 刷新 重载 watch external reload">
+            <div class="group-head">{{ $t('settings.general.gFiles') }}</div>
+            <div class="row" data-key="watchExternalChanges" data-keywords="监控 外部修改 刷新 重载 文件 watch external reload">
               <div class="info"><div class="t">{{ $t('settings.general.watchExternal') }}</div><div class="d">{{ $t('settings.general.watchExternalD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.watchExternalChanges }" @click="store.updateSettings({ watchExternalChanges: !store.settings.watchExternalChanges })"></div>
             </div>
-            <div class="row" data-key="autoSaveSecs" data-keywords="自动保存 保存 静默 auto save">
+            <div class="row" data-key="autoSaveSecs" data-keywords="自动保存 保存 静默 文件 auto save">
               <div class="info"><div class="t">{{ $t('settings.general.autoSave') }}</div><div class="d">{{ $t('settings.general.autoSaveD') }}</div></div>
               <a-select
                 :value="store.settings.autoSaveSecs"
@@ -533,43 +692,10 @@ greet('MarkLock');`
                 @change="(v: number) => store.updateSettings({ autoSaveSecs: v })"
               />
             </div>
-          </div>
-          <div class="group">
-            <div class="group-head">{{ $t('settings.general.gSidebar') }}</div>
-            <div class="row" data-key="showOpenFiles" data-keywords="侧边栏 打开的文件 open files">
-              <div class="info"><div class="t">{{ $t('settings.general.openFiles') }}</div><div class="d">{{ $t('settings.general.openFilesD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showOpenFiles }" @click="store.updateSettings({ showOpenFiles: !store.settings.showOpenFiles })"></div>
-            </div>
-            <div class="row" data-key="showUnlockedVaults" data-keywords="侧边栏 加密库 库 vaults">
-              <div class="info"><div class="t">{{ $t('settings.general.vaults') }}</div><div class="d">{{ $t('settings.general.vaultsD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showUnlockedVaults }" @click="store.updateSettings({ showUnlockedVaults: !store.settings.showUnlockedVaults })"></div>
-            </div>
-            <div class="row" data-key="showFavorites" data-keywords="侧边栏 收藏 favorites">
-              <div class="info"><div class="t">{{ $t('settings.general.favorites') }}</div><div class="d">{{ $t('settings.general.favoritesD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showFavorites }" @click="store.updateSettings({ showFavorites: !store.settings.showFavorites })"></div>
-            </div>
-            <div class="row" data-key="showRecent" data-keywords="侧边栏 最近打开 recent">
-              <div class="info"><div class="t">{{ $t('settings.general.recent') }}</div><div class="d">{{ $t('settings.general.recentD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showRecent }" @click="store.updateSettings({ showRecent: !store.settings.showRecent })"></div>
-            </div>
-            <div class="row" data-key="showWorkdir" data-keywords="侧边栏 工作目录 文件夹 workdir folder">
-              <div class="info"><div class="t">{{ $t('settings.general.workdir') }}</div><div class="d">{{ $t('settings.general.workdirD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showWorkdir }" @click="store.updateSettings({ showWorkdir: !store.settings.showWorkdir })"></div>
-            </div>
-            <div class="row" data-key="showOutline" data-keywords="侧边栏 大纲 标题 目录 outline heading">
-              <div class="info"><div class="t">{{ $t('settings.general.outline') }}</div><div class="d">{{ $t('settings.general.outlineD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showOutline }" @click="store.updateSettings({ showOutline: !store.settings.showOutline })"></div>
-            </div>
-          </div>
-          <div class="group">
-            <div class="group-head">{{ $t('settings.general.gBrowse') }}</div>
             <div class="row" data-key="showHiddenFiles" data-keywords="隐藏文件 文件浏览 目录 hidden files">
               <div class="info"><div class="t">{{ $t('settings.general.hiddenFiles') }}</div><div class="d">{{ $t('settings.general.hiddenFilesD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.showHiddenFiles }" @click="store.updateSettings({ showHiddenFiles: !store.settings.showHiddenFiles })"></div>
             </div>
-          </div>
-          <div class="group">
-            <div class="group-head">{{ $t('settings.general.gConvert') }}</div>
             <div class="row" data-key="convertMdAction" data-keywords="转为加密 mdl 明文 删除 保留 convert encrypt delete keep">
               <div class="info"><div class="t">{{ $t('settings.general.convertMd') }}</div><div class="d">{{ $t('settings.general.convertMdD') }}</div></div>
               <div class="seg">
@@ -578,9 +704,6 @@ greet('MarkLock');`
                 <span :class="{ on: store.settings.convertMdAction === 'keep' }" @click="store.updateSettings({ convertMdAction: 'keep' })">{{ $t('settings.general.convertKeep') }}</span>
               </div>
             </div>
-          </div>
-          <div class="group">
-            <div class="group-head">{{ $t('settings.general.gAssoc') }}</div>
             <div class="row" data-key="setDefaultHandler" data-keywords="默认 打开方式 文件关联 md mdl mdlb default handler">
               <div class="info"><div class="t">{{ $t('settings.general.setDefault') }}</div><div class="d">{{ $t('settings.general.setDefaultD') }}</div></div>
               <button class="btn" @click="applySetDefault">{{ $t('settings.general.setDefaultBtn') }}</button>
@@ -609,13 +732,41 @@ greet('MarkLock');`
           <h2>{{ $t('settings.appear.h2') }}</h2>
           <div class="desc">{{ $t('settings.appear.desc') }}</div>
           <div class="group">
-            <div class="group-head">{{ $t('settings.appear.gTheme') }}</div>
+            <div class="group-head">{{ $t('settings.appear.gUi') }}</div>
             <div class="row" data-key="theme" data-keywords="主题 浅色 深色 暗黑 dark light 跟随系统 theme">
               <div class="info"><div class="t">{{ $t('settings.appear.appearanceMode') }}</div></div>
               <div class="seg">
                 <span :class="{ on: store.settings.theme === 'light' }" @click="store.updateSettings({ theme: 'light' })">{{ $t('settings.appear.light') }}</span>
                 <span :class="{ on: store.settings.theme === 'dark' }" @click="store.updateSettings({ theme: 'dark' })">{{ $t('settings.appear.dark') }}</span>
                 <span :class="{ on: store.settings.theme === 'system' }" @click="store.updateSettings({ theme: 'system' })">{{ $t('settings.appear.followSystem') }}</span>
+              </div>
+            </div>
+            <div class="row" data-key="skin" data-keywords="皮肤 配色 换肤 颜色 外观 自定义 css sepia nord solarized gruvbox skin color theme">
+              <div class="info">
+                <div class="t">{{ $t('skin.pick') }}</div>
+                <div class="d">{{ $t('skin.pickD') }}</div>
+              </div>
+              <button class="btn btn-sm" @click="openSkinEditor()">{{ $t('skin.new') }}</button>
+            </div>
+            <div class="skin-grid">
+              <div
+                v-for="c in skinCards"
+                :key="c.id"
+                class="skin-card"
+                :class="{ on: store.settings.skin === c.id }"
+                @click="applySkin(c.id)"
+              >
+                <span class="sw" :style="{ background: c.swatch[0] }">
+                  <i :style="{ background: c.swatch[1] }"></i>
+                  <b :style="{ background: c.swatch[2] }"></b>
+                </span>
+                <span class="nm">{{ c.name }}</span>
+                <span v-if="store.settings.skin === c.id" class="skin-ck">✓</span>
+                <span class="skin-acts">
+                  <button class="icon-btn" :title="$t('skin.duplicate')" @click.stop="duplicateSkin(c.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a2 2 0 0 1 2-2h10" /></svg></button>
+                  <button v-if="!c.builtin" class="icon-btn" :title="$t('skin.edit')" @click.stop="openSkinEditor(c.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z" /></svg></button>
+                  <button v-if="!c.builtin" class="icon-btn" :title="$t('skin.delete')" @click.stop="askDeleteSkin(c.id)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" /></svg></button>
+                </span>
               </div>
             </div>
             <div class="row" data-key="language" data-keywords="语言 language 英文 中文 english 简体中文 切换">
@@ -626,41 +777,63 @@ greet('MarkLock');`
                 <span :class="{ on: store.settings.language === 'en' }" @click="store.updateSettings({ language: 'en' })">{{ $t('settings.appear.langEn') }}</span>
               </div>
             </div>
-            <div class="row" data-key="codeTheme" data-keywords="代码高亮 配色 github monokai dracula code highlight">
-              <div class="info"><div class="t">{{ $t('settings.appear.codeTheme') }}</div><div class="d">{{ $t('settings.appear.codeThemeD') }}</div></div>
-              <a-select
-                :value="store.settings.codeTheme"
-                style="width: 160px;"
-                :options="[
-                  { label: 'GitHub Light', value: 'github' },
-                  { label: 'Monokai', value: 'monokai' },
-                  { label: 'Dracula', value: 'dracula' },
-                  { label: 'Atom One Dark', value: 'atom-one-dark' },
-                ]"
-                @change="(v: string) => store.updateSettings({ codeTheme: v as 'github' | 'monokai' | 'dracula' | 'atom-one-dark' })"
-              />
-            </div>
-            <div class="row" data-key="codeIndent" data-keywords="tab 缩进 空格 代码块 tab indent">
-              <div class="info"><div class="t">{{ $t('settings.appear.codeIndent') }}</div><div class="d">{{ $t('settings.appear.codeIndentD') }}</div></div>
-              <div class="seg">
-                <span :class="{ on: store.settings.codeIndent === 2 }" @click="store.updateSettings({ codeIndent: 2 })">{{ $t('settings.appear.indent2') }}</span>
-                <span :class="{ on: store.settings.codeIndent === 4 }" @click="store.updateSettings({ codeIndent: 4 })">{{ $t('settings.appear.indent4') }}</span>
-              </div>
-            </div>
-            <div class="code-preview-wrap">
-              <div class="code-preview-label">{{ $t('settings.appear.previewEffect') }}</div>
-              <pre class="code-preview" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent }"><code class="hljs language-javascript" v-html="previewCodeHtml"></code></pre>
-            </div>
           </div>
           <div class="group">
-            <div class="group-head">{{ $t('settings.appear.gEditor') }}</div>
-            <div class="row" data-key="showToolbar" data-keywords="工具栏 格式化 按钮 toolbar format">
-              <div class="info"><div class="t">{{ $t('settings.appear.toolbar') }}</div><div class="d">{{ $t('settings.appear.toolbarD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showToolbar }" @click="store.updateSettings({ showToolbar: !store.settings.showToolbar })"></div>
+            <div class="group-head">{{ $t('settings.appear.gElements') }}</div>
+            <div class="area">
+              <div class="area-label">{{ $t('settings.appear.windowAreas') }}</div>
+              <div class="area-rows">
+                <label class="row row-check" data-key="showTabs" data-keywords="页签 tab 标签栏 顶部 窗口 tabs bar">
+                  <input type="checkbox" :checked="store.settings.showTabs" @change="toggleArea('showTabs')" />
+                  <span class="t">{{ $t('settings.appear.showTabs') }}</span>
+                  <span class="d">{{ $t('settings.appear.showTabsD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showToolbar" data-keywords="工具栏 格式化 按钮 toolbar format">
+                  <input type="checkbox" :checked="store.settings.showToolbar" @change="toggleArea('showToolbar')" />
+                  <span class="t">{{ $t('settings.appear.toolbar') }}</span>
+                  <span class="d">{{ $t('settings.appear.toolbarD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showStatusbar" data-keywords="状态栏 行数 字数 保存状态 底部 statusbar lines words">
+                  <input type="checkbox" :checked="store.settings.showStatusbar" @change="toggleArea('showStatusbar')" />
+                  <span class="t">{{ $t('settings.appear.statusbar') }}</span>
+                  <span class="d">{{ $t('settings.appear.statusbarD') }}</span>
+                </label>
+              </div>
             </div>
-            <div class="row" data-key="showStatusbar" data-keywords="状态栏 行数 字数 底部 statusbar lines words">
-              <div class="info"><div class="t">{{ $t('settings.appear.statusbar') }}</div><div class="d">{{ $t('settings.appear.statusbarD') }}</div></div>
-              <div class="switch" :class="{ on: store.settings.showStatusbar }" @click="store.updateSettings({ showStatusbar: !store.settings.showStatusbar })"></div>
+            <div class="area">
+              <div class="area-label">{{ $t('settings.appear.sidebarPanels') }}</div>
+              <div class="area-rows">
+                <label class="row row-check" data-key="showOpenFiles" data-keywords="侧边栏 打开的文件 open files">
+                  <input type="checkbox" :checked="store.settings.showOpenFiles" @change="toggleArea('showOpenFiles')" />
+                  <span class="t">{{ $t('settings.appear.openFiles') }}</span>
+                  <span class="d">{{ $t('settings.appear.openFilesD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showUnlockedVaults" data-keywords="侧边栏 加密库 库 vaults">
+                  <input type="checkbox" :checked="store.settings.showUnlockedVaults" @change="toggleArea('showUnlockedVaults')" />
+                  <span class="t">{{ $t('settings.appear.vaults') }}</span>
+                  <span class="d">{{ $t('settings.appear.vaultsD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showFavorites" data-keywords="侧边栏 收藏 favorites">
+                  <input type="checkbox" :checked="store.settings.showFavorites" @change="toggleArea('showFavorites')" />
+                  <span class="t">{{ $t('settings.appear.favorites') }}</span>
+                  <span class="d">{{ $t('settings.appear.favoritesD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showRecent" data-keywords="侧边栏 最近打开 recent">
+                  <input type="checkbox" :checked="store.settings.showRecent" @change="toggleArea('showRecent')" />
+                  <span class="t">{{ $t('settings.appear.recent') }}</span>
+                  <span class="d">{{ $t('settings.appear.recentD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showWorkdir" data-keywords="侧边栏 工作目录 文件夹 workdir folder">
+                  <input type="checkbox" :checked="store.settings.showWorkdir" @change="toggleArea('showWorkdir')" />
+                  <span class="t">{{ $t('settings.appear.workdir') }}</span>
+                  <span class="d">{{ $t('settings.appear.workdirD') }}</span>
+                </label>
+                <label class="row row-check" data-key="showOutline" data-keywords="侧边栏 大纲 标题 目录 outline heading">
+                  <input type="checkbox" :checked="store.settings.showOutline" @change="toggleArea('showOutline')" />
+                  <span class="t">{{ $t('settings.appear.outline') }}</span>
+                  <span class="d">{{ $t('settings.appear.outlineD') }}</span>
+                </label>
+              </div>
             </div>
             <div class="row" data-key="previewDblClickToggle" data-keywords="双击 预览 分屏 切换 视图 double click preview split toggle">
               <div class="info"><div class="t">{{ $t('settings.appear.dblToggle') }}</div><div class="d">{{ $t('settings.appear.dblToggleD') }}</div></div>
@@ -717,6 +890,34 @@ greet('MarkLock');`
               </div>
             </div>
           </div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.appear.gCode') }}</div>
+            <div class="row" data-key="codeTheme" data-keywords="代码块 高亮 配色 预览 github monokai dracula code highlight">
+              <div class="info"><div class="t">{{ $t('settings.appear.codeTheme') }}</div><div class="d">{{ $t('settings.appear.codeThemeD') }}</div></div>
+              <a-select
+                :value="store.settings.codeTheme"
+                style="width: 160px;"
+                :options="[
+                  { label: 'GitHub Light', value: 'github' },
+                  { label: 'Monokai', value: 'monokai' },
+                  { label: 'Dracula', value: 'dracula' },
+                  { label: 'Atom One Dark', value: 'atom-one-dark' },
+                ]"
+                @change="(v: string) => store.updateSettings({ codeTheme: v as 'github' | 'monokai' | 'dracula' | 'atom-one-dark' })"
+              />
+            </div>
+            <div class="row" data-key="codeIndent" data-keywords="代码块 tab 缩进 空格 tab indent">
+              <div class="info"><div class="t">{{ $t('settings.appear.codeIndent') }}</div><div class="d">{{ $t('settings.appear.codeIndentD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.codeIndent === 2 }" @click="store.updateSettings({ codeIndent: 2 })">{{ $t('settings.appear.indent2') }}</span>
+                <span :class="{ on: store.settings.codeIndent === 4 }" @click="store.updateSettings({ codeIndent: 4 })">{{ $t('settings.appear.indent4') }}</span>
+              </div>
+            </div>
+            <div class="code-preview-wrap">
+              <div class="code-preview-label">{{ $t('settings.appear.previewEffect') }}</div>
+              <pre class="code-preview" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent }"><code class="hljs language-javascript" v-html="previewCodeHtml"></code></pre>
+            </div>
+          </div>
         </div>
 
         <!-- 安全与加密 -->
@@ -726,19 +927,23 @@ greet('MarkLock');`
 
           <div class="group">
             <div class="group-head">{{ $t('settings.security.gScheme') }}</div>
-            <div class="row" data-key="e2e" data-keywords="端到端 加密 密文 上传 end-to-end encrypt upload">
+            <div class="row" data-key="encScheme" data-keywords="加密 机制 说明 常开 不可关闭 端到端 防篡改 scheme detail">
+              <div class="info"><div class="t">{{ $t('settings.security.schemeSummary') }}</div><div class="d">{{ $t('settings.security.schemeSummaryD') }}</div></div>
+              <button class="btn btn-sm" @click="schemeOpen = !schemeOpen">{{ schemeOpen ? $t('settings.security.schemeHide') : $t('settings.security.schemeShow') }}</button>
+            </div>
+            <div v-show="schemeOpen" class="row" data-key="e2e" data-keywords="端到端 加密 密文 上传 end-to-end encrypt upload">
               <div class="info"><div class="t">{{ $t('settings.security.e2e') }}</div><div class="d">{{ $t('settings.security.e2eD') }}</div></div>
               <span class="tag tag-green">{{ $t('settings.security.enabledTag') }}</span>
             </div>
-            <div class="row" data-key="tamper" data-keywords="防篡改 校验 损坏 篡改 tamper check corrupt">
+            <div v-show="schemeOpen" class="row" data-key="tamper" data-keywords="防篡改 校验 损坏 篡改 tamper check corrupt">
               <div class="info"><div class="t">{{ $t('settings.security.tamper') }}</div><div class="d">{{ $t('settings.security.tamperD') }}</div></div>
               <span class="tag tag-green">{{ $t('settings.security.enabledTag') }}</span>
             </div>
-            <div class="row" data-key="perFileKey" data-keywords="独立 密钥 文件密钥 泄露 per-file key leak">
+            <div v-show="schemeOpen" class="row" data-key="perFileKey" data-keywords="独立 密钥 文件密钥 泄露 per-file key leak">
               <div class="info"><div class="t">{{ $t('settings.security.perFileKey') }}</div><div class="d">{{ $t('settings.security.perFileKeyD') }}</div></div>
               <span class="tag tag-green">{{ $t('settings.security.enabledTag') }}</span>
             </div>
-            <div class="row" data-key="bruteForce" data-keywords="抗暴力 破解 派生 密码猜测 brute force derive guess">
+            <div v-show="schemeOpen" class="row" data-key="bruteForce" data-keywords="抗暴力 破解 派生 密码猜测 brute force derive guess">
               <div class="info"><div class="t">{{ $t('settings.security.bruteForce') }}</div><div class="d">{{ $t('settings.security.bruteForceD') }}</div></div>
               <span class="tag tag-green">{{ $t('settings.security.enabledTag') }}</span>
             </div>
@@ -876,12 +1081,20 @@ greet('MarkLock');`
           <h2>{{ $t('settings.sticky.h2') }}</h2>
           <div class="desc">{{ $t('settings.sticky.desc') }}</div>
           <div class="group">
-            <div class="group-head">{{ $t('settings.sticky.gFile') }}</div>
-            <div class="row" data-key="stickyNote" data-keywords="便签  sticky note">
+            <div class="group-head">{{ $t('settings.sticky.gWindow') }}</div>
+            <div class="row" data-key="stickyNote" data-keywords="便签 文件 选择 sticky note file">
               <div class="info"><div class="t">{{ $t('settings.sticky.file') }}</div><div class="d">{{ stickyNoteLabel }}</div></div>
               <div style="display:flex;gap:8px;">
                 <a-button size="small" @click="pickStickyFile">{{ $t('settings.sticky.choose') }}</a-button>
                 <a-button v-if="store.settings.stickyNote" size="small" danger @click="clearStickyFile">{{ $t('settings.sticky.clear') }}</a-button>
+              </div>
+            </div>
+            <div class="row" data-key="trayStickyButton" data-keywords="托盘 菜单栏 点击 不弹出 左键 右键 便签 弹出 菜单 tray click off left right sticky menu">
+              <div class="info"><div class="t">{{ trayT('traySticky') }}</div><div class="d">{{ trayT('trayStickyD') }}</div></div>
+              <div class="seg">
+                <span :class="{ on: store.settings.trayStickyButton === 'off' }" @click="store.updateSettings({ trayStickyButton: 'off' })">{{ $t('settings.general.trayOff') }}</span>
+                <span :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
+                <span :class="{ on: store.settings.trayStickyButton === 'right' }" @click="store.updateSettings({ trayStickyButton: 'right' })">{{ $t('settings.general.trayRight') }}</span>
               </div>
             </div>
           </div>
@@ -921,17 +1134,6 @@ greet('MarkLock');`
                 :options="modifierOptions"
                 @change="(v: string) => store.updateSettings({ hotCorner: { ...store.settings.hotCorner, modifier: v as 'command' | 'shift' | 'control' | 'alt' } })"
               />
-            </div>
-          </div>
-          <div class="group">
-            <div class="group-head">{{ trayT('gStickyTray') }}</div>
-            <div class="row" data-key="trayStickyButton" data-keywords="托盘 点击 不弹出 左键 右键 便签 弹出 菜单 tray click off left right sticky menu 菜单栏">
-              <div class="info"><div class="t">{{ trayT('traySticky') }}</div><div class="d">{{ trayT('trayStickyD') }}</div></div>
-              <div class="seg">
-                <span :class="{ on: store.settings.trayStickyButton === 'off' }" @click="store.updateSettings({ trayStickyButton: 'off' })">{{ $t('settings.general.trayOff') }}</span>
-                <span :class="{ on: store.settings.trayStickyButton === 'left' }" @click="store.updateSettings({ trayStickyButton: 'left' })">{{ $t('settings.general.trayLeft') }}</span>
-                <span :class="{ on: store.settings.trayStickyButton === 'right' }" @click="store.updateSettings({ trayStickyButton: 'right' })">{{ $t('settings.general.trayRight') }}</span>
-              </div>
             </div>
           </div>
           <div class="group">
@@ -1003,6 +1205,71 @@ greet('MarkLock');`
         </div>
       </div>
     </a-modal>
+
+    <!-- 自定义皮肤编辑器：色板改令牌 + 高级 CSS 兜底，改动即时预览（见 lib/skins.ts previewCustomSkin） -->
+    <a-modal
+      :open="skinModalOpen"
+      :title="$t('skin.editorTitle')"
+      :width="780"
+      :footer="null"
+      :mask-closable="false"
+      @cancel="cancelSkinDraft"
+    >
+      <div class="skin-edit" v-if="skinDraft">
+        <div class="se-row">
+          <label>{{ $t('skin.name') }}</label>
+          <input class="se-in se-name" v-model="skinDraft.name" :placeholder="$t('skin.defaultName')" />
+          <span class="se-spacer"></span>
+          <label>{{ $t('skin.editMode') }}</label>
+          <div class="seg">
+            <span :class="{ on: skinDraftMode === 'light' }" @click="skinDraftMode = 'light'">{{ $t('settings.appear.light') }}</span>
+            <span :class="{ on: skinDraftMode === 'dark' }" @click="skinDraftMode = 'dark'">{{ $t('settings.appear.dark') }}</span>
+          </div>
+          <button class="btn btn-sm" :title="$t('skin.copyToOtherD')" @click="copyTokensToOtherMode">{{ $t('skin.copyToOther') }}</button>
+        </div>
+        <div class="se-hint">{{ $t('skin.tokenHint') }}</div>
+        <div class="se-tokens">
+          <div v-for="g in skinGroups" :key="g.id" class="se-group">
+            <div class="se-cap">{{ $t('skin.group.' + g.id) }}</div>
+            <div class="se-list">
+              <div v-for="k in g.tokens" :key="k" class="se-tk">
+                <input type="color" class="se-pick" :value="skinTokenHex(k)" @input="onSkinTokenPick(k, $event)" />
+                <span class="se-lb"><b>{{ k }}</b><em>{{ skinTokenLabel(k) }}</em></span>
+                <input class="se-in se-val" :value="skinDraftTokens[k] || ''" :placeholder="$t('skin.inherit')" @change="onSkinTokenText(k, $event)" />
+                <button v-if="skinDraftTokens[k]" class="icon-btn se-clr" :title="$t('skin.clearToken')" @click="setSkinToken(k, '')">✕</button>
+                <span v-else class="se-clr-ph"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="se-row se-css-row">
+          <label>{{ $t('skin.advCss') }}</label>
+          <textarea class="se-in se-css" v-model="skinDraft.css" spellcheck="false" :placeholder="$t('skin.advCssPh')"></textarea>
+        </div>
+        <div class="se-note">{{ $t('skin.advCssD') }}</div>
+        <div class="modal-foot">
+          <button class="btn" @click="cancelSkinDraft">{{ $t('common.cancel') }}</button>
+          <button class="btn btn-primary" @click="saveSkinDraft">{{ $t('skin.save') }}</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 删除自定义皮肤确认 -->
+    <a-modal
+      :open="!!skinDeleteTarget"
+      :title="$t('skin.deleteTitle')"
+      :width="420"
+      :footer="null"
+      @cancel="skinDeleteId = ''"
+    >
+      <div class="reset-box">
+        <div class="reset-lead">{{ $t('skin.deleteLead', { name: skinDeleteTarget ? skinDeleteTarget.name : '' }) }}</div>
+        <div class="modal-foot">
+          <button class="btn" @click="skinDeleteId = ''">{{ $t('common.cancel') }}</button>
+          <button class="btn btn-danger" @click="confirmDeleteSkin">{{ $t('skin.deleteBtn') }}</button>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -1070,7 +1337,7 @@ greet('MarkLock');`
 .s-item.on { background: var(--primary-bg); color: var(--primary-active); font-weight: 500; }
 
 .s-body { flex: 1; overflow-y: auto; padding: 26px 38px 60px; }
-.s-pane { max-width: 640px; }
+.s-pane { max-width: 720px; }
 .s-pane h2 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
 .s-pane .desc { font-size: 13px; color: var(--text-3); margin-bottom: 20px; }
 
@@ -1096,6 +1363,21 @@ greet('MarkLock');`
 .row .info { flex: 1; min-width: 0; }
 .row .info .t { font-size: 14px; }
 .row .info .d { font-size: 12px; color: var(--text-3); margin-top: 2px; }
+/* 「界面元素」：左侧小标题 + 右侧一行一项的勾选清单（勾选框与名称同色，说明作次要信息跟在后面） */
+.area { display: flex; align-items: flex-start; gap: 10px; border-bottom: 1px solid var(--border-2); }
+.area-label {
+  flex: none; width: 82px; padding: 10px 0 8px 16px;
+  font-size: 12px; font-weight: 600; color: var(--text-3);
+}
+.area-rows { flex: 1; min-width: 0; padding: 2px 0 4px; }
+.row-check { cursor: pointer; gap: 10px; padding-left: 6px; }
+.row-check:hover { background: var(--hover); }
+.row-check input {
+  width: 15px; height: 15px; margin: 0; flex: none;
+  accent-color: var(--primary); cursor: pointer;
+}
+.row-check .t { font-size: 14px; flex: none; width: 132px; }
+.row-check .d { font-size: 12px; color: var(--text-3); flex: 1; min-width: 0; margin-top: 0; }
 /* 快速启动项图标缩略图；无图标时用同尺寸空占位保持行对齐 */
 .ql-ico { width: 32px; height: 32px; object-fit: contain; flex: none; }
 .ql-ico-ph { border-radius: 7px; background: var(--hover); }
@@ -1241,4 +1523,106 @@ greet('MarkLock');`
   max-height: 280px;
   overflow-y: auto;
 }
+
+/* ---------- 皮肤（配色方案） ---------- */
+/* 色卡网格不是 .row，它下面那行（语言）会少一条分隔线，这里补上 */
+.skin-grid + .row { border-top: 1px solid var(--border-2); }
+.skin-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+.skin-card {
+  position: relative;
+  padding: 7px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  background: var(--panel);
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.skin-card:hover { border-color: var(--border-pop); }
+.skin-card.on { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-bg); }
+/* 色卡：外框=页面底色，左块=面板色，右下条=主色，一眼看出整套配色倾向 */
+.skin-card .sw {
+  display: block;
+  position: relative;
+  height: 36px;
+  overflow: hidden;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+}
+.skin-card .sw i { position: absolute; left: 6px; top: 6px; bottom: 6px; width: 36%; border-radius: 3px; }
+.skin-card .sw b { position: absolute; right: 8px; bottom: 8px; width: 36%; height: 6px; border-radius: 3px; }
+.skin-card .nm {
+  display: block;
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.skin-card.on .nm { color: var(--text); font-weight: 500; }
+/* 勾选标记压在色卡右上角，名称整行可用 */
+.skin-ck { position: absolute; right: 13px; top: 13px; font-size: 12px; color: var(--primary); }
+/* 色卡悬浮操作按钮（复制 / 编辑 / 删除）：悬停才显现，垫底色以免压住名称 */
+.skin-acts { position: absolute; right: 6px; bottom: 4px; display: none; gap: 2px; padding: 0 2px; background: var(--panel); border-radius: 6px; }
+.skin-card:hover .skin-acts { display: inline-flex; }
+
+/* 自定义皮肤编辑器 */
+.skin-edit { padding-top: 4px; }
+.se-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.se-row > label { flex: none; font-size: 13px; color: var(--text-2); }
+.se-spacer { flex: 1; }
+.se-in {
+  padding: 3px 8px;
+  border: 1px solid var(--border-pop);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.se-in:focus { border-color: var(--primary); }
+.se-in::placeholder { color: var(--text-4); }
+.se-name { width: 190px; }
+.se-hint { font-size: 12px; color: var(--text-3); margin-bottom: 8px; }
+.se-tokens {
+  max-height: 44vh;
+  overflow-y: auto;
+  padding: 2px 12px 10px;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+}
+.se-cap { padding: 9px 0 6px; font-size: 12px; font-weight: 600; color: var(--text-3); }
+.se-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 18px; }
+.se-tk { display: grid; grid-template-columns: 26px minmax(0, 1fr) 112px 22px; align-items: center; gap: 6px; }
+.se-pick {
+  width: 26px; height: 24px; padding: 0;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: none; cursor: pointer;
+}
+.se-lb { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.se-lb b { font-family: var(--mono); font-size: 11px; font-weight: 500; color: var(--text-2); }
+.se-lb em {
+  font-style: normal; font-size: 11px; color: var(--text-4);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.se-val { height: 24px; padding: 0 6px; font-family: var(--mono); font-size: 12px; }
+.se-clr { width: 20px; height: 20px; font-size: 11px; color: var(--text-4); }
+.se-clr-ph { width: 20px; }
+.se-css-row { align-items: flex-start; margin-top: 12px; }
+.se-css-row > label { padding-top: 5px; }
+.se-css {
+  flex: 1;
+  min-height: 110px;
+  padding: 6px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.se-note { font-size: 12px; color: var(--text-3); margin-top: 6px; }
 </style>

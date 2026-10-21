@@ -10,6 +10,7 @@ import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
 import { t as translate, lang } from '../locales'
 import { resolveFontStack } from '../lib/fonts'
+import { cssVar, BUILTIN_SKINS } from '../lib/skins'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import VaultTreeNode from '../components/VaultTreeNode.vue'
 import WorkdirNode from '../components/WorkdirNode.vue'
@@ -398,6 +399,14 @@ export default defineComponent({
       const m = Math.floor(s / 60)
       const sec = s % 60
       return m > 0 ? this.$t('editor.minN', { n: m }) : this.$t('editor.secN', { n: sec })
+    },
+    /** 状态栏皮肤项显示名：内置皮肤走词条，自定义皮肤用用户起的名字，未知 id 回落「默认」 */
+    skinLabel(): string {
+      const id = this.store.settings.skin
+      const builtin = BUILTIN_SKINS.find((s) => s.id === id)
+      if (builtin) return this.$t(builtin.nameKey)
+      const custom = this.store.settings.customSkins.find((s) => s.id === id)
+      return custom ? custom.name : this.$t('skin.builtin.default')
     },
     /** 另存为密码强度（4 格） */
     saveAsStrength(): number {
@@ -2317,7 +2326,7 @@ export default defineComponent({
       // 高度按真实盒模型估算：项 30，分隔线 1 + margin 5×2，容器 padding 5×2 + border 1×2，
       // 标题复用上排分组名的 .m-cap（padding 6+4 + 11px 字 ×1.5715 行高）
       const headH = title ? 28 : 0
-      const menuH = items.reduce((h, it) => h + (it.kind === 'sep' ? 11 : 30), 0) + 12 + headH
+      const menuH = items.reduce((h, it) => h + (it.kind === 'sep' ? 11 : it.kind === 'cap' ? 28 : 30), 0) + 12 + headH
       let x = e.clientX
       let y = e.clientY
       if (above) {
@@ -4683,6 +4692,42 @@ export default defineComponent({
       // 垂直抬到状态栏上方、水平与本项左对齐（与自动锁定菜单同一套定位规则）
       this.showCtxMenu(e, items, e.currentTarget as HTMLElement, this.$t('editor.fontSizeTitle'))
     },
+    /** 状态栏「皮肤」点击弹菜单：上半为外观模式（浅色/深色/跟随系统），下半为配色皮肤（内置 + 自定义）。
+     *  与设置页「外观」两处联动同一份 settings（theme / skin），改哪边都即时生效。 */
+    openSkinMenu(e: MouseEvent) {
+      const s = this.store.settings
+      const items: any[] = [
+        { kind: 'cap', label: this.$t('skin.modeCap') },
+        ...(['light', 'dark', 'system'] as const).map((m) => ({
+          kind: 'item',
+          label: this.$t(m === 'system' ? 'settings.appear.followSystem' : `settings.appear.${m}`),
+          checked: s.theme === m,
+          run: () => this.store.updateSettings({ theme: m }),
+        })),
+        { kind: 'sep' },
+        { kind: 'cap', label: this.$t('skin.cap') },
+        ...BUILTIN_SKINS.map((k) => ({
+          kind: 'item',
+          label: this.$t(k.nameKey),
+          checked: s.skin === k.id,
+          hint: k.id === DEFAULT_SETTINGS.skin ? this.$t('editor.default') : '',
+          run: () => this.store.updateSettings({ skin: k.id }),
+        })),
+        ...s.customSkins.map((k) => ({
+          kind: 'item',
+          label: k.name,
+          checked: s.skin === k.id,
+          run: () => this.store.updateSettings({ skin: k.id }),
+        })),
+        { kind: 'sep' },
+        {
+          kind: 'item',
+          label: this.$t('skin.manage'),
+          run: () => this.$router.push('/settings?tab=appear'),
+        },
+      ]
+      this.showCtxMenu(e, items, e.currentTarget as HTMLElement)
+    },
 
     // ---------- 打开库（从最近/工作目录点击） ----------
     async recentOpenVault(id: string) {
@@ -5317,10 +5362,32 @@ export default defineComponent({
       const p = palettes[codeTheme] || palettes.github
       const pal = p.fixed || (dark ? p.dark! : p.light!) || p.light!
       Object.assign(HL, pal)
-      // 版式基础色（对齐应用亮/暗令牌的具体值）
-      const C = dark
-        ? { text: '#e5e7eb', text2: '#a3aab5', border: '#2a2e35', border2: '#23262c', bg: '#141619', panel: '#1d2025', hover: '#262a30', primary: '#1677ff' }
-        : { text: '#1f2329', text2: '#4e5563', border: '#e3e6eb', border2: '#eef0f4', bg: '#f5f6f8', panel: '#ffffff', hover: '#f2f3f6', primary: '#1677ff' }
+      // GitHub 档随皮肤走：直接读当前生效的 --hl-* 令牌（皮肤会覆盖它们），读不到才用上面的固定值
+      if (codeTheme === 'github') {
+        for (const k of Object.keys(HL) as (keyof typeof HL)[]) {
+          HL[k] = cssVar(`--hl-${k}`, HL[k])
+        }
+      }
+      // 版式色一律取「当前生效值」：皮肤（html[data-skin]）覆盖的就是这些令牌，
+      // 导出文档因此跟着换肤；读不到时回落到应用亮/暗基线的具体值。
+      const C = {
+        text: cssVar('--text', dark ? '#e5e7eb' : '#1f2329'),
+        text2: cssVar('--md-quote-text', dark ? '#a3aab5' : '#4e5563'),
+        border: cssVar('--md-table-border', dark ? '#2a2e35' : '#e3e6eb'),
+        bg: cssVar('--bg', dark ? '#141619' : '#f5f6f8'),
+        panel: cssVar('--panel', dark ? '#1d2025' : '#ffffff'),
+        primary: cssVar('--primary', '#1677ff'),
+        link: cssVar('--md-link', '#1677ff'),
+        headBorder: cssVar('--md-heading-border', dark ? '#2a2e35' : '#e3e6eb'),
+        codeBg: cssVar('--md-code-bg', dark ? '#262a30' : '#f2f3f6'),
+        preBg: cssVar('--md-pre-bg', dark ? '#141619' : '#f5f6f8'),
+        preBorder: cssVar('--md-pre-border', dark ? '#2a2e35' : '#e3e6eb'),
+        quoteBorder: cssVar('--md-quote-border', '#1677ff'),
+        quoteBg: cssVar('--md-quote-bg', dark ? '#262a30' : '#f2f3f6'),
+        thBg: cssVar('--md-th-bg', dark ? '#141619' : '#f5f6f8'),
+        stripe: cssVar('--md-stripe', dark ? '#262a30' : '#f2f3f6'),
+        hr: cssVar('--md-hr', dark ? '#2a2e35' : '#e3e6eb'),
+      }
       const checkSvg = dark
         ? "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896' fill='%23141619'%3E%3Cpath d='M912 190h-69.9c-9.8 0-19.1 4.5-25.3 12.2L472.4 614.7a31.8 31.8 0 0 1-50.6.2L219.2 341.8a32 32 0 0 0-25.3-12.2H112c-14.5 0-22.1 17.6-12.6 28.7l295.9 335.4a64.2 64.2 0 0 0 99.1.3l411.9-467.9C934.1 207.6 926.5 190 912 190z'/%3E%3C/svg%3E"
         : "%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='64 64 896 896' fill='%23fff'%3E%3Cpath d='M912 190h-69.9c-9.8 0-19.1 4.5-25.3 12.2L472.4 614.7a31.8 31.8 0 0 1-50.6.2L219.2 341.8a32 32 0 0 0-25.3-12.2H112c-14.5 0-22.1 17.6-12.6 28.7l295.9 335.4a64.2 64.2 0 0 0 99.1.3l411.9-467.9C934.1 207.6 926.5 190 912 190z'/%3E%3C/svg%3E"
@@ -5336,16 +5403,16 @@ html, body { margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Helvetica Neue", "Microsoft YaHei", Arial, sans-serif; font-size: 15px; line-height: 1.7; color: ${C.text}; background: ${C.panel}; -webkit-font-smoothing: antialiased; }
 .md { max-width: ${mdMaxWidth}; margin: 0 auto; padding: 32px 26px 60px; font-family: ${exportFontStack}; line-height: ${exportLineHeight}; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
-.md h1 { font-size: 1.8em; border-bottom: 1px solid ${C.border}; padding-bottom: 0.3em; }
-.md h2 { font-size: 1.5em; border-bottom: 1px solid ${C.border}; padding-bottom: 0.3em; }
+.md h1 { font-size: 1.8em; border-bottom: 1px solid ${C.headBorder}; padding-bottom: 0.3em; }
+.md h2 { font-size: 1.5em; border-bottom: 1px solid ${C.headBorder}; padding-bottom: 0.3em; }
 .md h3 { font-size: 1.25em; }
 .md p { margin: 0.8em 0; }
-.md a { color: ${C.primary}; text-decoration: none; }
+.md a { color: ${C.link}; text-decoration: none; }
 .md a:hover { text-decoration: underline; }
-.md code { background: ${C.hover}; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace; }
-.md pre { background: ${C.bg}; border: 1px solid ${C.border}; border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; }
+.md code { background: ${C.codeBg}; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace; }
+.md pre { background: ${C.preBg}; border: 1px solid ${C.preBorder}; border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; }
 .md pre code { background: transparent; padding: 0; font-size: 0.85em; tab-size: ${indent}; }
-.md blockquote { border-left: 4px solid ${C.primary}; padding: 0.5em 1em; margin: 1em 0; background: ${C.hover}; color: ${C.text2}; }
+.md blockquote { border-left: 4px solid ${C.quoteBorder}; padding: 0.5em 1em; margin: 1em 0; background: ${C.quoteBg}; color: ${C.text2}; }
 .md ul, .md ol { padding-left: 2em; margin: 0.8em 0; }
 .md li { margin: 0.3em 0; }
 .md li:has(> input[type="checkbox"]) { list-style: none; margin-left: -1.5em; }
@@ -5354,10 +5421,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 .md li:has(> input[type="checkbox"]:checked) > p { color: ${C.text2}; text-decoration: line-through; }
 .md table { border-collapse: collapse; width: 100%; margin: 1em 0; }
 .md th, .md td { border: 1px solid ${C.border}; padding: 8px 12px; text-align: left; }
-.md th { background: ${C.bg}; font-weight: 600; }
-.md tr:nth-child(even) { background: ${C.hover}; }
+.md th { background: ${C.thBg}; font-weight: 600; }
+.md tr:nth-child(even) { background: ${C.stripe}; }
 .md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
-.md hr { border: none; border-top: 1px solid ${C.border}; margin: 2em 0; }
+.md hr { border: none; border-top: 1px solid ${C.hr}; margin: 2em 0; }
 .md .mb > :first-child { margin-top: 0; }
 .hljs-comment, .hljs-quote { color: ${HL.comment}; font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-tag, .hljs-template-tag { color: ${HL.keyword}; }
@@ -6005,6 +6072,7 @@ ${bodyHtml}
       <div class="right">
         <span v-if="activeFile && activeFile.encrypted" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d48806" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>{{ $t('editor.encrypted') }}</span>
         <span v-else-if="activeFile" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>{{ $t('editor.plaintext') }}</span>
+        <span class="st st-menu" :title="$t('skin.statusTip')" @click="openSkinMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1 .9-2 2-2h1.5A4.5 4.5 0 0 0 21 10c0-3.9-4-7-9-7z" /><circle cx="7.6" cy="11.2" r="1.1" fill="currentColor" stroke="none" /><circle cx="10.2" cy="7.6" r="1.1" fill="currentColor" stroke="none" /><circle cx="14.6" cy="7.6" r="1.1" fill="currentColor" stroke="none" /></svg>{{ skinLabel }}</span>
         <span class="st st-menu" :title="$t('editor.fontSizeStatus', { size: store.settings.editorFontSize })" @click="openFontSizeMenu($event)"><svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor"><path d="M448 234.688v640H362.688v-640h-256V149.312H704v85.376H448zM789.312 576v298.688H704V576H576V490.688h341.312V576h-128z" /></svg>{{ store.settings.editorFontSize }} px</span>
         <span class="st st-menu" :title="$t('editor.autoLockClick')" @click="openAutoLockMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>{{ $t('editor.autoLock') }} {{ autoLockLabel }}</span>
         <span class="st">{{ unlockedCount }} {{ $t('editor.vaultWord') }}</span>
@@ -6585,6 +6653,7 @@ ${bodyHtml}
       <div v-if="ctxMenu.title" class="m-cap">{{ ctxMenu.title }}</div>
       <template v-for="(it, i) in ctxMenu.items" :key="i">
         <div v-if="it.kind === 'sep'" class="m-sep"></div>
+        <div v-else-if="it.kind === 'cap'" class="m-cap m-cap-in">{{ it.label }}</div>
         <div v-else class="m-item" :class="{ disabled: it.disabled }" @click="runCtxItem(it)">
           <span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ it.sc }}</span>
         </div>
@@ -6648,6 +6717,8 @@ ${bodyHtml}
 .menu .m-cap { font-size: 11px; color: var(--text-4); padding: 6px 10px 4px; }
 /* 弹层菜单顶部标题：视觉与右上角主菜单的分组名称（.menu .m-cap）保持一致，仅加不可选中 */
 .ctx-menu .m-cap { font-size: 11px; color: var(--text-4); padding: 6px 10px 4px; user-select: none; }
+/* 菜单中段的分组名（如皮肤菜单的「外观模式」/「皮肤」）：比顶部标题多留一点上间距 */
+.ctx-menu .m-cap-in { margin-top: 4px; }
 .m-item {
   display: flex; align-items: center; gap: 8px;
   height: 30px; padding: 0 10px;

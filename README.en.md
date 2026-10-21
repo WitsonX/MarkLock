@@ -93,7 +93,8 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 ### Security & polish
 
 - Idle auto-lock (5 min default), lock on minimize / sleep / screen lock, key material zeroized on lock, clipboard cleared after 60s
-- Light and dark themes, English / Chinese UI, adjustable editor font size plus preview font and spacing
+- Skin system: on top of light / dark / follow-system there are six color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox), switchable from the status bar; a skin covers the UI, the source editor, the Markdown preview and exported HTML, and advanced users can build their own (per-token palette plus free-form CSS)
+- English / Chinese UI, adjustable editor font size plus preview font and spacing
 - Full keyboard shortcut set: save, tab navigation (`⌘1…8` jumps to the Nth tab), in-editor find & replace, global search, view-mode switching, formatting, lock-everything
 - One click to make MarkLock the default handler for `.md` / `.mdl` / `.mdlb`
 - Optional launch-at-login (can start silently in the background), close-to-tray
