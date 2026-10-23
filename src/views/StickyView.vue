@@ -2,10 +2,13 @@
 import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
+import { PhysicalSize } from '@tauri-apps/api/dpi'
 import { useVaultStore } from '../stores/vault'
 import type { StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
+import { isMac } from '../lib/platform'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
 import appIcon from '../assets/about-icon.png'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
@@ -41,6 +44,8 @@ export default defineComponent({
       pendingTaskChecked: false,
       pwd: '',
       unlockErr: false,
+      // macOS 原生可拖边缩放且 tao 不支持 drag_resize_window，手柄仅在 Windows/Linux 显示
+      showResizeGrip: !isMac,
     }
   },
   computed: {
@@ -285,12 +290,79 @@ export default defineComponent({
       }
       setTimeout(() => { this.syncingScroll = false }, 60)
     },
-    onBlur() {
+    async onBlur() {
       this.focused = false
       // 打开系统文件选择框会让本窗短暂失焦，此时不能收起（否则选完文件回来窗已隐藏）。
       if (this.picking) return
+      // WebView 失焦 ≠ 窗口真正失去激活：窗口进入某些系统交互（如 Windows 的
+      // 系统 sizing 循环）时会先切换一次焦点，WebView2 随即触发 blur，但窗口仍是前台窗口。
+      // 若据此直接收起，就会出现「按住缩放手柄一移动鼠标便签就消失」。
+      // 故以系统前台窗口为准，只在窗口真被别的窗口或桌面抢走激活时才收起
+      //（macOS 无缩放手柄，保持失焦即收起的原行为）。
+      if (!isMac) {
+        const active = await tauri.stickyIsActive().catch(() => false)
+        if (active) return
+      }
       // 失焦即收起：先落盘再隐藏，保证便签内容不丢
       this.hide()
+    },
+    /**
+     * 右下角缩放手柄：按住拖动调整窗口大小。
+     *
+     * 不使用系统原生缩放（startResizeDragging）：Windows 上它是 ReleaseCapture +
+     * WM_NCLBUTTONDOWN 进入系统 sizing 循环，开始瞬间会切换一次焦点、WebView2 触发 blur，
+     * 与「失焦即收起」冲突（表现为按住手柄一移动鼠标便签就消失）。
+     * 这里改用 pointer capture + setSize 自行跟手：不进入原生循环、不产生焦点切换，
+     * 鼠标移出窗口后仍能继续收到 pointermove。
+     */
+    async startResize(e: PointerEvent) {
+      if (e.button !== 0) return
+      e.preventDefault()
+      const grip = e.currentTarget as HTMLElement
+      const win = getCurrentWindow()
+      // screenX/Y 是 CSS 像素，窗口尺寸是物理像素：用缩放比换算，避免高 DPI 下拖动幅度不对
+      const scale = await win.scaleFactor().catch(() => window.devicePixelRatio || 1)
+      const inner = await win.innerSize().catch(() => null)
+      if (!inner) return
+      try {
+        // 指针捕获：拖出窗口范围后仍持续收到 pointermove
+        grip.setPointerCapture(e.pointerId)
+      } catch {}
+      const startX = e.screenX
+      const startY = e.screenY
+      const startW = inner.width
+      const startH = inner.height
+      // 与建窗时 min_inner_size(300, 220) 对齐（换算为物理像素）
+      const minW = 300 * scale
+      const minH = 220 * scale
+      let raf = 0
+      let nextW = startW
+      let nextH = startH
+      const flush = () => {
+        raf = 0
+        win.setSize(new PhysicalSize(Math.round(nextW), Math.round(nextH))).catch(() => {})
+      }
+      const onMove = (ev: PointerEvent) => {
+        nextW = Math.max(minW, startW + (ev.screenX - startX) * scale)
+        nextH = Math.max(minH, startH + (ev.screenY - startY) * scale)
+        // 每帧最多下发一次，避免 pointermove 高频调用 IPC
+        if (!raf) raf = requestAnimationFrame(flush)
+      }
+      const onEnd = () => {
+        grip.removeEventListener('pointermove', onMove)
+        grip.removeEventListener('pointerup', onEnd)
+        grip.removeEventListener('pointercancel', onEnd)
+        if (raf) {
+          cancelAnimationFrame(raf)
+          flush()
+        }
+        try {
+          grip.releasePointerCapture(e.pointerId)
+        } catch {}
+      }
+      grip.addEventListener('pointermove', onMove)
+      grip.addEventListener('pointerup', onEnd)
+      grip.addEventListener('pointercancel', onEnd)
     },
     /** 未设置文件时直接在此选源文件：与设置页同规则（明文 md / 加密 mdl，.mdlb 容器除外）。 */
     async pickFile() {
@@ -337,6 +409,9 @@ export default defineComponent({
 
 <template>
   <div class="sticky">
+    <!-- 右下角缩放热区：不画图标也不带提示气泡（便签不固定从某个角落弹出，角落标记显得突兀），
+         只保留一块不可见拖拽区，鼠标移上去变斜向双箭头提示可调大小（见 startResize） -->
+    <div v-if="showResizeGrip" class="resize-grip" @pointerdown="startResize"></div>
     <!-- 自绘标题栏：整条可拖拽移动窗口（无边框窗靠它移动）；设置 / 关闭集中在右上角 -->
     <div class="sticky-bar" data-tauri-drag-region>
       <span class="grip" aria-hidden="true">⠿</span>
@@ -415,6 +490,25 @@ export default defineComponent({
   background: var(--panel);
   color: var(--text);
   overflow: hidden;
+  /* 圆角便签：配合窗口透明（见 lib.rs 的 transparent）+ global.css 的窗口背景透出，
+     overflow:hidden 把标题栏/正文/启动栏一并裁成圆角矩形 */
+  border-radius: 12px;
+  border: 1px solid var(--border-2);
+  /* 缩放热区用绝对定位钉在右下角 */
+  position: relative;
+}
+/* 右下角缩放热区：无可见图标，只靠斜向双箭头光标提示；比可视尺寸略大，方便命中 */
+.resize-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  z-index: 20;
+  cursor: nwse-resize;
+  /* 拖动期间不选中文字、不让触摸手势抢走指针 */
+  user-select: none;
+  touch-action: none;
 }
 .sticky-bar {
   display: flex;

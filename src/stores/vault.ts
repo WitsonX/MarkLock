@@ -94,6 +94,9 @@ export interface ClosedTab {
 const VAULT_COLORS = ['#1677ff', '#722ed1', '#13c2c2', '#fa8c16', '#eb2f96', '#52c41a']
 
 const RECENT_KEY = 'marklock.recent'
+
+/** 会话活动刷新的节流定时器表（模块级，不进入响应式状态）：库 id → 定时器句柄。 */
+const sessionTouchTimers = new Map<string, number>()
 const SETTINGS_KEY = 'marklock.settings'
 const FAVORITES_KEY = 'marklock.favorites'
 const RECENT_FILES_KEY = 'marklock.recentFiles'
@@ -1315,7 +1318,28 @@ export const useVaultStore = defineStore('vault', {
     /** 标记文件为已修改 */
     markDirty(path: string) {
       const file = this.openFiles.find((f) => f.path === path)
-      if (file) file.dirty = true
+      if (file) {
+        file.dirty = true
+        // 输入活动也刷新会话：后端自动锁定只统计磁盘操作，纯打字会被误判为闲置
+        this.scheduleSessionTouch(file.vaultId)
+      }
+    },
+
+    // ---------- 会话活动刷新 ----------
+    /**
+     * 节流刷新会话活动时间：每次键盘输入都会记脏，这里按库节流到每 15 秒
+     * 最多发一次 `touch_session`，让「无操作自动锁定」真正按用户活动计时。
+     * 会话已过期/不存在时后端会报错，静默忽略即可（回收轮询会同步界面状态）。
+     */
+    scheduleSessionTouch(vaultId: string) {
+      if (!vaultId || sessionTouchTimers.has(vaultId)) return
+      sessionTouchTimers.set(
+        vaultId,
+        window.setTimeout(() => {
+          sessionTouchTimers.delete(vaultId)
+          tauri.touchSession(vaultId).catch(() => {})
+        }, 15 * 1000),
+      )
     },
 
     // ---------- 设置 ----------
@@ -1338,6 +1362,21 @@ export const useVaultStore = defineStore('vault', {
 
     // ---------- 自动锁定回收 ----------
     async reapExpired() {
+      // 回收前给临近到期的库一次写回机会：后端会话一旦被回收就无法再加密写盘，
+      // 未保存的修改会随之丢弃。把剩余时长不足两个轮询周期（90 秒）的库的脏页签
+      // 先落盘（此刻会话仍有效，写回成功即刷新活动时间），再交给后端回收。
+      for (const v of this.recent) {
+        if (!v.unlocked) continue
+        let ttl: number | null = null
+        try {
+          ttl = await tauri.sessionTtl(v.id)
+        } catch {
+          continue
+        }
+        if (ttl != null && ttl < 90) {
+          await this.autoSaveEncryptedBeforeLock(v.id)
+        }
+      }
       const ids = await tauri.reapExpired()
       if (ids.length) {
         ids.forEach((id) => {

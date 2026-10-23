@@ -213,6 +213,11 @@ export function hideStickyNote() {
   return invoke<void>('hide_sticky_note')
 }
 
+/** 便签窗口是否仍是系统前台窗口：WebView 的 blur 在原生缩放循环中会误报，收起前以此为准。 */
+export function stickyIsActive() {
+  return invoke<boolean>('sticky_is_active')
+}
+
 /** 便签「设置」：唤回主窗口（含托盘隐藏态）并跳转设置页。 */
 export function openSettings() {
   return invoke<void>('open_settings')
@@ -392,6 +397,16 @@ export function unlockedCount() {
 /** 回收过期的会话（返回被自动锁定的库 id）。 */
 export function reapExpired() {
   return invoke<string[]>('reap_expired')
+}
+
+/** 刷新某个库会话的活动时间（打字等不落盘活动也计为「有操作」，防误判闲置锁定）。 */
+export function touchSession(vaultId: string) {
+  return invoke<void>('touch_session', { vaultId })
+}
+
+/** 查询会话距离自动锁定还剩的秒数；无会话时返回 null（已过期返回 0）。 */
+export function sessionTtl(vaultId: string) {
+  return invoke<number | null>('session_ttl', { vaultId })
 }
 
 // ==================== 搜索 ====================

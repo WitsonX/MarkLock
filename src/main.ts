@@ -7,6 +7,7 @@ import router from './router'
 import tip from './lib/tooltip'
 import { t } from './locales'
 import { isMac } from './lib/platform'
+import { isStickyWindow } from './lib/sticky'
 import { dismissSplash } from './lib/splash'
 import './styles/global.css'
 import './styles/skins.css'
@@ -14,6 +15,8 @@ import './styles/skins.css'
 // 平台标记：macOS 用隐藏原生标题栏方案（红绿灯叠加到自绘工具条），
 // Windows/Linux 保留系统原生标题栏，自绘工具条左侧无需预留红绿灯空间。
 document.documentElement.dataset.platform = isMac ? 'macos' : 'other'
+// 窗口标记：便签窗走透明 + 圆角方案，需据此把 html/body/#app 背景置为透明（见 global.css）。
+document.documentElement.dataset.window = isStickyWindow() ? 'sticky' : 'main'
 
 const app = createApp(App)
 app.use(createPinia())

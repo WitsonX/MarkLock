@@ -984,23 +984,41 @@ fn ml(zh: &str, en: &str) -> String {
     }
 }
 
-/// 构建系统托盘菜单（文案按 MENU_LANG 取中/英）：显示主窗口 / 偏好设置 / 全部锁定 / 退出。
+/// 构建系统托盘菜单（文案按 MENU_LANG 取中/英）：唤回主窗 / 设置 / 全部锁定 / 退出。
 /// 菜单项 id 以 `tray:` 前缀，由托盘自身的 on_menu_event 分派（与 macOS 原生菜单 `menu:` 命名空间隔离）。
 /// 语言切换时 set_native_menu_lang 会按 TRAY_ID 取回托盘并调用本函数重建菜单。
+///
+/// 文案与分隔线按平台分叉：Windows / Linux 的托盘菜单是系统绘制的原生弹层（字号、行高、
+/// 左侧图标/勾选留白、通栏分隔线都改不了），能控的只有项数与字长，故取短标签 + 只留一条分隔线，
+/// 避免菜单被拉得松散；macOS 沿用系统惯例（带应用名、「偏好设置」、双分隔）。
 fn build_tray_menu(handle: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
-    let show = MenuItemBuilder::with_id("tray:show", ml("打开 MarkLock", "Show MarkLock")).build(handle)?;
-    let prefs = MenuItemBuilder::with_id("tray:settings", ml("偏好设置", "Preferences")).build(handle)?;
+    let mac = cfg!(target_os = "macos");
+    let (show_t, prefs_t, quit_t) = if mac {
+        (
+            ml("打开 MarkLock", "Show MarkLock"),
+            ml("偏好设置", "Preferences"),
+            ml("退出 MarkLock", "Quit MarkLock"),
+        )
+    } else {
+        (
+            ml("显示主界面", "Show window"),
+            ml("设置", "Settings"),
+            ml("退出", "Exit"),
+        )
+    };
+    let show = MenuItemBuilder::with_id("tray:show", show_t).build(handle)?;
+    let prefs = MenuItemBuilder::with_id("tray:settings", prefs_t).build(handle)?;
     let lock = MenuItemBuilder::with_id("tray:lock-all", ml("全部锁定", "Lock All")).build(handle)?;
-    let quit = MenuItemBuilder::with_id("tray:quit", ml("退出 MarkLock", "Quit MarkLock")).build(handle)?;
-    MenuBuilder::new(handle)
-        .item(&show)
-        .item(&prefs)
-        .separator()
-        .item(&lock)
-        .separator()
-        .item(&quit)
-        .build()
+    let quit = MenuItemBuilder::with_id("tray:quit", quit_t).build(handle)?;
+    let builder = MenuBuilder::new(handle).item(&show).item(&prefs);
+    if mac {
+        // macOS：设置/锁定/退出 三段分隔，符合菜单栏图标的阅读预期
+        builder.separator().item(&lock).separator().item(&quit).build()
+    } else {
+        // Windows / Linux：前三项连排，仅退出前一条分隔线，菜单更紧凑
+        builder.item(&lock).separator().item(&quit).build()
+    }
 }
 
 /// 唤回主窗口：取消最小化 / 隐藏到托盘后显示并聚焦。托盘菜单项与左右键动作共用。
@@ -1203,6 +1221,9 @@ fn ensure_sticky_window(app: &tauri::AppHandle) -> tauri::Result<tauri::WebviewW
     .min_inner_size(300.0, 220.0)
     .always_on_top(true)
     .decorations(false)
+    // 透明窗口底：配合前端 CSS 圆角，让便签呈现圆角外观（四角透出桌面）。
+    // macOS 需 app.macOSPrivateApi + macos-private-api feature 才能真正透明（见 tauri.conf.json）。
+    .transparent(true)
     .resizable(true)
     .visible(false)
     .skip_taskbar(true)
@@ -1443,6 +1464,33 @@ fn hide_sticky_note(app: tauri::AppHandle) -> tauri::Result<()> {
         win.hide()?;
     }
     Ok(())
+}
+
+/// 便签窗口本身是否仍是系统的前台窗口（而不是 WebView 内部焦点）。
+///
+/// WebView 的 blur ≠ 窗口失去激活：窗口进入某些系统交互（如 Windows 的 sizing 循环）
+/// 时会先发生一次焦点切换，WebView2 随即触发 blur，但顶层窗口仍在前台。
+/// 便签「失焦即收起」以此为准，避免「按住缩放手柄一移动鼠标窗就消失」。
+#[tauri::command]
+fn sticky_is_active(app: tauri::AppHandle) -> bool {
+    let Some(win) = app.get_webview_window(STICKY_WINDOW) else {
+        return false;
+    };
+    #[cfg(target_os = "windows")]
+    {
+        extern "system" {
+            fn GetForegroundWindow() -> isize;
+        }
+        let Ok(hwnd) = win.hwnd() else {
+            return false;
+        };
+        let fg = unsafe { GetForegroundWindow() };
+        fg != 0 && fg == hwnd.0 as isize
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        win.is_focused().unwrap_or(false)
+    }
 }
 
 /// 便签「打开 MarkLock」主图标按钮：唤回主窗口（取消最小化 / 托盘隐藏态后显示并聚焦，不跳转页面）。
@@ -2272,6 +2320,19 @@ fn reap_expired() -> Vec<String> {
     vault::reap_expired(store())
 }
 
+/// 刷新某个库会话的活动时间：前端在输入等不落盘活动时按节流调用，
+/// 避免「一直打字却因不保存」被闲置计时误锁。
+#[tauri::command]
+fn touch_session(vault_id: String) -> Result<(), crypto::CryptoError> {
+    vault::touch_session(store(), &vault_id)
+}
+
+/// 查询某会话距离自动锁定还剩的秒数；无会话返回 `None`。
+#[tauri::command]
+fn session_ttl(vault_id: String) -> Result<Option<u64>, crypto::CryptoError> {
+    Ok(store().ttl_secs(&vault_id))
+}
+
 /// 全局搜索：已解锁库（解密后匹配）+ 工作目录（明文匹配）。
 #[tauri::command]
 fn search(
@@ -2412,6 +2473,7 @@ pub fn run() {
             set_auto_start,
             show_sticky_note,
             hide_sticky_note,
+            sticky_is_active,
             open_settings,
             show_main_window,
             sticky_engage,
@@ -2444,6 +2506,8 @@ pub fn run() {
             try_set_default_file_handler,
             unlocked_count,
             reap_expired,
+            touch_session,
+            session_ttl,
             search,
             batch_encrypt,
             import_dir_to_vault,

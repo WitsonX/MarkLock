@@ -140,6 +140,18 @@ body {
   overflow: hidden;
 }
 
+/* 便签窗：整窗透明 + 圆角，需让 html/body/#app 与 index.html 内联底色都透出，
+   才能让 .sticky 的圆角外四角真正透明（透出桌面）。见 StickyView.vue 的 .sticky 圆角。 */
+html[data-window="sticky"],
+html[data-window="sticky"] body,
+html[data-window="sticky"] #app {
+  background: transparent;
+}
+/* 启动屏在便签窗首次创建时会短暂覆盖整窗，同步圆角避免方角闪烁。 */
+html[data-window="sticky"] #splash {
+  border-radius: 12px;
+}
+
 ::selection { background: var(--selection); }
 
 /* 细滚动条 */

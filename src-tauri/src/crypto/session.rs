@@ -73,8 +73,9 @@ impl SessionStore {
         let vault = m.get_mut(id).ok_or(CryptoError::NotUnlocked)?;
         let now = Instant::now();
         if vault.expired(now) {
-            // 过期即清零密钥并移除
-            m.remove(id);
+            // 过期会话不可再用，但**不在此移除**：留给 `reap_expired` 统一上报。
+            // 若这里静默删除，前端 30 秒一次的回收轮询就再也拿不到该 id，
+            // 界面会停留在「已解锁」假象，保存永远报「尚未解锁」且状态无法自愈。
             return Err(CryptoError::NotUnlocked);
         }
         vault.touch();
@@ -121,6 +122,16 @@ impl SessionStore {
             .get(id)
             .map(|v| v.auto_lock)
             .unwrap_or(DEFAULT_AUTO_LOCK)
+    }
+
+    /// 查询某会话距离自动锁定还剩的秒数；无会话返回 `None`（已过期返回 0）。
+    /// 供前端在到期回收前「抢救式」写回未保存修改（会话仍有效时）。
+    pub fn ttl_secs(&self, id: &str) -> Option<u64> {
+        let m = self.vaults.lock().unwrap();
+        let v = m.get(id)?;
+        let now = Instant::now();
+        let elapsed = now.duration_since(v.last_activity);
+        Some(v.auto_lock.saturating_sub(elapsed).as_secs())
     }
 
     /// 所有已解锁库的 id 列表（用于全库搜索等遍历场景）。

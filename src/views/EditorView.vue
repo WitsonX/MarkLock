@@ -8,6 +8,7 @@ import type { OpenFile, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
+import { isMac } from '../lib/platform'
 import { t as translate, lang } from '../locales'
 import { resolveFontStack } from '../lib/fonts'
 import { cssVar, BUILTIN_SKINS } from '../lib/skins'
@@ -630,12 +631,17 @@ export default defineComponent({
         lastMinimized = min
       } catch {}
     }, 500)
-    // 系统休眠 / 锁屏锁定：休眠会挂起定时器，唤醒后心跳出现大间隔；页面隐藏后恢复同理
+    // 系统休眠 / 锁屏锁定：休眠会挂起定时器，唤醒后心跳出现大间隔；页面隐藏后恢复同理。
+    // macOS 注意：切到其它窗口/被遮挡/切换 Space 都会让页面变 hidden，这不是休眠；
+    // 若按「隐藏超过数秒即锁定」会把切窗误判为休眠（真实锁屏由后端 marklock://screen-locked
+    // 精确探测）。故 macOS 仅保留心跳兜底且阈值放宽到 30 秒（真实休眠间隔远大于此），
+    // 其余平台无后端探测，维持原启发式。
     const SUSPEND_GAP_MS = 5000
+    const HEARTBEAT_GAP_MS = isMac ? 30_000 : SUSPEND_GAP_MS
     let lastBeat = Date.now()
     this._sleepTimer = setInterval(() => {
       const now = Date.now()
-      if (this.store.settings.lockOnSleep && now - lastBeat > SUSPEND_GAP_MS) {
+      if (this.store.settings.lockOnSleep && now - lastBeat > HEARTBEAT_GAP_MS) {
         this.store.lockAll().catch(() => {})
       }
       lastBeat = now
@@ -647,7 +653,7 @@ export default defineComponent({
       } else if (hiddenAt) {
         const hidden = Date.now() - hiddenAt
         hiddenAt = 0
-        if (this.store.settings.lockOnSleep && hidden > SUSPEND_GAP_MS) this.store.lockAll().catch(() => {})
+        if (!isMac && this.store.settings.lockOnSleep && hidden > SUSPEND_GAP_MS) this.store.lockAll().catch(() => {})
         // 回到前台：立刻查一轮文件戳记与目录条目，不等下一个轮询间隔（切回本应用时最关心外部改动）
         externalChanges.check().catch(() => {})
         workdirChanges.check().catch(() => {})

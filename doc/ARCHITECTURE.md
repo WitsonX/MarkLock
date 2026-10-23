@@ -194,6 +194,7 @@ src/
 | `read_plain_file` / `write_plain_file` | 明文读写 |
 | `inspect_path` | 探测路径类型（目录/库/库内文件/明文） |
 | `unlocked_count` / `reap_expired` | 状态查询 / 回收过期会话 |
+| `touch_session(vault_id)` / `session_ttl(vault_id)` | 刷新会话活动时间 / 查距自动锁定剩余秒数 |
 | `search(query, workdirs?)` | 全局搜索（库 + 工作目录明文） |
 | `file_stamps(paths)` | 批量查文件 mtime + 大小（外部修改监控）|
 | `set_backup_enabled(enabled)` | 同步「保存时保留上一版备份」开关到 Rust 侧 |
@@ -215,10 +216,12 @@ src/
 ### 5.5 权限（capabilities/default.json）
 
 ```json
-["core:default", "core:window:allow-start-dragging", "notification:default", "autostart:default", "dialog:default"]
+["core:default", "core:window:allow-start-dragging", "core:window:allow-set-size", "notification:default", "autostart:default", "dialog:default"]
 ```
 
-> 关键：`core:window:allow-start-dragging` 是窗口拖拽的前提（`core:default` 不含它，缺失会导致拖拽静默失效）。
+> 关键：`core:window:allow-start-dragging` 是窗口拖拽的前提（`core:default` 不含它，缺失会导致拖拽静默失效）；`core:window:allow-set-size` 同理是便签拖边缩放（`setSize`）的前提，缺失时拖动无反应且静默拒绝。
+>
+> 便签圆角需要透明窗口。macOS 上 `transparent(true)` 只有开启了 Cargo feature `macos-private-api` 才会真正下发（`tauri-runtime-wry` 按该 feature 条件编译，缺失时静默忽略、debug 构建打一行提示）；而 `app.macOSPrivateApi: true` 会让 `tauri-build` 校验该 feature 已在 `Cargo.toml` 声明，两者必须同时存在。此组合与 Mac App Store 上架不兼容。
 
 ---
 
@@ -242,6 +245,7 @@ src/
 - **皮肤（配色）**：与明暗**正交**，落在 `html[data-skin]`。`skins.css` 里每套皮肤都写成 `[data-skin='x'][data-theme='light']` 与 `…[data-theme='dark']` 两份，避免亮色值渗进深色。
 - **派生 token**：`:root` 把预览用的 `--md-*`、编辑器用的 `--cm-*` 默认值声明成 `var(--bg)` 之类的基础变量，皮肤只改基础色就能自动级联到预览与 CodeMirror；需要微调时可直接覆盖派生 token。
 - **自定义皮肤**：存于 `settings.customSkins`（localStorage），由 `lib/skins.ts` 的 `buildCustomSkinCss` 生成与内置同形状的 CSS，用 `textContent` 写入 `<style id="marklock-custom-skins">`（不走 innerHTML，变量名与值均经白名单/`;{}<>` 过滤）。编辑时用独立的 `<style id="marklock-skin-preview">` + `data-skin="__preview__"` 做所见即所得，取消 / 保存 / 组件卸载时清理。
+- **以内置皮肤为底稿**：卡片上的「复制并编辑」走 `forkSkin`——`snapshotSkinTokens` 从 `document.styleSheets` 里读出该皮肤浅、深两套**显式声明**的令牌（跨域样式表读取失败即跳过），连同新 id 交给编辑器；只取显式声明的令牌，未声明的项继续继承基线，改起来不会把整套底色硬抄一遍。
 - **CodeMirror**：不再引 `oneDark`，改用 `EditorView.theme(spec, { dark })` 直接读 CSS 变量，语法色由 `HighlightStyle.define` 走 `--cm-*` / `--hl-*`，`defaultHighlightStyle` 仅作 fallback。
 - **导出 HTML**：`buildStandaloneHtml` 通过 `cssVar()` 读运行时变量，导出件跟随当前皮肤。
 
@@ -253,7 +257,17 @@ src/
 
 ### 6.5 自动锁定
 
-- Rust `SessionStore` 维护活动时间戳，超时（默认 5 分钟）`reap_expired` 清零密钥；前端每 30 秒轮询一次。
+- Rust `SessionStore` 按会话记录 `last_activity`，超时（默认 5 分钟，档位 60/300/900/1800/0）后密钥清零；前端每 30 秒轮询一次 `reap_expired`，到期的库页签变回占位。
+- **过期 ≠ 就地移除**：`with_vault` 遇到过期会话只返回 `NotUnlocked`，条目保留，删除统一由 `reap_expired` 完成。若在读取路径静默 `remove`，前端轮询就拿不到该 id，界面会停在「已解锁」的假象上，保存永远报「尚未解锁」且无法自愈。代价是过期密钥在内存中最多滞留一个轮询周期。
+- **打字计入活动**：后端只统计真正落盘的读写，关闭自动保存时「一直敲字不保存」会被误判为闲置。前端 `markDirty` → `scheduleSessionTouch` 按库节流 15 秒调用一次 `touch_session`（内部就是 `with_vault(id, |_| Ok(()))`，顺带完成过期校验）。
+- **到期前先落盘**：`reapExpired()` 遍历已解锁库，对 `session_ttl < 90`（不足两个轮询周期）的库先执行 `autoSaveEncryptedBeforeLock`——此刻会话仍有效，写回成功也顺带刷新活动时间——再交给后端回收，避免未保存内容随密钥一起蒸发。
+- **休眠与锁屏**（`settings.lockOnSleep`）：macOS 由 Rust 每秒轮询会话字典的 `CGSSessionScreenIsLocked`，从「未锁 → 已锁」时发出 `marklock://screen-locked` 事件，这是精确信号。前端的「页面隐藏超过 N 秒即判定休眠」启发式在 mac 上不可靠——切到别的窗口、被遮挡、换 Space 都会让页面变 `hidden`，会把正常切窗误判为休眠，所以 mac 跳过该启发式、只保留心跳兜底且阈值放宽到 30 秒（真实休眠挂起远大于此）；Windows / Linux 没有后端探测，维持 5 秒阈值。
+
+### 6.6 便签窗（透明圆角与自定义缩放）
+
+- **圆角**：便签是无边框窗，圆角靠「窗口透明 + `.sticky` 自绘 12px 圆角 + 1px 边框 + `overflow: hidden`」。透明底色需要三层同时透出：Rust `transparent(true)`、前端 `html[data-window="sticky"]` 下 `html/body/#app` 背景置透明（`main.ts` 按 `isStickyWindow()` 打标记），以及 `index.html` 内联启动屏 `#splash` 同步圆角，否则首帧闪过方角底色。
+- **缩放**：右下角不可见热区（16px，斜向双箭头光标）自行跟手，不用系统原生缩放（`startResizeDragging`）。原因：Windows 的原生 sizing 循环开始瞬间会切一次焦点，WebView2 随之触发 `blur`，与「失焦即收起」冲突，表现为按住手柄一动便签就消失。实现用 pointer capture（拖出窗口仍继续收 `pointermove`）+ `requestAnimationFrame` 节流 `setSize`，`screenX/Y` 是 CSS 像素、窗口尺寸是物理像素，需乘 `scaleFactor`；下限 300×220 与 Rust `min_inner_size` 对齐。macOS 不显示手柄：无边框窗的 `styleMask` 仍含 `Resizable`，边缘本就能直接拖拽缩放（且 tao 在 mac 的 `drag_resize_window` 返回 `NotSupported`，代码也触发不了），再放一块热区只是噪声。
+- **失焦收起**：`blur` 不等于窗口失去激活，非 mac 平台收起前先问 `sticky_is_active`（Windows 直接比对 `GetForegroundWindow()` 与本窗 hwnd，绕开 WebView 内部焦点）；仍在前台就忽略这次 blur。打开系统文件选择框同理由 `picking` 标志挡住。
 
 ---
 

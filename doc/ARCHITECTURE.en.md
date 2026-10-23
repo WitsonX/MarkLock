@@ -194,6 +194,7 @@ Keys and plaintext never enter the store.
 | `read_plain_file` / `write_plain_file` | Plaintext read/write |
 | `inspect_path` | Probe a path's type (directory / vault / file inside a vault / plaintext) |
 | `unlocked_count` / `reap_expired` | Status query / reclaim expired sessions |
+| `touch_session(vault_id)` / `session_ttl(vault_id)` | Refresh a session's activity timestamp / read seconds left before auto-lock |
 | `search(query, workdirs?)` | Global search (vaults + plaintext files in the working directory) |
 | `file_stamps(paths)` | Batch-query file mtime + size (external-change monitoring) |
 | `set_backup_enabled(enabled)` | Sync the "keep previous version on save" toggle to the Rust side |
@@ -215,10 +216,12 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 ### 5.5 Permissions (capabilities/default.json)
 
 ```json
-["core:default", "core:window:allow-start-dragging", "notification:default", "autostart:default", "dialog:default"]
+["core:default", "core:window:allow-start-dragging", "core:window:allow-set-size", "notification:default", "autostart:default", "dialog:default"]
 ```
 
-> Key point: `core:window:allow-start-dragging` is the prerequisite for window dragging (`core:default` doesn't include it — missing it makes dragging fail silently).
+> Key point: `core:window:allow-start-dragging` is the prerequisite for window dragging (`core:default` doesn't include it — missing it makes dragging fail silently); `core:window:allow-set-size` is likewise the prerequisite for the sticky note's drag-to-resize (`setSize`) — without it the drag is rejected silently.
+>
+> The sticky note's rounded corners need a transparent window. On macOS, `transparent(true)` is only actually applied when the Cargo feature `macos-private-api` is enabled (`tauri-runtime-wry` compiles it behind that feature; without it transparency is silently ignored, with a one-line notice in debug builds), and `app.macOSPrivateApi: true` makes `tauri-build` verify that feature is declared in `Cargo.toml` — both must be present. This combination is incompatible with Mac App Store distribution.
 
 ---
 
@@ -242,6 +245,7 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **Skins (palette)**: **orthogonal** to light/dark, carried by `html[data-skin]`. Every skin in `skins.css` is written twice — `[data-skin='x'][data-theme='light']` and `…[data-theme='dark']` — so light values can never leak into dark mode.
 - **Derived tokens**: `:root` declares the preview tokens `--md-*` and editor tokens `--cm-*` in terms of base variables (`var(--bg)` and friends), so a skin that only overrides base colors cascades into the preview and CodeMirror automatically; fine-tuning can override a derived token directly.
 - **Custom skins**: stored in `settings.customSkins` (localStorage). `buildCustomSkinCss` in `lib/skins.ts` emits CSS with the same selector shape as the built-ins and writes it via `textContent` into `<style id="marklock-custom-skins">` (never innerHTML; variable names and values pass an allow-list / `;{}<>` filter). Editing uses a separate `<style id="marklock-skin-preview">` plus `data-skin="__preview__"` for WYSIWYG, cleaned up on cancel / save / unmount.
+- **Built-ins as a starting point**: the "duplicate and edit" button on each card calls `forkSkin`, which uses `snapshotSkinTokens` to read the tokens a built-in **declares explicitly** in both its light and dark rules from `document.styleSheets` (cross-origin sheets throw and are skipped) under a fresh id. Inherited tokens stay inherited — a fork carries only what the source skin explicitly declares.
 - **CodeMirror**: `oneDark` is gone; the theme is now `EditorView.theme(spec, { dark })` reading CSS variables, with syntax colors from `HighlightStyle.define` over `--cm-*` / `--hl-*` and `defaultHighlightStyle` kept only as a fallback.
 - **HTML export**: `buildStandaloneHtml` reads runtime variables through `cssVar()`, so exports follow the active skin.
 
@@ -253,7 +257,17 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 
 ### 6.5 Auto-lock
 
-- Rust's `SessionStore` tracks activity timestamps; on timeout (5 minutes by default) `reap_expired` zeroizes the keys; the frontend polls every 30 seconds.
+- Rust's `SessionStore` records `last_activity` per session; after the timeout (5 minutes by default; tiers 60/300/900/1800/0) the keys are zeroized. The frontend polls `reap_expired` every 30 seconds, and the affected vault's tabs fall back to their placeholder.
+- **Expired ≠ removed in place**: `with_vault` on an expired session only returns `NotUnlocked` and keeps the entry; removal happens exclusively in `reap_expired`. Silently `remove`ing on the read path would leave the polling loop without the id, so the UI would stay stuck on a "unlocked" illusion, saves would keep failing with "not unlocked", and the state could never heal itself. The price is that an expired key lingers in memory for at most one poll interval.
+- **Typing counts as activity**: the backend only sees reads/writes that touch disk, so with autosave off "typing without saving" looked idle and got locked. `markDirty` → `scheduleSessionTouch` now calls `touch_session` throttled to once per 15 seconds per vault (the command is just `with_vault(id, |_| Ok(()))`, which also re-checks expiry).
+- **Flush before the deadline**: `reapExpired()` walks the unlocked vaults and, for any whose `session_ttl < 90` (under two poll intervals), runs `autoSaveEncryptedBeforeLock` first — the session is still valid at that moment, and a successful write also refreshes its timestamp — only then letting the backend reap. Dirty content no longer vanishes along with the key.
+- **Sleep and screen lock** (`settings.lockOnSleep`): on macOS, Rust polls the session dictionary's `CGSSessionScreenIsLocked` once a second and emits `marklock://screen-locked` on the unlocked → locked transition — a precise signal. The frontend's "page hidden for N seconds = the machine slept" heuristic is unreliable on mac: switching windows, being occluded, or changing Space all make the page `hidden`, so a plain window switch would be misread as sleep. macOS therefore skips that heuristic and keeps only the heartbeat backstop with its gap widened to 30 seconds (a real suspend gap is far larger); Windows / Linux have no backend probe and keep the 5-second threshold.
+
+### 6.6 Sticky note window (transparent corners and custom resize)
+
+- **Rounded corners**: the sticky note is an undecorated window, so the radius comes from "transparent window + a self-drawn 12px radius and 1px border on `.sticky` + `overflow: hidden`". Three layers must let the desktop show through: Rust's `transparent(true)`, the frontend clearing the `html/body/#app` backgrounds under `html[data-window="sticky"]` (the marker is set in `main.ts` from `isStickyWindow()`), and the inline `#splash` in `index.html` getting the same radius — otherwise the first frame flashes square-tinted corners.
+- **Resizing**: an invisible 16px hot zone in the bottom-right corner (with a nwse-resize cursor) tracks the pointer itself instead of using the system resize (`startResizeDragging`). Reason: on Windows the native sizing loop switches focus the instant it starts, WebView2 fires `blur`, and that collides with "hide on blur" — the note disappeared as soon as you began dragging the handle. The implementation uses pointer capture (so `pointermove` keeps arriving outside the window) plus a `requestAnimationFrame`-throttled `setSize`; `screenX/Y` are CSS pixels while window sizes are physical, so they're multiplied by `scaleFactor`, and the 300×220 floor matches Rust's `min_inner_size`. macOS shows no handle: an undecorated window's `styleMask` still carries `Resizable`, so edges already drag natively (and tao's `drag_resize_window` returns `NotSupported` on mac, so the loop can't be entered from code anyway) — an extra hot zone would only be noise.
+- **Hiding on blur**: `blur` doesn't mean the window lost activation. On non-mac platforms the hide is gated on `sticky_is_active` first (Windows compares `GetForegroundWindow()` against this window's hwnd, bypassing WebView-internal focus); if the window is still frontmost, the blur is ignored. Opening the system file picker is blocked the same way through the `picking` flag.
 
 ---
 

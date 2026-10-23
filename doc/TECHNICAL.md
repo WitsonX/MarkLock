@@ -100,7 +100,7 @@ wrapped_dek   : KEK 包裹后的 DEK
 
 - **解锁**：主密码 + salt → Argon2id → KEK → 解开 DEK → 解密整棵文件树到内存。个人笔记体量下全程 < 300ms。
 - **写入**：解锁后改任一文件，整棵树重新序列化加密、整体重写 `.mdlb`。这个"整体重写"是单文件容器换来的简化——不需要增量索引和碎片管理，代价在个人体量下无感。
-- **自动锁定**：`SessionStore` 每次读写刷新活动时间戳，超时（默认 5 分钟）由 `reap_expired` 清零对应密钥；窗口关闭时 `lock_all`。前端每 30 秒调一次 `reap_expired`，到期的库页签变占位。
+- **自动锁定**：`SessionStore` 每次读写刷新活动时间戳，超时（默认 5 分钟）由 `reap_expired` 清零对应密钥；窗口关闭时 `lock_all`。前端每 30 秒调一次 `reap_expired`，到期的库页签变占位。两处细节：**过期只在读取时报错、不就地删条目**（删除统一由 `reap_expired` 上报，否则前端拿不到 id、界面卡在「已解锁」假象）；**打字也算活动**——`markDirty` 会按库节流 15 秒调一次 `touch_session`，否则关掉自动保存后一直敲字会被误判闲置。此外回收轮询会先查 `session_ttl`，对剩余不足 90 秒的库先把脏页签落盘（此刻密钥仍可用），再交给后端回收，未保存内容不会随密钥一起消失。
 
 ### 安全防护
 
@@ -108,6 +108,7 @@ wrapped_dek   : KEK 包裹后的 DEK
 - **防篡改**：GCM tag 校验失败即拒绝解密。
 - **失败次数限制**：连续错误密码后限制尝试。
 - **剪贴板**：复制的解密内容 60 秒后自动清除；锁定时可一次性清除剪贴板。
+- **休眠 / 锁屏锁定**（设置里的可开关项）：macOS 由 Rust 每秒轮询会话字典的 `CGSSessionScreenIsLocked`，在「未锁 → 已锁」时发 `marklock://screen-locked` 事件，是精确信号；mac 前端因此**不**采用「页面隐藏数秒即判定休眠」的启发式（切窗口、被遮挡、换 Space 都会让页面 `hidden`，会误锁），只保留阈值放宽到 30 秒的心跳兜底。Windows / Linux 无后端探测，维持 5 秒启发式。
 
 ## Rust 加密核心
 
@@ -153,6 +154,7 @@ wrapped_dek   : KEK 包裹后的 DEK
 | `change_password(vaultId, path, old, new)` | 改密码 |
 | `lock(vaultId)` / `lock_all` | 锁定单个 / 全部 |
 | `unlocked_count` / `reap_expired` | 状态查询 / 回收过期会话 |
+| `touch_session(vaultId)` / `session_ttl(vaultId)` | 刷新会话活动时间 / 查距自动锁定剩余秒数（无会话返回 `null`，已过期返回 0） |
 
 **其它**
 
@@ -208,7 +210,10 @@ MarkLock/
 便签是一个**独立轻窗口**，与主窗口共享同一套加密会话与预览渲染：
 
 - **窗口单例**：首次唤出时创建、之后复用（create-once），隐藏而非销毁，避免每次弹出都重建 WebView 带来的延迟与内存抖动。
+- **圆角外观**：无边框 + 窗口透明（Rust `transparent(true)`，macOS 需 Cargo feature `macos-private-api` 与配置里的 `app.macOSPrivateApi` 同时开启）+ `.sticky` 自绘 12px 圆角和 1px 边框，`overflow: hidden` 把标题栏与正文一并裁成圆角；前端按 `main.ts` 写入的 `html[data-window="sticky"]` 标记把 `html/body/#app` 与启动屏底色透出，否则四角仍是方角。
+- **拖边缩放**：右下角一块 16px 不可见热区，用 pointer capture + 每帧一次的 `setSize` 自行跟手（CSS 像素 × `scaleFactor` 换算成物理像素，下限与 Rust `min_inner_size` 的 300×220 对齐）。不走系统原生缩放：Windows 的原生 sizing 循环会在开始瞬间切一次焦点、触发 WebView `blur`，和「失焦即收起」冲突。相应地，收起前先问 `sticky_is_active`（Windows 直接比对前台窗口句柄），窗口还在前台就忽略这次 blur；macOS 不显示热区，无边框窗的边缘本就能拖。
 - **唤出路径**：托盘 / 菜单栏图标的左、右键动作各自可在设置里指定（弹出菜单 / 显示主界面 / 弹出便签；默认 macOS 左键弹便签、其余平台左键显示主界面、右键弹菜单）——非「弹出菜单」的键由 Rust 关掉系统自动弹菜单并改收 Click 事件（Down），故 macOS 左键同样可用；两键都不绑菜单时设置页会给提醒，以及**屏幕热角**——Rust 侧轮询鼠标坐标，在指定角落连续停留超过设定时长后触发弹出；可选"必须按住修饰键"作为二次确认，避免路过角落误触。便签从触发的那个角落弹出。
+- **托盘菜单文案按平台分叉**：macOS 沿用系统惯例（「打开 MarkLock」「偏好设置」「退出 MarkLock」，两段分隔线）；Windows / Linux 的托盘菜单由系统绘制，字号、行高、左侧留白、通栏分隔线都改不动，能控的只有项数与字长，因此取短标签（「显示主界面」「设置」「退出」）且只在退出前留一条分隔线，避免菜单被拉得松散。文案随界面语言在 `build_tray_menu` 里按 `MENU_LANG` 生成，切换语言时重建。
 - **内容源**：任意 `.md` 明文或 `.mdl` 加密文件；所在库锁定时便签内直接给密码框解锁。`.mdlb` 是多文件容器，暂不作为单个便签源。
 - **编辑预览一体**：编辑 / 分屏 / 预览三态复用主编辑器的 CodeMirror 与 `preview.ts`，保存走同一套 `write_file` / `write_file_vault` 命令，因此落盘一样是密文。
 - **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。

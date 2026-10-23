@@ -1106,6 +1106,12 @@ pub fn lock_all_vaults(store: &SessionStore) {
     store.lock_all();
 }
 
+/// 刷新会话活动时间：持续输入等不落盘的用户活动也应计为「有操作」，
+/// 否则纯打字（自动保存关闭时）会被误判为闲置而到期锁定。
+pub fn touch_session(store: &SessionStore, vault_id: &str) -> Result<()> {
+    store.with_vault(vault_id, |_| Ok(()))
+}
+
 /// 回收所有过期的会话（自动锁定计时到点）。
 pub fn reap_expired(store: &SessionStore) -> Vec<String> {
     store.reap_expired()
