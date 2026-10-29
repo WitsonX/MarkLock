@@ -1,5 +1,5 @@
 <script lang="ts">
-import { defineComponent, nextTick } from 'vue'
+import { defineComponent, h, nextTick } from 'vue'
 import { message } from 'ant-design-vue'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
@@ -39,12 +39,50 @@ const revealLabel = () => {
   return translate('editor.revealFiles')
 }
 
+/** 菜单小图标：以 strings 映射（viewBox 24 / stroke currentColor，与工具栏线性图标同风格）。
+ *  主菜单经 v-html 注入 .m-icn 容器，右键菜单项的 icon 字段同样走此映射；
+ *  克制原则：只给少数有辨识度的重点项配图标（新建/打开文件、新建加密库、偏好设置、退出、
+ *  收藏星标、在访达中显示、关闭），同组重复的变体（关闭其它/已保存/全部）与勾选切换类保持纯文字。 */
+const MENU_ICONS: Record<string, string> = {
+  file: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" />',
+  folderOpen: '<path d="M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z" /><path d="M3 11h18l-2.2 8H5.2z" />',
+  lock: '<rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" />',
+  star: '<path d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
+  starFilled: '<path fill="currentColor" stroke="none" d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
+  reveal: '<path d="M11 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /><path d="M14 4h6v6" /><path d="M20 4l-8.5 8.5" />',
+  close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />',
+  settings: '<circle cx="12" cy="12" r="3" /><path d="M12 2.8l1.5 2.6 2.9-.4.4 2.9 2.6 1.5-1.4 2.6 1.4 2.6-2.6 1.5-.4 2.9-2.9-.4L12 21.2l-1.5-2.6-2.9.4-.4-2.9L4.6 14l1.4-2.6-1.4-2.6L7.2 7.9l.4-2.9 2.9.4z" />',
+  power: '<path d="M12 3v8" /><path d="M6.3 6.5a8 8 0 1 0 11.4 0" />',
+}
+
+/** 菜单图标的配色：按语义给一档中低饱和的彩色（浅色/深色皮肤下都看得清），
+ *  以 svg 的 color 传给内部的 currentColor，路径细节不必各自写色。 */
+const MENU_ICON_COLORS: Record<string, string> = {
+  file: '#5b9bd5',
+  folderOpen: '#5b9bd5',
+  reveal: '#3f9ae0',
+  lock: '#c99a3f',
+  star: '#c9a227',
+  starFilled: '#e0a92b',
+  close: '#d0685f',
+  settings: '#8a919e',
+  power: '#d0685f',
+}
+
+/** 生成菜单项小图标的 svg 字符串（配合 v-html 使用）。注意：v-html 内容拿不到 scoped CSS
+ *  （data-v 属性只加在模板节点上），尺寸与描边必须写在 svg 自身的属性/内联样式上，
+ *  否则 WebKit 下 svg 会被渲染成 0×0 的空元素。 */
+const menuIcon = (name: keyof typeof MENU_ICONS) =>
+  `<svg width="16" height="16" viewBox="0 0 24 24" style="display:block;flex:0 0 auto;color:${MENU_ICON_COLORS[name] ?? 'currentColor'};fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round">${MENU_ICONS[name]}</svg>`
+
 export default defineComponent({
   name: 'EditorView',
   components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, EncIcon },
   data() {
     return {
       currentMode: 'split' as 'edit' | 'split' | 'preview',
+      // 主菜单模板里经 v-html 注入的小图标 svg（映射表见 MENU_ICONS）
+      menuIcon,
       moreOpen: false,
       // 自绘右键上下文菜单（标题栏/状态栏/页签栏/页签项/侧边栏共用）；title 仅部分菜单用（如状态栏字号/自动锁定）
       ctxMenu: { visible: false, x: 0, y: 0, items: [] as any[], title: '' },
@@ -171,6 +209,8 @@ export default defineComponent({
       showAssetPrompt: false,
       assetPromptFiles: [] as string[],
       assetBusy: false,
+      // 附件缓存刷新版本号：materialize 后自增，强制预览 computed 重算（assetDir 值可能不变）
+      assetVersion: 0,
       // 粘贴图片/文件监听句柄（document 捕获阶段，优先于 CodeMirror 默认粘贴）
       _onPaste: null as ((e: ClipboardEvent) => void) | null,
 
@@ -354,6 +394,16 @@ export default defineComponent({
     isActiveFileLocked() {
       return !!this.activeFile && this.activeFile.locked
     },
+    /** 活跃页签所属库/会话是否解锁态：.mdl 看页签 locked，库看 recent.unlocked。
+     *  解锁完成时由 false→true，watch 据此补跑 materialize（解锁流程内的调用点
+     *  可能落在状态稳定前，导致解锁瞬间首渲没命中缓存而裂图）。 */
+    activeVaultUnlocked(): boolean {
+      const f = this.activeFile
+      if (!f || !f.encrypted) return true
+      if (f.vaultId === f.path) return !f.locked
+      const v = this.store.recent.find((x) => x.id === f.vaultId)
+      return !v ? true : !!v.unlocked
+    },
     // 当前编辑内容（双向绑定到 textarea）
     activeContent: {
       get(): string {
@@ -387,6 +437,8 @@ export default defineComponent({
     renderedPreview() {
       // 依赖当前语言：切语言时重渲染预览（代码复制按钮等 marked 内文案随之更新）
       void lang.value
+      // 依赖附件缓存版本：粘贴/解锁后 materialize 刷新缓存，即使 assetDir 值不变也强制重算
+      void this.assetVersion
       return this.renderMarkdown(this.activeFile?.content ?? '')
     },
     /** 预览字体族：将设置映射为 CSS font-family 值。'default' 跟随界面（inherit）；
@@ -514,6 +566,17 @@ export default defineComponent({
     },
   },
   watch: {
+    // 切换/打开加密文件页签时，确保其附件已解密到缓存（幂等；已就绪则跳过）
+    activeFile: {
+      immediate: true,
+      handler(f: OpenFile | undefined) {
+        this.ensureAssetsMaterialized(f)
+      },
+    },
+    // 解锁完成（库会话翻为解锁态）后确保活跃页签附件入缓存；锁定方向翻转不做事（后端已清缓存）
+    activeVaultUnlocked(unlocked: boolean) {
+      if (unlocked) this.ensureAssetsMaterialized(this.activeFile)
+    },
     // 切到锁定的 .mdl 页签后自动聚焦密码框，可直接输入；
     // 但自动锁定/⌘L 锁定也会触发这里，若用户正在编辑则不抢焦点
     isActiveFileLocked(v: boolean) {
@@ -1307,7 +1370,10 @@ export default defineComponent({
       const sep = win ? '\\' : '/'
       let base = ''
       const f = this.activeFile
-      if (f && !f.encrypted && f.path && !f.isNew) base = this.parentDir(f.path)
+      // 基准目录与预览 img 解析同源：明文/目录库文件取磁盘锚点目录；.mdl/.mdlb 解锁态取缓存根
+      // （111.md 等非图片附件也会 materialize 进缓存，点击可打开）。旧逻辑把加密文件一律
+      // 排除后回退工作目录，导致加密文件内点相对链接拼错路径报 IO 错误
+      if (f && f.path && !f.isNew) base = this.assetPreviewBaseDir(f)
       if (!base && this.workdirRoot) base = this.workdirRoot
       if (!base) return message.warning(this.$t('toast.noPathBase'))
       // 绝对路径直接使用；相对路径基于 base 解析并折叠 `.` / `..`
@@ -1334,6 +1400,15 @@ export default defineComponent({
           } else {
             await this.store.openEncryptedFile(abs, this.fileName(abs))
           }
+          return
+        }
+        // 文档类型开页签；其余二进制附件（zip/图片/pdf 等）无法按文本解析，
+        // 强行走 openPlainFile 必报 UTF-8/文件头错误，改弹保存对话框走下载流
+        if (!/\.(md|markdown|mdown|mkd|txt)$/i.test(abs)) {
+          const target = await tauri.saveAttachmentDialog(this.fileName(abs))
+          if (!target) return
+          await tauri.copyFileTo(abs, target)
+          message.success(this.$t('toast.attachmentSaved', { name: this.fileName(target) }))
           return
         }
         await this.store.openPlainFile(abs, this.fileName(abs))
@@ -1674,7 +1749,7 @@ export default defineComponent({
         { kind: 'item', label: this.$t('menu.refreshDir'), run: () => this.refreshWorkdir() },
         { kind: 'item', label: this.$t('menu.chooseWorkdirDots'), run: () => this.chooseWorkdir() },
         { kind: 'sep' },
-        { kind: 'item', label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() },
+        { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() },
       ])
     },
     /** 加密库标题栏「更多」菜单：标题栏只留「锁定所有库」，新建/打开/关闭所有库收进这里（无登记库时不出关闭项）。 */
@@ -1685,7 +1760,7 @@ export default defineComponent({
         { kind: 'item', label: this.$t('menu.openVault'), run: () => this.openVaultAction() },
       ]
       if (this.registeredVaults.length) {
-        items.push({ kind: 'sep' }, { kind: 'item', label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() })
+        items.push({ kind: 'sep' }, { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() })
       }
       this.showCtxMenu(e, items)
     },
@@ -1984,11 +2059,11 @@ export default defineComponent({
         // 「打开库」常驻（可同时打开多个库）；仅当有已登记库时才追加「关闭所有库」。
         { kind: 'item', label: this.$t('menu.openVault'), run: () => this.openVaultAction() },
         ...(this.registeredVaults.length
-          ? [{ kind: 'item', label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() }]
+          ? [{ kind: 'item', icon: menuIcon('close'), label: this.$t('menu.closeAllVaults'), run: () => this.closeAllVaults() }]
           : []),
         // 未挂载工作目录时变为「打开工作目录」；已挂载时为「关闭工作目录」
         this.workdirRoot
-          ? { kind: 'item', label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() }
+          ? { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.closeWorkdir'), run: () => this.closeWorkdir() }
           : { kind: 'item', label: this.$t('menu.openWorkdir'), run: () => this.chooseWorkdir() },
       ]
     },
@@ -2012,13 +2087,13 @@ export default defineComponent({
         const f = this.openFiles.find((x) => x.path === p)
         const isMdl = p.endsWith('.mdl')
         items = [
-          { kind: 'item', label: this.$t('menu.close'), sc: '⌘W', run: () => this.closeFile(p) },
+          { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.close'), sc: '⌘W', run: () => this.closeFile(p) },
           { kind: 'item', label: this.$t('menu.closeOthers'), run: () => this.closeOthers(p) },
           { kind: 'item', label: this.$t('menu.closeSaved'), run: () => this.store.closeSaved() },
           { kind: 'item', label: this.$t('menu.closeAll'), run: () => this.closeAllFiles() },
           { kind: 'item', label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
-          { kind: 'item', label: revealLabel(), disabled: !f || f.isNew, run: () => this.revealTab(p) },
+          { kind: 'item', icon: menuIcon('reveal'), label: revealLabel(), disabled: !f || f.isNew, run: () => this.revealTab(p) },
           {
             kind: 'item' as const,
             label: f?.external === 'modified' ? this.$t('menu.reloadDiskExt') : this.$t('menu.reloadDisk'),
@@ -2050,6 +2125,7 @@ export default defineComponent({
           {
             kind: 'item' as const,
             // 草稿未落盘没有可收藏的真实路径；收藏按 path 记录，与侧边栏星标同一入口
+            icon: this.store.isFavoriteFile(p) ? menuIcon('starFilled') : menuIcon('star'),
             label: this.store.isFavoriteFile(p) ? this.$t('menu.unfav') : this.$t('menu.starFile'),
             disabled: !f || f.isNew,
             run: () => this.store.toggleFavoriteFile(p),
@@ -2076,7 +2152,7 @@ export default defineComponent({
           { kind: 'item', label: this.$t('menu.open'), disabled: !f, run: () => f && this.recentOpenFile(f) },
           { kind: 'item', label: this.$t('menu.unfav'), run: () => this.store.toggleFavoriteFile(p) },
           { kind: 'sep' },
-          { kind: 'item', label: revealLabel(), run: () => this.revealTab(p) },
+          { kind: 'item', icon: menuIcon('reveal'), label: revealLabel(), run: () => this.revealTab(p) },
         ]
       } else if (menu === 'vault' && path) {
         const id = path
@@ -2092,9 +2168,9 @@ export default defineComponent({
                 { kind: 'sep' as const },
               ]
             : []),
-          { kind: 'item', label: this.store.isFavorite(id) ? this.$t('menu.unfav') : this.$t('menu.fav'), run: () => this.store.toggleFavorite(id) },
+          { kind: 'item', icon: this.store.isFavorite(id) ? menuIcon('starFilled') : menuIcon('star'), label: this.store.isFavorite(id) ? this.$t('menu.unfav') : this.$t('menu.fav'), run: () => this.store.toggleFavorite(id) },
           { kind: 'item', label: isMdl ? this.$t('menu.changePwd') : this.$t('menu.changeMasterPwd'), run: () => this.openChangePwd({ id, path: v?.path || id, name: v?.name, isFileVault: v?.isFileVault }) },
-          { kind: 'item', label: revealLabel(), run: () => this.revealTab(v?.path || id) },
+          { kind: 'item', icon: menuIcon('reveal'), label: revealLabel(), run: () => this.revealTab(v?.path || id) },
           // .mdlb 单文件库：整个库就是一个容器文件，恢复=整库回滚到上一版
           ...(v?.isFileVault
             ? [{ kind: 'item' as const, label: this.$t('menu.restoreVault'), run: () => this.askVaultRestore(id) }]
@@ -2106,7 +2182,7 @@ export default defineComponent({
             : [{ kind: 'item' as const, label: this.$t('menu.unlockOpen'), run: () => this.recentOpenVault(id) }]),
           { kind: 'sep' },
           // 关闭库：从侧边栏列表取消登记（不删除磁盘文件）；若已解锁先锁定再移除
-          { kind: 'item', label: this.$t('menu.closeVault'), run: () => this.removeVaultFromList(id) },
+          { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.closeVault'), run: () => this.removeVaultFromList(id) },
         ]
       }
       this.showCtxMenu(e, items)
@@ -2207,7 +2283,7 @@ export default defineComponent({
         )
       }
       items.push(
-        { kind: 'item', label: revealLabel(), run: () => this.revealTab(node.path) },
+        { kind: 'item', icon: menuIcon('reveal'), label: revealLabel(), run: () => this.revealTab(node.path) },
         { kind: 'sep' },
         { kind: 'item', label: this.$t('menu.rename'), run: () => this.wdOpenRename(node) },
         { kind: 'item', label: this.$t('menu.delete'), run: () => this.wdOpenDelete(node) },
@@ -3825,6 +3901,7 @@ export default defineComponent({
       try {
         await this.store.unlockFile(f.path, this.unlockPwd)
         this.unlockPwd = ''
+        await this.ensureAssetsMaterialized(f)
         message.success(this.$t('toast.unlocked'))
       } catch (e) {
         message.error(String(e))
@@ -3845,6 +3922,7 @@ export default defineComponent({
       try {
         await this.store.unlockVault(f.vaultId, this.vaultUnlockPwd)
         this.vaultUnlockPwd = ''
+        await this.ensureAssetsMaterialized(this.activeFile)
         message.success(this.$t('toast.unlocked'))
         // 就地解锁不会经过 EditorView mounted 的统一刷新，这里补加载库树并只展开根层
         await this.openVaultToRoot(f.vaultId)
@@ -5031,6 +5109,56 @@ export default defineComponent({
       const base = this.fileName(f.path).replace(/\.[^.]+$/, '')
       return { datDirName: base + '.dat', anchorDir: this.parentDir(f.path) }
     },
+    /** 是否为「加密附件」目标：`.mdlb` 库内文件或 `.mdl` 单加密文件（排除目录库内文件与普通明文）。
+     *  这类文件的图片以密文 `.mdat` 存于 `.dat`，预览须先解密到缓存。 */
+    isEncryptedAssetFile(f: OpenFile | undefined): boolean {
+      return !!f && !!f.encrypted && (f.path.includes('#') || f.vaultId === f.path)
+    },
+    /** 库会话是否存活（前端守卫）：.mdlb 库内文件锁定时 locked 仍为 false，仅凭 f.locked
+     *  会让 materialize 闯进已锁定会话、每条都判解密失败，误报「N 个附件无法解密」。
+     *  库未登记时放行（后端 NotUnlocked 仍会兜底拦截）。 */
+    vaultSessionAlive(f: OpenFile | undefined): boolean {
+      if (!f || !f.encrypted) return true
+      if (f.vaultId === f.path) return !f.locked
+      const v = this.store.recent.find((x) => x.id === f.vaultId)
+      return !v ? true : !!v.unlocked
+    },
+    /** 预览用的附件基准目录：加密文件解锁后指向缓存根（f.assetDir），其余回退磁盘锚点目录。 */
+    assetPreviewBaseDir(f: OpenFile | undefined): string {
+      if (!f) return ''
+      return this.isEncryptedAssetFile(f) && f.assetDir ? f.assetDir : this.assetAnchorInfo(f).anchorDir
+    },
+    /** 附件解密失败的提示：后端已改为「跳过坏条目」，坏掉的那几张只是不显示，必须说出来。 */
+    warnAssetFailures(failed: number) {
+      if (failed > 0) message.warning(this.$t('toast.assetsUndecryptable', { n: failed }))
+    },
+    /** 确保加密文件的附件已解密到缓存（幂等）：已就绪或非加密文件则跳过。用于打开/解锁/导出前。 */
+    async ensureAssetsMaterialized(f: OpenFile | undefined) {
+      if (!f || f.locked || f.assetDir || !this.isEncryptedAssetFile(f) || !this.vaultSessionAlive(f)) return
+      const { datDirName, anchorDir } = this.assetAnchorInfo(f)
+      try {
+        const r = await tauri.materializeVaultAssets(f.vaultId, this.joinPath(anchorDir, datDirName), datDirName)
+        f.assetDir = r.cache_dir
+        this.assetVersion++
+        this.warnAssetFailures(r.failed)
+      } catch {
+        // 解密失败不阻断正文显示，图片预览自然缺失
+      }
+    },
+    /** 强制刷新缓存（粘贴/拖入写入新附件后调用）：无视已就绪状态，重新 materialize 并触发预览重算。 */
+    async refreshAssetsMaterialized(f: OpenFile | undefined) {
+      if (!f || f.locked || !this.isEncryptedAssetFile(f) || !this.vaultSessionAlive(f)) return
+      const { datDirName, anchorDir } = this.assetAnchorInfo(f)
+      try {
+        const r = await tauri.materializeVaultAssets(f.vaultId, this.joinPath(anchorDir, datDirName), datDirName)
+        f.assetDir = r.cache_dir
+        this.warnAssetFailures(r.failed)
+      } catch {
+        // 忽略：写入已成功，缓存刷新失败仅影响即时预览
+      } finally {
+        this.assetVersion++
+      }
+    },
     /** 文件名是否为图片（决定插入 `![..]` 还是 `[..]`）。 */
     isImageName(name: string): boolean {
       return /\.(png|jpe?g|gif|webp|bmp|svg|avif|tiff?|ico)$/i.test(name)
@@ -5095,13 +5223,25 @@ export default defineComponent({
       e.stopPropagation()
       const { datDirName, anchorDir } = this.assetAnchorInfo(f)
       const destDir = this.joinPath(anchorDir, datDirName)
+      // 加密文件（.mdl/.mdlb）：图片以密文 .mdat 落盘，写入后刷新缓存供即时预览
+      const enc = this.isEncryptedAssetFile(f)
       try {
         if (hasFileObj) {
           // 有文件对象（截图/图片字节）：读出 base64 落盘进 .dat
+          const pendingLogical: string[] = []
           for (const file of files) {
             const dataUrl = await this.readAsDataUrl(file)
-            const finalAbs = await tauri.writeAssetBytes(destDir, this.genPastedName(file), dataUrl)
-            this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+            if (enc) {
+              pendingLogical.push(await tauri.writeEncryptedAsset(f.vaultId, destDir, this.genPastedName(file), dataUrl))
+            } else {
+              const finalAbs = await tauri.writeAssetBytes(destDir, this.genPastedName(file), dataUrl)
+              this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+            }
+          }
+          // 加密附件：先刷缓存再插链接，保证预览首渲即命中缓存（先插链接会先渲出裂图）
+          if (pendingLogical.length) {
+            await this.refreshAssetsMaterialized(f)
+            for (const logical of pendingLogical) this.insertAssetLink(datDirName, logical, logical, true)
           }
           message.success(this.$t('toast.pastedAssets', { n: files.length, dir: datDirName }))
           return
@@ -5117,9 +5257,18 @@ export default defineComponent({
           message.info(this.$t('toast.clipboardUnreadable'))
           return
         }
+        const pendingLogical: string[] = []
         for (const p of paths) {
-          const finalAbs = await tauri.copyAsset(destDir, p)
-          this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+          if (enc) {
+            pendingLogical.push(await tauri.copyEncryptedAsset(f.vaultId, destDir, p))
+          } else {
+            const finalAbs = await tauri.copyAsset(destDir, p)
+            this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+          }
+        }
+        if (pendingLogical.length) {
+          await this.refreshAssetsMaterialized(f)
+          for (const logical of pendingLogical) this.insertAssetLink(datDirName, logical, logical, true)
         }
         message.success(this.$t('toast.pastedAssets', { n: paths.length, dir: datDirName }))
       } catch (err) {
@@ -5160,14 +5309,25 @@ export default defineComponent({
       const { datDirName, anchorDir } = this.assetAnchorInfo(f)
       const destDir = this.joinPath(anchorDir, datDirName)
       const list = this.assetPromptFiles.slice()
+      // 加密文件的 copy 模式：拖入文件加密复制为 .mdat；link 模式（仅绝对路径链接）不变
+      const enc = this.isEncryptedAssetFile(f)
       try {
+        const pendingLogical: string[] = []
         for (const p of list) {
           if (mode === 'copy') {
-            const finalAbs = await tauri.copyAsset(destDir, p)
-            this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+            if (enc) {
+              pendingLogical.push(await tauri.copyEncryptedAsset(f.vaultId, destDir, p))
+            } else {
+              const finalAbs = await tauri.copyAsset(destDir, p)
+              this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+            }
           } else {
             this.insertAssetLink(datDirName, this.fileName(p), p, false)
           }
+        }
+        if (pendingLogical.length) {
+          await this.refreshAssetsMaterialized(f)
+          for (const logical of pendingLogical) this.insertAssetLink(datDirName, logical, logical, true)
         }
         message.success(
           mode === 'copy' ? this.$t('toast.copiedAssetsTo', { n: list.length, dir: datDirName }) : this.$t('toast.linkedAssets', { n: list.length }),
@@ -5186,7 +5346,7 @@ export default defineComponent({
       if (!src) return ''
       // 解析相对图片路径的基准目录 = 当前文件（库内文件取所属库）所在目录；导出/无页签时置空
       const af = this.activeFile
-      setAssetBaseDir(af && af.path ? this.assetAnchorInfo(af).anchorDir : '')
+      setAssetBaseDir(af && af.path ? this.assetPreviewBaseDir(af) : '')
       // 逐顶层块渲染并标注起始源码行 data-l，供分屏行级滚动同步定位。
       // 包以 div.mb（无 margin/padding/border，子元素上下边距仍与包裹前同样外边距高度叠加，不改变排版）。
       const tokens = marked.lexer(src)
@@ -5208,8 +5368,8 @@ export default defineComponent({
      * 把当前页签的 Markdown 渲染为独立可打开的 HTML（内嵌样式与代码高亮配色），
      * 经保存对话框选路径后明文写盘。内容取自内存正文（未保存的编辑也会被导出）；
      * 锁定/无内容时提示。主题与代码高亮跟随当前设置，导出后离线用浏览器打开即可还原观感。
-     * 正文里链接到 `.dat` 目录等本地资源会复制到导出目录旁的 `.dat` 并改写为相对链接
-     * （与文件同策略，见 inlineExportAssets）；复制失败时图片退回内联 data URL。
+     * 正文里的图片及其它附件等本地资源会复制到导出文件旁的 `<html文件名>.dat/`
+     * 并改写为相对链接（见 inlineExportAssets）；复制失败时图片退回内联 data URL。
      */
     async exportHtml(targetPath?: string) {
       // 主菜单入口不传路径→当前激活页签；页签右键菜单传入被右键页签的路径（可能非激活）。
@@ -5233,7 +5393,8 @@ export default defineComponent({
       // 复用预览渲染，但去掉仅在应用内有效的代码块复制按钮（离线 HTML 里无脚本）。
       // 基准目录临时指向被导出文件（可能非激活页签），保证相对图片链接解析正确，渲完恢复。
       const savedBase = getAssetBaseDir()
-      setAssetBaseDir(this.assetAnchorInfo(f).anchorDir)
+      await this.ensureAssetsMaterialized(f)
+      setAssetBaseDir(this.assetPreviewBaseDir(f))
       let body: string
       try {
         body = this.renderMarkdown(f.content)
@@ -5243,12 +5404,37 @@ export default defineComponent({
       body = body.replace(/<button[^>]*class="code-copy-btn"[\s\S]*?<\/button>/g, '')
       // 预览里可点的任务复选框在离线页面无回写能力，补回 disabled 保持只读观感
       body = body.replace(/<input type="checkbox" class="task-cb"/g, '<input type="checkbox" disabled="" class="task-cb"')
-      // 本地资源（asset 协议 URL）：图片内联 data URL，其它文件复制到导出目录旁
-      body = await this.inlineExportAssets(body, target)
+      // 本地资源（图片+附件）：复制到 `<html文件名>.dat/` 并改写相对链接，失败时图片退回内联 data URL
+      body = await this.inlineExportAssets(body, target, this.assetPreviewBaseDir(f))
       const html = this.buildStandaloneHtml(f.name, body)
       try {
         await tauri.writePlainFile(target, html)
-        message.success(this.$t('toast.exportedHtml', { name: target.split(/[\\/]/).pop() || '' }))
+        // 成功消息带「打开文件 / 打开文件夹」行内动作：分别交系统默认应用打开与在访达中定位；
+        // 点击即关闭 toast，停留放宽到 6s 留出行内操作时间
+        const action = (label: string, run: () => void) =>
+          h(
+            'a',
+            {
+              style: 'margin-inline-start: 10px; font-weight: 600; cursor: pointer',
+              onClick: () => {
+                inst() // ant-design-vue 的 MessageType 可直接调用以关闭该条消息
+                run()
+              },
+            },
+            label,
+          )
+        const inst = message.success({
+          content: h('span', [
+            this.$t('toast.exportedHtml', { name: target.split(/[\\/]/).pop() || '' }) as string,
+            action(this.$t('toast.openFileAction'), () =>
+              tauri.openLocalFile(target).catch((e) => message.error(String(e))),
+            ),
+            action(this.$t('toast.openFolderAction'), () =>
+              tauri.revealInFinder(target).catch((e) => message.error(String(e))),
+            ),
+          ]),
+          duration: 6,
+        })
       } catch (e) {
         message.error(String(e))
       }
@@ -5311,30 +5497,36 @@ export default defineComponent({
       // 5) 兜底：原样保留
       return fix(decURI(rem || segA))
     },
-    /** 导出 HTML 的后处理：把渲染产物里指向本地磁盘（asset 协议）的资源变成离线可看：
-     *  - 统一复制到导出文件同级的 `目录名.dat/` 下，src/href 改写为相对链接（与文件一致，
-     *    图片无需再内联，浏览器双击打开即可显示）；含空格括号则 `<…>` 包裹；
+    /** 导出 HTML 的后处理：把渲染产物里指向本地磁盘的资源变成离线可看：
+     *  - 统一复制到导出文件同级的 `<html文件名>.dat/` 下，src/href 改写为相对链接
+     *    （图片渲染期已转 asset 协议，反解回绝对路径；其它附件是 marked 默认渲染器
+     *    保留的相对/绝对本地路径，基于 baseDir 解析）；含空格等字符直接原样写入
+     *    属性值（HTML 属性不需要 Markdown 的 `<…>` 包裹）；
      *  - 复制失败时图片退回读文件内联 data URL；仍失败则原样保留不阻断导出。
-     *  同一 src 多次出现一并替换；http/data 等外部链接不处理。 */
-    async inlineExportAssets(body: string, target: string): Promise<string> {
+     *  同一 src 多次出现一并替换；http/data/mailto 等外部链接不处理。 */
+    async inlineExportAssets(body: string, target: string, baseDir: string): Promise<string> {
+      const exportDir = this.parentDir(target)
+      // 附件目录随导出的 HTML 文件名（如 123.html → 123.dat），不再取所在文件夹名
+      const exportBase = this.fileName(target).replace(/\.[^.]+$/, '') || this.$t('editor.exportFallback')
+      const destDir = this.joinPath(exportDir, exportBase + '.dat')
+      const relPrefix = exportBase + '.dat/'
+      // 1) asset 协议引用（渲染期已转绝对路径的图片等）：反解源文件后复制
       const refs = new Set<string>()
       const re = /(?:src|href)="([^"]*)"/g
       let m: RegExpExecArray | null
       while ((m = re.exec(body))) {
         if (/^assets?:\/\//i.test(m[1])) refs.add(m[1])
       }
-      const exportDir = this.parentDir(target)
-      const exportBase = this.fileName(exportDir) || this.$t('editor.exportFallback')
       for (const ref of refs) {
         const abs = this.assetUrlToLocalPath(ref)
         if (!abs) continue
         // 与文件同策略：复制到导出目录旁的 `.dat`，改写为相对路径
         try {
-          const destDir = this.joinPath(exportDir, exportBase + '.dat')
           const finalAbs = await tauri.copyAsset(destDir, abs)
-          const rel = `${exportBase}.dat/${this.fileName(finalAbs)}`
-          const href = /[\s()]/.test(rel) ? `<${rel}>` : rel
-          body = body.split(ref).join(href)
+          // HTML 属性值里直接放含空格的相对路径即可（浏览器自动处理）；`<…>` 是
+          // Markdown 源码语法，写进 href/src 会被当成 URL 的一部分导致链接失效
+          const rel = relPrefix + this.fileName(finalAbs)
+          body = body.split(ref).join(rel)
           continue
         } catch {}
         // 失败兜底：图片内联 data URL（自包含），其它原样保留
@@ -5344,6 +5536,32 @@ export default defineComponent({
             body = body.split(ref).join(dataUrl)
           } catch {}
         }
+      }
+      // 2) 非图片附件：marked 默认渲染器原样保留的文件链接（相对或绝对本地路径，不走
+      //    asset 协议）同样复制进 `.dat` 并改写为导出相对链接；解析不到/不存在的原样保留
+      const linkRefs = new Set<string>()
+      const hrefRe = /href="([^"]*)"/g
+      while ((m = hrefRe.exec(body))) {
+        const h = m[1]
+        if (!h || h.startsWith('#') || h.startsWith(relPrefix)) continue
+        if (/^(https?:|mailto:|data:|blob:|file:|assets?:\/\/)/i.test(h)) continue
+        linkRefs.add(h)
+      }
+      for (const ref of linkRefs) {
+        const decoded = (() => {
+          try {
+            return decodeURI(ref)
+          } catch {
+            return ref
+          }
+        })()
+        const isAbs = decoded.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(decoded)
+        const abs = isAbs || !baseDir ? decoded : this.joinPath(baseDir, decoded)
+        try {
+          const finalAbs = await tauri.copyAsset(destDir, abs)
+          const rel = relPrefix + this.fileName(finalAbs)
+          body = body.split(`href="${ref}"`).join(`href="${rel}"`)
+        } catch {}
       }
       return body
     },
@@ -5592,22 +5810,22 @@ ${bodyHtml}
           </span>
           <div class="menu" :class="{ open: moreOpen }">
             <div class="m-cap">{{ $t('menu.capNew') }}</div>
-            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.newFile') }}</span><span class="kbd-hint">⌘N</span></div>
-            <div class="m-item" @click="openCreateVault(); moreOpen = false"><span class="ck"></span>{{ $t('menu.newEncVault') }}</div>
-            <div class="m-item" v-if="activeFile && !isActiveInVault" @click="openCopyToVault(); moreOpen = false"><span class="ck"></span>{{ $t('menu.copyToVault') }}</div>
+            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="m-icn" v-html="menuIcon('file')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.newFile') }}</span><span class="kbd-hint">⌘N</span></div>
+            <div class="m-item" @click="openCreateVault(); moreOpen = false"><span class="m-icn" v-html="menuIcon('lock')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.newEncVault') }}</span></div>
+            <div class="m-item" v-if="activeFile && !isActiveInVault" @click="openCopyToVault(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.copyToVault') }}</span></div>
             <div class="m-sep"></div>
             <div class="m-cap">{{ $t('menu.capOpen') }}</div>
-            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">⌘O</span></div>
-            <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openWorkdirDots') }}</div>
+            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="m-icn" v-html="menuIcon('folderOpen')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">⌘O</span></div>
+            <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openWorkdirDots') }}</span></div>
             <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">⌘⇧T</span></div>
             <div class="m-sep"></div>
             <div class="m-item has-sub">
               <span class="ck"></span>{{ $t('menu.importExport') }}<span class="sub-arrow">◂</span>
               <div class="sub-menu">
-                <div class="m-item" @click="openBatchEncrypt(); moreOpen = false"><span class="ck"></span>{{ $t('menu.batchEncrypt') }}</div>
-                <div class="m-item" @click="openImportDir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.importDir') }}</div>
+                <div class="m-item" @click="openBatchEncrypt(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.batchEncrypt') }}</span></div>
+                <div class="m-item" @click="openImportDir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.importDir') }}</span></div>
                 <div class="m-sep"></div>
-                <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtml(); moreOpen = false"><span class="ck"></span>{{ $t('menu.exportHtml') }}</div>
+                <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtml(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.exportHtml') }}</span></div>
               </div>
             </div>
             <div class="m-sep"></div>
@@ -5627,17 +5845,17 @@ ${bodyHtml}
                 <div class="m-item" @click="store.updateSettings({ showRecent: !store.settings.showRecent })"><span class="ck">{{ store.settings.showRecent ? '✓' : '' }}</span>{{ $t('sidebar.recent') }}</div>
                 <div class="m-item" @click="store.updateSettings({ showOutline: !store.settings.showOutline })"><span class="ck">{{ store.settings.showOutline ? '✓' : '' }}</span>{{ $t('sidebar.outline') }}</div>
                 <div class="m-sep"></div>
-                <div class="m-item" @click="openVaultAction(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openVault') }}</div>
-                <div class="m-item" v-if="registeredVaults.length" @click="closeAllVaults(); moreOpen = false"><span class="ck"></span>{{ $t('menu.closeAllVaults') }}</div>
-                <div class="m-item" v-if="workdirRoot" @click="closeWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.closeWorkdir') }}</div>
-                <div class="m-item" v-else @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span>{{ $t('menu.openWorkdir') }}</div>
+                <div class="m-item" @click="openVaultAction(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openVault') }}</span></div>
+                <div class="m-item" v-if="registeredVaults.length" @click="closeAllVaults(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.closeAllVaults') }}</span></div>
+                <div class="m-item" v-if="workdirRoot" @click="closeWorkdir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.closeWorkdir') }}</span></div>
+                <div class="m-item" v-else @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openWorkdir') }}</span></div>
               </div>
             </div>
             <div class="m-sep"></div>
-            <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="ck"></span>{{ $t('menu.prefs') }}</div>
-            <div class="m-item" @click="openAbout(); moreOpen = false"><span class="ck"></span>{{ $t('menu.about') }}</div>
+            <div class="m-item" @click="$router.push('/settings'); moreOpen = false"><span class="m-icn" v-html="menuIcon('settings')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.prefs') }}</span></div>
+            <div class="m-item" @click="openAbout(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.about') }}</span></div>
             <div class="m-sep"></div>
-            <div class="m-item" @click="handleAppClose(); moreOpen = false"><span class="ck"></span>{{ $t('menu.quit') }}</div>
+            <div class="m-item" @click="handleAppClose(); moreOpen = false"><span class="m-icn" v-html="menuIcon('power')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.quit') }}</span></div>
           </div>
         </span>
       </div>
@@ -6058,7 +6276,7 @@ ${bodyHtml}
 
             <!-- 预览 -->
             <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
-              <div class="md" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="renderedPreview"></div>
+              <div class="md" :key="assetVersion" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="renderedPreview"></div>
             </div>
           </template>
         </div>
@@ -6663,7 +6881,7 @@ ${bodyHtml}
         <div v-if="it.kind === 'sep'" class="m-sep"></div>
         <div v-else-if="it.kind === 'cap'" class="m-cap m-cap-in">{{ it.label }}</div>
         <div v-else class="m-item" :class="{ disabled: it.disabled }" @click="runCtxItem(it)">
-          <span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ it.sc }}</span>
+          <span v-if="it.icon" class="m-icn" v-html="it.icon"></span><span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ it.sc }}</span>
         </div>
       </template>
     </div>
@@ -6730,6 +6948,7 @@ ${bodyHtml}
 .m-item {
   display: flex; align-items: center; gap: 8px;
   height: 30px; padding: 0 10px;
+  position: relative;
   white-space: nowrap;
   border-radius: var(--radius-sm);
   font-size: 13px; color: var(--text-2);
@@ -6737,6 +6956,10 @@ ${bodyHtml}
 }
 .m-item:hover { background: var(--hover); }
 .m-item .ck { width: 15px; color: var(--primary); font-weight: 700; flex: 0 0 15px; }
+/* 菜单小图标（主菜单/右键菜单共用）：绝对定位压在左侧勾选槽上——图标与✓不会同时出现，
+ * 因此占位只算一份，有无图标的菜单项文字都从同一 x 起排（曾因图标是流内元素把文字顶开而歪斜）。
+ * 尺寸/描边/配色都写在内联 svg 上（v-html 内容不受 scoped CSS 控制，见 menuIcon 注释）。 */
+.m-item .m-icn { position: absolute; left: 10px; top: 50%; width: 16px; height: 16px; margin-top: -8px; display: inline-flex; align-items: center; justify-content: center; }
 .m-item .m-label { flex: 1 1 auto; }
 /* 档位项尾注（如「默认」）：跟在本项文字后、比正文更小更淡，不占用快捷键列 */
 .m-item .m-sub { margin-left: 6px; font-size: 11px; color: var(--text-4); }

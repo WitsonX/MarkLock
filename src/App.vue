@@ -68,6 +68,18 @@ export default defineComponent({
     }
     applyLang()
 
+    // iCloud「仅在线」文件召回下载提示：后端 crypto::io 读写前后发开始 / 结束事件，
+    // 这里按路径为 key 显示 / 关闭带转圈的 loading，召回的数秒停滞不会被误认为卡死。
+    // 便签窗同样是读停滞重灾区，故监听放在 isStickyWindow 分支外、两窗共用。
+    listen<string>('marklock://cloud-recall', (e) => {
+      const p = e.payload || ''
+      const name = p.split(/[\\/]/).pop() || p
+      message.loading({ content: t('toast.cloudRecall', { name }), key: `cloud:${p}`, duration: 0 })
+    }).catch(() => {})
+    listen<string>('marklock://cloud-recall-done', (e) => {
+      message.destroy(`cloud:${e.payload || ''}`)
+    }).catch(() => {})
+
     // 便签窗只承载便签视图：跳过主窗口专属的托盘同步 / 全局事件监听 / 更新检查，
     // 避免小窗里误响应 close-requested 等主窗口语义（主题与语言两窗共用，见上）。
     if (!isStickyWindow()) {

@@ -2133,6 +2133,7 @@ dependencies = [
  "base64 0.22.1",
  "objc2",
  "objc2-app-kit",
+ "objc2-foundation",
  "rand 0.8.8",
  "serde",
  "serde_json",

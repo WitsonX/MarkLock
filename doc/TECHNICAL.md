@@ -79,6 +79,17 @@ wrapped_dek   : KEK 包裹后的 DEK
 └──────────────────────────────────────────┘
 ```
 
+图片与附件不进容器，落**同级 `<文档名>.dat` 目录**，每个附件是独立的一份 `mlk/1` 容器（独立 DEK、由会话 KEK 包裹），因此磁盘上不落明文：
+
+```
+note.mdlb              库容器
+note.dat/              附件目录（与容器同级）
+  截图.png.mdat        头 + 密文（图片字节）
+  合同.zip.mdat        非图片附件同样加密
+```
+
+`.dat` 目录名规则与前端 `assetAnchorInfo` 一致：单文件取自身名，库内文件取所属库名。解锁后这些密文解密到应用缓存 `<app_cache_dir>/mlk-assets/<hash(库id)>/<.dat 目录名>/<逻辑名>`，预览拿缓存目录当相对链接基准，缓存内布局与磁盘 `<名>.dat/<逻辑名>` 镜像，因此正文里的 `note.dat/截图.png` 直接命中。
+
 ### 密钥链路
 
 ```
@@ -94,12 +105,15 @@ wrapped_dek   : KEK 包裹后的 DEK
 - **KDF**：Argon2id，`m=64MiB / t=3 / p=4`。内存硬参数让 GPU/ASIC 暴力破解的成本极高，代价是每次解锁约 300ms 内可接受。
 - **AEAD**：AES-256-GCM。认证加密，密文被外部改写或截断会直接拒绝打开，而不是解出乱码。
 - **KEK 与 DEK 分离**：正文由随机 DEK 加密，DEK 由 KEK 包裹。**改主密码只需重新包裹 DEK（`rewrap`），不重加密正文**，所以大库改密是瞬时的。
+- **附件与正文同锁**：每个 `.mdat` 的小 DEK 同样由会话 KEK 包裹，改主密码时必须一起重包裹——只换正文那把钥匙的话，历史图片会永久解不开，而且失败很安静（只是图不显示）。目录库靠遍历库内文件重包裹，单文件 / 单文件库靠 `asset::rewrap_assets` 定位同级 `.dat`。
 - **内存清零**：KEK/DEK 都实现 `Zeroize`，锁定或会话过期时主动抹掉，不依赖 GC。
 
 ### 读写流程
 
 - **解锁**：主密码 + salt → Argon2id → KEK → 解开 DEK → 解密整棵文件树到内存。个人笔记体量下全程 < 300ms。
 - **写入**：解锁后改任一文件，整棵树重新序列化加密、整体重写 `.mdlb`。这个"整体重写"是单文件容器换来的简化——不需要增量索引和碎片管理，代价在个人体量下无感。
+- **附件缓存**：打开页签、解锁完成、导出前都会调 `materialize_vault_assets` 把该库 `.dat` 里的 `.mdat` 解密到应用缓存（幂等：已缓存且不旧于源密文的条目跳过，所以粘贴一张图不会重解整库）；粘贴 / 拖入写入新附件后再刷一次缓存、才插链接，避免预览首渲裂图。单条读不了或解不开只跳过它自己并提示「N 个附件无法解密」，不让整库预览跟着崩；会话不存在（未解锁 / 已过期）整体返回 `NotUnlocked`，与「附件损坏」区分开。
+- **iCloud「仅在线」文件**：macOS 上被云端化、本地没有字节的文件，读它会触发下载并瞬时返回 error 11。读写统一走 `crypto::io::read` / `write`，内部按 `UF_DATALESS` 预判、`NSFileManager` 主动召回、400ms 退避重试到 20 秒上限，并在召回前后发事件让前端显示带转圈的 loading；配套把六个读写命令挪进阻塞线程池（`spawn_crypto`），否则等待期会冻结 WebView、提示来不及渲染。
 - **自动锁定**：`SessionStore` 每次读写刷新活动时间戳，超时（默认 5 分钟）由 `reap_expired` 清零对应密钥；窗口关闭时 `lock_all`。前端每 30 秒调一次 `reap_expired`，到期的库页签变占位。两处细节：**过期只在读取时报错、不就地删条目**（删除统一由 `reap_expired` 上报，否则前端拿不到 id、界面卡在「已解锁」假象）；**打字也算活动**——`markDirty` 会按库节流 15 秒调一次 `touch_session`，否则关掉自动保存后一直敲字会被误判闲置。此外回收轮询会先查 `session_ttl`，对剩余不足 90 秒的库先把脏页签落盘（此刻密钥仍可用），再交给后端回收，未保存内容不会随密钥一起消失。
 
 ### 安全防护
@@ -109,6 +123,7 @@ wrapped_dek   : KEK 包裹后的 DEK
 - **失败次数限制**：连续错误密码后限制尝试。
 - **剪贴板**：复制的解密内容 60 秒后自动清除；锁定时可一次性清除剪贴板。
 - **休眠 / 锁屏锁定**（设置里的可开关项）：macOS 由 Rust 每秒轮询会话字典的 `CGSSessionScreenIsLocked`，在「未锁 → 已锁」时发 `marklock://screen-locked` 事件，是精确信号；mac 前端因此**不**采用「页面隐藏数秒即判定休眠」的启发式（切窗口、被遮挡、换 Space 都会让页面 `hidden`，会误锁），只保留阈值放宽到 30 秒的心跳兜底。Windows / Linux 无后端探测，维持 5 秒启发式。
+- **附件明文只进应用缓存**：磁盘上的 `.dat` 一律是密文，解密出的明文只驻留 `<app_cache_dir>/mlk-assets`，随锁定 / 退出 / 自动锁定即时删除对应库的子目录；进程被强杀或崩溃来不及清，故启动时（此时必然还没有任何会话）整目录清空兜底。要说清边界：缓存目录不是加密区，能读该目录的环境（同用户下的其它进程）在解锁期间看得到明文图片——这是「预览需要文件路径」换来的代价，换来的是正文与磁盘永远只有密文。
 
 ## Rust 加密核心
 
@@ -121,10 +136,12 @@ wrapped_dek   : KEK 包裹后的 DEK
 | `format.rs` | `.mdl` / `.mdlb` 格式常量、头/体结构与序列化边界 |
 | `keys.rs` | KEK 派生、DEK 包裹 / 解包裹 / 重包裹 |
 | `file.rs` | 单文件 `.mdl` 的序列化与反序列化 |
+| `io.rs` | 原子写盘 + 滚动备份 + 旁路文件识别；iCloud「仅在线」文件的召回退避与前后通知 |
 | `session.rs` | 解锁会话表 `SessionStore`、自动锁定计时、密钥清零 |
+| `asset.rs` | 加密图片/附件：`.dat/<逻辑名>.mdat` 落盘、解锁解密到应用缓存、改密码重包裹、锁定清缓存 |
 | `vault.rs` | 库级操作：创建 / 解锁 / 读写 / 增删改移 / 改密码 / 锁定 / 搜索 |
 
-单元测试（`src-tauri/` 下 `cargo test --lib`）覆盖：密钥往返、错误密码、篡改检测、改密码重包裹、目录库全流程、库内文件夹、单文件库全流程（增删改移 + 改密码 + 磁盘单文件验证）、路径穿越防护、明文目录搜索。CI 的 release 流水线在打包前先跑这个测试。
+单元测试（`src-tauri/` 下 `cargo test --lib`）覆盖：密钥往返、错误密码、篡改检测、改密码重包裹、目录库全流程、库内文件夹、单文件库全流程（增删改移 + 改密码 + 磁盘单文件验证）、路径穿越防护、明文目录搜索、附件加解密往返与篡改、附件写入-解密-清缓存生命周期、改密码带动附件重包裹、坏附件只跳过自己不误伤其余、目录库含明文附件时仍能改密码。CI 的 release 流水线在打包前先跑这个测试。
 
 ## Tauri 命令清单
 
@@ -156,13 +173,25 @@ wrapped_dek   : KEK 包裹后的 DEK
 | `unlocked_count` / `reap_expired` | 状态查询 / 回收过期会话 |
 | `touch_session(vaultId)` / `session_ttl(vaultId)` | 刷新会话活动时间 / 查距自动锁定剩余秒数（无会话返回 `null`，已过期返回 0） |
 
+**加密附件（`.mdl` / `.mdlb`）**
+
+| 命令 | 说明 |
+|---|---|
+| `write_encrypted_asset(vaultId, destDir, name, base64)` | 粘贴的图片/二进制 → 加密写 `<name>.mdat`，返回逻辑名 |
+| `copy_encrypted_asset(vaultId, destDir, srcPath)` | 拖入的磁盘文件 → 加密复制进 `.dat`，返回逻辑名 |
+| `materialize_vault_assets(vaultId, datDir, datDirName)` | 解密到应用缓存，返回 `{ cache_dir, failed }`（失败条数供前端提示） |
+
+三个命令都在 `spawn_crypto` 阻塞线程池里跑；`lock` / `lock_all` / `quit_app` / `reap_expired` 顺带清除对应库的附件缓存。
+
 **其它**
 
 | 命令 | 说明 |
 |---|---|
 | `list_dir(dir)` | 列目录一层（工作目录视图） |
 | `unlock_vault` / `create_vault` / `list_vault` / `create_in_vault` / `create_folder_in_vault` / `delete_in_vault` / `rename_in_vault` | 旧目录库模型，保留兼容 |
-| `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
+| `copy_file_to(src, dest)` | 覆盖式复制到指定路径（预览点二进制附件的「另存为」下载流） |
+| `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」）；只接受 `is_file` 的路径，与 `open_url` 的协议白名单是两套 |
+| `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` / `saveAttachmentDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
 
 ## 前端结构与状态
 
@@ -170,7 +199,7 @@ wrapped_dek   : KEK 包裹后的 DEK
 - **状态**：`src/stores/vault.ts`（Pinia）统一管理已登记库列表、打开的页签、当前激活文件、收藏、最近、设置项，持久化到 localStorage（`marklock.recent` / `marklock.settings`）。**密钥与明文一律不进 store**，只存路径 / 名称 / 锁定态等元信息。
 - **编辑器**：`src/components/CodeMirrorEditor.vue` 封装 CodeMirror 6，每个文件常驻实例以保留光标与滚动位置。
 - **外部修改监控**：`src/lib/filewatch.ts` 是模块级单例，默认 2 秒轮询磁盘 mtime / 大小，并在窗口重新获得焦点时立刻检查。库内文件按整个容器监控，只重读已打开的那几个文件。
-- **预览**：`src/lib/preview.ts` 是主编辑器与便携便签共用的 Markdown 渲染层，`src/components/MarkdownPreview.vue` 为对应组件。
+- **预览**：`src/lib/preview.ts` 是主编辑器与便携便签共用的 Markdown 渲染层，`src/components/MarkdownPreview.vue` 为对应组件。相对链接的基准目录由 `setAssetBaseDir` 写入，加密文件（`.mdl` / `.mdlb`）指向附件缓存根、其余指向磁盘上的锚点目录；该基准存 `globalThis` 而非模块作用域——marked 渲染器的闭包在模块初始化时就固化，dev 热重载会让新旧模块实例各持一份变量，旧闭包读到陈旧/空基准就表现为裂图 404。预览里点非文档类型的链接（zip、图片等）不按文本开页签，而是弹保存对话框走复制下载流。
 - **i18n**：`src/locales/{zh,en}.ts`，zh 为原文，en 结构一一对应；仅收录用户可见文案。
 
 ## 目录结构
@@ -212,10 +241,11 @@ MarkLock/
 - **窗口单例**：首次唤出时创建、之后复用（create-once），隐藏而非销毁，避免每次弹出都重建 WebView 带来的延迟与内存抖动。
 - **圆角外观**：无边框 + 窗口透明（Rust `transparent(true)`，macOS 需 Cargo feature `macos-private-api` 与配置里的 `app.macOSPrivateApi` 同时开启）+ `.sticky` 自绘 12px 圆角和 1px 边框，`overflow: hidden` 把标题栏与正文一并裁成圆角；前端按 `main.ts` 写入的 `html[data-window="sticky"]` 标记把 `html/body/#app` 与启动屏底色透出，否则四角仍是方角。
 - **拖边缩放**：右下角一块 16px 不可见热区，用 pointer capture + 每帧一次的 `setSize` 自行跟手（CSS 像素 × `scaleFactor` 换算成物理像素，下限与 Rust `min_inner_size` 的 300×220 对齐）。不走系统原生缩放：Windows 的原生 sizing 循环会在开始瞬间切一次焦点、触发 WebView `blur`，和「失焦即收起」冲突。相应地，收起前先问 `sticky_is_active`（Windows 直接比对前台窗口句柄），窗口还在前台就忽略这次 blur；macOS 不显示热区，无边框窗的边缘本就能拖。
-- **唤出路径**：托盘 / 菜单栏图标的左、右键动作各自可在设置里指定（弹出菜单 / 显示主界面 / 弹出便签；默认 macOS 左键弹便签、其余平台左键显示主界面、右键弹菜单）——非「弹出菜单」的键由 Rust 关掉系统自动弹菜单并改收 Click 事件（Down），故 macOS 左键同样可用；两键都不绑菜单时设置页会给提醒，以及**屏幕热角**——Rust 侧轮询鼠标坐标，在指定角落连续停留超过设定时长后触发弹出；可选"必须按住修饰键"作为二次确认，避免路过角落误触。便签从触发的那个角落弹出。
+- **唤出路径**：托盘 / 菜单栏图标的左、右键动作各自可在设置里指定（弹出菜单 / 显示主界面 / 弹出便签；默认 macOS 左键弹便签、其余平台左键显示主界面、右键弹菜单）——非「弹出菜单」的键由 Rust 关掉系统自动弹菜单并改收 Click 事件（Down），故 macOS 左键同样可用；两键都不绑菜单时设置页会给提醒，以及**屏幕热角**——Rust 侧轮询鼠标坐标，在指定角落连续停留超过设定时长后触发弹出；可选"必须按住修饰键"作为二次确认，避免路过角落误触。便签从触发的那个角落弹出；热角唤出不夺焦，靠「未交互即隐藏」兜底——弹出后鼠标不再移动、就在原地一点（点桌面 / 菜单栏 / 别的窗口），便签立即收起让路，因为这一击说明用户要的是光标下的东西而不是便签；光标落在便签内不算（那一击点在便签上，交给前端的 pointerdown 认领）。坐标或便签边界取不到时按「不算让路点击」处理——宁可这次不收，也不把点在便签上的一击误判成外面。
 - **托盘菜单文案按平台分叉**：macOS 沿用系统惯例（「打开 MarkLock」「偏好设置」「退出 MarkLock」，两段分隔线）；Windows / Linux 的托盘菜单由系统绘制，字号、行高、左侧留白、通栏分隔线都改不动，能控的只有项数与字长，因此取短标签（「显示主界面」「设置」「退出」）且只在退出前留一条分隔线，避免菜单被拉得松散。文案随界面语言在 `build_tray_menu` 里按 `MENU_LANG` 生成，切换语言时重建。
 - **内容源**：任意 `.md` 明文或 `.mdl` 加密文件；所在库锁定时便签内直接给密码框解锁。`.mdlb` 是多文件容器，暂不作为单个便签源。
-- **编辑预览一体**：编辑 / 分屏 / 预览三态复用主编辑器的 CodeMirror 与 `preview.ts`，保存走同一套 `write_file` / `write_file_vault` 命令，因此落盘一样是密文。
+- **读取失败要说清是哪种失败**：读不到正文不能一律当作「库未解锁」——明文笔记根本没有库可解，误显示密码框等于把人卡在一个按了没反应的表单上。故按原因分流：库未解锁走解锁表单，其余（IO 失败、库文件被移动）显示后端给出的原因加重试按钮；判别依据是后端错误消息里的固定中文文案，后端措辞变了这里要跟着改。
+- **编辑预览一体**：编辑 / 分屏 / 预览三态复用主编辑器的 CodeMirror 与 `preview.ts`，保存走同一套 `write_file` / `write_file_vault` 命令，因此落盘一样是密文。相对链接的基准目录取便签文件**自己在磁盘上的目录**，不接主编辑器那套附件缓存，所以指向 `.mdl` 的便签里、以 `.mdat` 密文存储的图片当前不显示（明文库/普通文件的插图不受影响）。
 - **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。
 - **开机自启动**：写 macOS LaunchAgent / Windows 当前用户启动项 / Linux XDG autostart，可选手否静默后台启动；若托盘图标被关闭则强制显示窗口，避免应用不可达。
 
@@ -322,6 +352,8 @@ doc/ui-prototype/
 - 用户可见文案进词典：改 `src/locales/zh.ts`（原文）后同步 `en.ts`，结构一一对应；代码注释不入词典。
 - 样式走 CSS 变量（`src/styles/global.css`），组件内避免硬编码颜色；主题与平台差异在 `main.ts` 检测后挂到根节点。
 - 提交前在 `src-tauri/` 跑 `cargo test --lib`，确认加密核心无回归。
+- 一批文件里「逐个换密钥再写盘」的变换一律**先算完所有新字节、再统一落盘**（`rewrap_assets` / `rewrite_dir_deks`）：边解析边写会在中途报错时留下半新半旧的库，那比直接失败严重得多。
+- 可能长时间阻塞的磁盘读写命令走 `spawn_crypto`（阻塞线程池），不放在主线程同步执行——等待期间 WebView 会冻住，前端的 loading 提示来不及渲染。
 - 较大改动先开 Issue 对齐方向。
 
 ## 技术栈一览
@@ -334,3 +366,4 @@ doc/ui-prototype/
 | 编辑器 | CodeMirror 6 | Markdown 语法高亮 + 源码模式 + 搜索 / 折叠 / 自动补全 |
 | 状态 | Pinia + localStorage | 只存元信息，密钥与明文不进 store |
 | 加密 | Rust：`aes-gcm` / `argon2` / `zeroize` | 密钥操作全部在 Rust 侧 |
+| macOS 系统集成 | `objc2` / `objc2-app-kit` / `objc2-foundation` | 便签与热角定位避开 Dock（`NSScreen.visibleFrame`）、iCloud「仅在线」文件主动召回（`NSFileManager`）；锁屏检测与光标/按键态走 CoreGraphics 外部声明，不引额外 crate。全部只在 macOS target 声明 |

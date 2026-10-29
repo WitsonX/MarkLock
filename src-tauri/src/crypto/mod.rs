@@ -8,7 +8,9 @@
 //! - [`io`]     原子写盘 + 滚动备份
 //! - [`session`] 解锁会话与自动锁定计时
 //! - [`vault`]  库级操作（创建 / 解锁 / 读写 / 改密码 / 锁定）
+//! - [`asset`]  加密图片/附件（落盘加密 + 解锁解密到缓存）
 
+pub mod asset;
 pub mod error;
 pub mod file;
 pub mod format;

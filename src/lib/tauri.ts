@@ -491,6 +491,11 @@ export function revealInFinder(path: string) {
   return invoke<void>('reveal_in_finder', { path })
 }
 
+/** 用系统默认应用打开一个本地文件（需已存在；导出 HTML 成功消息的「打开文件」动作）。 */
+export function openLocalFile(path: string) {
+  return invoke<void>('open_local_file', { path })
+}
+
 /** 在系统默认浏览器中打开一个 http/https/mailto 链接（预览区链接点击）。 */
 export function openUrl(url: string) {
   return invoke<void>('open_url', { url })
@@ -546,6 +551,17 @@ export async function saveHtmlDialog(defaultName = `${t('common.untitled')}.html
     filters: [{ name: 'HTML', extensions: ['html', 'htm'] }],
   })
   return typeof path === 'string' ? path : null
+}
+
+/** 通用保存对话框（不限扩展名）：预览点非文档链接的「另存为」下载流；取消返回 null。 */
+export async function saveAttachmentDialog(defaultName: string) {
+  const path = await save({ defaultPath: defaultName })
+  return typeof path === 'string' ? path : null
+}
+
+/** 把源文件复制到指定目标路径（覆盖写）：与 saveAttachmentDialog 配合实现下载流。 */
+export function copyFileTo(src: string, dest: string) {
+  return invoke<void>('copy_file_to', { src, dest })
 }
 
 /**
@@ -609,4 +625,50 @@ export function writeAssetBytes(destDir: string, name: string, base64: string) {
  */
 export function readAssetDataUrl(path: string) {
   return invoke<string>('read_asset_data_url', { path })
+}
+
+/**
+ * 加密写入一个附件（图片二进制）到 `.mdl`/`.mdlb` 容器同级的 `.dat` 目录，返回逻辑名（不含 .mdat）。
+ * 磁盘上以密文存储（`逻辑名.mdat`），不含明文；随后需 materializeVaultAssets 解密到缓存才能预览。
+ * @param vaultId 已解锁的库/文件会话 id
+ * @param destDir 目标 `.dat` 目录绝对路径
+ * @param name    期望文件名（如 image.png）
+ * @param base64  纯 base64 或完整 data URL
+ */
+export function writeEncryptedAsset(vaultId: string, destDir: string, name: string, base64: string) {
+  return invoke<string>('write_encrypted_asset', { vaultId, destDir, name, base64 })
+}
+
+/**
+ * 把一个磁盘源文件加密复制进 `.mdl`/`.mdlb` 的 `.dat` 目录（拖入 → 复制到加密资源），返回逻辑名。
+ * @param vaultId 已解锁的库/文件会话 id
+ * @param destDir 目标 `.dat` 目录绝对路径
+ * @param srcPath 被复制文件的绝对路径
+ */
+export function copyEncryptedAsset(vaultId: string, destDir: string, srcPath: string) {
+  return invoke<string>('copy_encrypted_asset', { vaultId, destDir, srcPath })
+}
+
+/** 一次附件解密到缓存的结果（字段名与 Rust `Materialized` 的 snake_case 序列化一致）。 */
+export interface MaterializedAssets {
+  /** 该库的附件缓存根目录，作为预览的 assetBaseDir */
+  cache_dir: string
+  /** 本轮解密失败的附件数量：不报错只表现为图不显示，需由前端提示出来 */
+  failed: number
+}
+
+/**
+ * 解锁后把 `.dat` 里的加密附件解密到应用缓存目录，返回缓存根目录（作为预览的 assetBaseDir）。
+ * 缓存内按 `datDirName/逻辑名` 镜像，与 markdown 相对链接拼接后命中。
+ * 单个附件解不开只跳过它自己（计入 `failed`），已缓存且不旧于源密文的会跳过重复解密。
+ * @param vaultId    已解锁的库/文件会话 id
+ * @param datDir     磁盘上 `.dat` 目录的绝对路径
+ * @param datDirName `.dat` 目录名（如 `库名.dat`）
+ */
+export function materializeVaultAssets(
+  vaultId: string,
+  datDir: string,
+  datDirName: string,
+): Promise<MaterializedAssets> {
+  return invoke<MaterializedAssets>('materialize_vault_assets', { vaultId, datDir, datDirName })
 }

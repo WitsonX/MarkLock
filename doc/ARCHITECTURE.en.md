@@ -57,7 +57,9 @@
 | `format.rs` | `.mdl` / `.mdlb` file-format constants (`mlk/1`, `mlk-vault/1`) and header/body structures (KdfParams / FileHeader / VaultMeta / EncryptedBody); base64 utilities |
 | `keys.rs` | `Kek` / `Dek` types (Zeroize-derived — zeroized on drop); `derive_kek` (Argon2id); `generate_dek`; DEK wrap/unwrap/re-wrap; `encrypt_body`/`decrypt_body` (AES-256-GCM) |
 | `file.rs` | `.mdl` serialization/deserialization (4-byte header length + header JSON + nonce + ct) |
+| `io.rs` | Atomic write (temp file → fsync → rolling backup → rename → fsync parent directory) and sidecar-file recognition; the recall backoff and before/after notification hook for iCloud "not downloaded here" files |
 | `session.rs` | `SessionStore` (global `Mutex<HashMap>` singleton); `UnlockedVault` holds kek/kdf/dek + last_activity + auto_lock; auto-lock timing and expired-session reclamation |
+| `asset.rs` | Encrypted images/attachments: `.dat/<logical name>.mdat` on disk, decrypt into the app cache on unlock, re-wrap on password change, clear the cache on lock/quit |
 | `vault.rs` | Business flows: create/unlock/read-write/change password/lock, vault tree traversal, file add/delete/rename/move, **search** |
 
 ### 3.2 Key hierarchy
@@ -75,6 +77,7 @@ Plaintext (markdown source / file tree JSON)
 - **`.mdl` single file**: every file gets its own random DEK; the header carries its KDF parameters and wrapped_dek — an independent password per file.
 - **`.mdlb` single-file vault**: the whole vault shares one DEK; the header stores the wrapped_dek of that vault-wide DEK, and the data area is the ciphertext of the JSON-serialized file tree (filenames + directory structure + contents). On disk it's a single opaque blob.
 - **Changing the master password**: only re-wraps the DEK (`rewrap`) — the contents are never re-encrypted.
+- **Images/attachments**: each attachment gets its own DEK, wrapped by the same session KEK, so it shares the master password's lock with the bodies — changing the password must re-wrap everything under `.dat` too.
 
 ### 3.3 File layout
 
@@ -89,6 +92,12 @@ Single-file vault (.mdlb)                    Single file (.mdl)
 │ AES-256-GCM ciphertext of  │           │ AES-256-GCM ciphertext of  │
 │ the whole file-tree JSON   │           │ the body text              │
 └────────────────────────────┘           └────────────────────────────┘
+
+Attachments (a .dat directory sibling to the document, one standalone container each)
+note.mdlb / note.mdl
+note.dat/shot.png.mdat   header (wrapped_dek wrapped by the session KEK) + ciphertext image bytes
+      ↓ decrypted into the app cache on unlock; preview resolves relative links against it
+<app_cache_dir>/mlk-assets/<hash(vault id)>/note.dat/shot.png
 ```
 
 ---
@@ -140,6 +149,8 @@ src/
 - Top tab bar (drag-reorderable, independent toggle)
 - Editing modes: edit / split / preview (rendered by marked; task-list checkboxes are interactive)
 - "More" menu: new file / new encrypted vault / copy to vault / preferences / sidebar visibility toggles
+- **Small menu icons**: a few key items in the main menu and the custom right-click menu carry linear mini-icons (`MENU_ICONS` map → `menuIcon()` produces inline svg). Two traps are baked into the implementation: content injected with `v-html` cannot see scoped CSS (the `data-v` attribute is only attached to template nodes), so size and stroke must be attributes on the svg itself or WebKit renders it 0×0; and the icon is **absolutely positioned over the check gutter on the left** rather than being an in-flow element — the icon and the `✓` never appear together, so they occupy one slot, and items with or without an icon align their text at the same x.
+- **Clicking an attachment in preview**: document types open a tab; binaries that can't be parsed as text (zip / image / pdf) now raise a save dialog and are copied over (a download flow) instead of producing a UTF-8 or file-header error on the first click.
 
 ### 4.3 State management (Pinia + localStorage)
 
@@ -155,7 +166,7 @@ Managed centrally by `stores/vault.ts`; localStorage keys:
 | `marklock.sectionOrder` | Sidebar group order |
 | `marklock.workdir` | Working-directory root |
 
-Keys and plaintext never enter the store.
+Keys and plaintext never enter the store. `assetDir` on a tab is an exception worth naming: it is only the one path string "this vault's attachment cache root" — it carries no content and is never persisted (it is not in the `marklock.openFiles` field whitelist), and on lock it is cleared together with the backend cache, then materialized again on the next unlock.
 
 ---
 
@@ -198,6 +209,12 @@ Keys and plaintext never enter the store.
 | `search(query, workdirs?)` | Global search (vaults + plaintext files in the working directory) |
 | `file_stamps(paths)` | Batch-query file mtime + size (external-change monitoring) |
 | `set_backup_enabled(enabled)` | Sync the "keep previous version on save" toggle to the Rust side |
+| `write_encrypted_asset(vaultId, destDir, name, base64)` / `copy_encrypted_asset(vaultId, destDir, srcPath)` | Write an attachment encrypted / copy one in encrypted; returns the logical name |
+| `materialize_vault_assets(vaultId, datDir, datDirName)` | Decrypt the ciphertext attachments under `.dat` into the app cache; returns `{ cache_dir, failed }` |
+| `copy_file_to(src, dest)` | Overwrite-style copy to a chosen path (the download flow when a binary attachment is clicked in preview) |
+| `open_local_file(path)` | Hand an existing plain file on disk to the system default app (the "open file" action in the export-success message) |
+
+> Commands that can block on disk for a long time (unlock / read / write / attachment materialize / batch encryption) run in the blocking thread pool via `spawn_crypto`; running them synchronously on the main thread freezes the WebView.
 
 ### 5.4 External-change monitoring
 
@@ -269,6 +286,23 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **Resizing**: an invisible 16px hot zone in the bottom-right corner (with a nwse-resize cursor) tracks the pointer itself instead of using the system resize (`startResizeDragging`). Reason: on Windows the native sizing loop switches focus the instant it starts, WebView2 fires `blur`, and that collides with "hide on blur" — the note disappeared as soon as you began dragging the handle. The implementation uses pointer capture (so `pointermove` keeps arriving outside the window) plus a `requestAnimationFrame`-throttled `setSize`; `screenX/Y` are CSS pixels while window sizes are physical, so they're multiplied by `scaleFactor`, and the 300×220 floor matches Rust's `min_inner_size`. macOS shows no handle: an undecorated window's `styleMask` still carries `Resizable`, so edges already drag natively (and tao's `drag_resize_window` returns `NotSupported` on mac, so the loop can't be entered from code anyway) — an extra hot zone would only be noise.
 - **Hiding on blur**: `blur` doesn't mean the window lost activation. On non-mac platforms the hide is gated on `sticky_is_active` first (Windows compares `GetForegroundWindow()` against this window's hwnd, bypassing WebView-internal focus); if the window is still frontmost, the blur is ignored. Opening the system file picker is blocked the same way through the `picking` flag.
 
+### 6.7 Images and attachments (ciphertext on disk + decrypted cache)
+
+- **Why take a detour through the cache**: rendering an image in preview needs a file path, but attachments are `.mdat` ciphertext on disk and the rendering layer can't read them. The chain therefore has a fixed shape: unlock → decrypt into the app cache → preview uses the cache directory as `assetBaseDir`. Inside the cache the layout mirrors `<.dat directory name>/<logical name>`, so a relative link in the body hits without being rewritten.
+- **Encrypted at write time**: pasting goes through `write_encrypted_asset` (base64 → container), dragging in goes through `copy_encrypted_asset` (disk bytes → container). The on-disk name is `logical-name.mdat`, and a collision appends `-1`/`-2` before the extension. Directory vaults (the folder model) and ordinary plaintext files still keep their images in plaintext — they are not wired into this path.
+- **One broken image shouldn't take the vault down**: an entry that can't be read or decrypted is skipped on its own and counted into `failed`; the frontend reports "N attachments could not be decrypted". A missing session (never unlocked / expired) returns `NotUnlocked` for the whole call, kept distinct from "attachments are corrupt" — otherwise the entire directory fails to materialize, the frontend silently catches it, and every image disappears at once.
+- **Cache lifetime**: `lock` / `lock_all` / `quit_app` / `reap_expired` delete the vault's cache subdirectory; a force-kill or crash can miss that, so `setup` (when there is provably no session yet) wipes the whole directory as a backstop. The store clears the tab's `assetDir` in step, and the next unlock materializes again.
+- **Password change shares the lock**: an attachment's small DEK is wrapped by the session KEK, so changing the master password must re-wrap them too (standalone files and `.mdlb` vaults through `asset::rewrap_assets`; directory vaults while walking the vault tree, which handles `.dat` on the way). Both follow "compute all the new bytes first, then write", so a mid-way failure never leaves a half-new, half-old vault.
+- **Export**: `ensureAssetsMaterialized` runs first so the attachments are in the cache, then `inlineExportAssets` copies images and non-image attachments into `<html name>.dat/` next to the exported file and rewrites them as relative links; the success message carries inline "open file / open folder" actions.
+
+### 6.8 iCloud "not downloaded here" files (recall compatibility)
+
+- **Symptom**: on macOS a file iCloud has kept online-only has no local bytes, and reading it returns error 11 (`Resource deadlock avoided`) the instant the download is triggered. Surfacing that directly reads as "failed to read the file", when the real state is "still downloading".
+- **Handling**: read and write entry points funnel through `crypto::io::read` / `write`, which first check the `UF_DATALESS` flag from `stat` to decide whether a recall is needed (no file handle opened, no side effects), poke `NSFileManager.startDownloadingUbiquitousItemAtURL` on the first collision, then retry with 400ms backoff up to a 20-second ceiling. Only error 11 is treated this way; other IO errors pass through unchanged.
+- **Visibility**: a `marklock://cloud-recall(-done)` event is emitted at the start and the end, broadcast to every window; the frontend keys a spinner by path so a multi-second wait no longer looks like a silent hang.
+- **Precondition**: these reads genuinely wait, so the six read/write commands must go through `spawn_crypto` (see the note in §5.3); executed synchronously on the main thread they freeze the WebView, the loading indicator never gets painted, and all the user sees is a hang.
+- **Boundary**: global search still uses bare `fs::read` on the main thread and is not wired to recall — an iCloud-online-only note matches by filename only and won't stall the UI. That is a deliberate trade-off.
+
 ---
 
 ## 7. Evolution timeline (starting 2026-09-24)
@@ -333,6 +367,11 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - The full AntD import produces oversized chunks (>500KB) — on-demand imports / manualChunks optimization possible
 - The single-file `.mdl` session has `dek=None`, so Rust's `search_vaults` misclassifies the vault type when it tests `dek.is_some()` (unlocked `.mdl` currently relies on the frontend tab-hit fallback; unfixed on the Rust side)
 - macOS Overlay windows can't be dragged while unfocused (Tauri issue #4316)
+- **Attachment encryption only covers `.mdl` / `.mdlb`**: images in directory vaults (the folder model) and in ordinary plaintext files still land as plaintext in `.dat` (the discriminator is `isEncryptedAssetFile`). Wiring up directory vaults means deciding together the preview base directory, the scope of re-wrapping on password change, and whether "plaintext images inside a vault" is acceptable.
+- **The sticky note doesn't use the attachment cache**: its preview base is the note's own directory on disk, so `.mdat` attachments don't render in a note whose source is a `.mdl` (the session lives in the same process, so adding a materialize step is feasible — not done).
+- **Attachment plaintext sits in the app cache while unlocked**: `<app_cache_dir>/mlk-assets` is itself unencrypted and readable by other processes under the same user; it is cleared on lock / quit / auto-lock, and force-kill residue is handled by the startup wipe.
+- **The directory vault's password-change rule**: entries inside a `.dat` directory and stray files with non-text extensions are skipped as attachments; a file whose name looks like a note (text extension, or no extension) but isn't a container blocks the whole password change — refusing is now safe (compute first, write after, the vault stays untouched) — but a plaintext `.json` left in the vault still blocks it.
+- **Search doesn't trigger iCloud recall**: `search` still uses bare `fs::read` on the main thread, so an undownloaded file simply isn't readable and only the filename matches. Adding recall means moving it to a thread pool with a short per-file timeout, otherwise one search can wait 20 seconds.
 
 ---
 
@@ -347,6 +386,9 @@ Rust side, `cargo test --lib`, covering:
 - Full single-file-vault flow (add/delete/edit/move + password change + single file on disk)
 - Path-traversal protection
 - Plaintext-directory search (Chinese hits, case-insensitivity, skipping hidden files/ciphertext)
+- Encrypted attachments: encrypt/decrypt round-trip and tamper detection, the write → decrypt-into-cache → clear-cache lifecycle, compatibility copying of legacy plaintext attachments
+- Attachment re-wrap following a password change (the old key can no longer open them, non-container entries are skipped), a broken attachment being skipped on its own while the rest stays usable, and no re-decryption when the cache is already newer than the source
+- A directory vault containing plaintext attachments (an image under `.dat` plus a stray png) still changes password successfully with the attachment bytes untouched; slipping in a file that "looks like a note but isn't a container" makes the change refuse, and the old password still unlocks and reads the body (proving no half-new/half-old state was written)
 
 ---
 
@@ -367,3 +409,7 @@ Rust side, `cargo test --lib`, covering:
 | Header parse fails (`BadHeader`) | `.mdl` / `.mdlb` file corrupted or format mismatch | Check `header.format`, `cipher`, `kdf.algo` |
 | Session expired (`NotUnlocked`) | Auto-lock timed out and `SessionStore` reclaimed the session | `reap_expired` returns the reclaimed ids — refresh the UI and unlock again |
 | "Path escapes the vault" | A relative path contains `..`, or it's an absolute path | The frontend only passes vault-relative paths; the backend already rejects violations |
+| No images render but bodies are fine | Attachments were never decrypted into the cache (lost session / a materialize failure swallowed by a silent catch) | Unlock the vault again; confirm the tab's cache root is non-empty |
+| "N attachments could not be decrypted" | Some `.mdat` under `.dat` are corrupted, or weren't encrypted with the current master password | The rest still display; the broken ones need re-importing |
+| Changing the master password reports a format/header error | The vault root or a subfolder holds a file whose name looks like a note but isn't an `mlk/1` container (plaintext `.json`, extensionless files, etc.) | Move it out of the vault or give it a non-text extension; plaintext attachments inside `.dat` are already skipped |
+| Reading a file fails with error 11 (`Resource deadlock avoided`) on mac | An iCloud "not downloaded here" file is being recalled | Wait for the spinner to finish (20-second ceiling); if it keeps failing, right-click the file in Finder → "Download Now" |

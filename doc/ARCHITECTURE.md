@@ -57,7 +57,9 @@
 | `format.rs` | `.mdl` / `.mdlb` 文件格式常量（`mlk/1`、`mlk-vault/1`）与头/体结构（KdfParams / FileHeader / VaultMeta / EncryptedBody）、base64 工具 |
 | `keys.rs` | `Kek` / `Dek` 类型（Zeroize 派生 drop 清零）；`derive_kek`（Argon2id）；`generate_dek`；DEK 包裹/解包裹/重包裹；`encrypt_body`/`decrypt_body`（AES-256-GCM） |
 | `file.rs` | `.mdl` 序列化/反序列化（4 字节头长度 + 头 JSON + nonce + ct） |
+| `io.rs` | 原子写盘（临时文件 → fsync → 滚动备份 → rename → fsync 父目录）与旁路文件识别；iCloud「仅在线」文件的召回退避与前后通知钩子 |
 | `session.rs` | `SessionStore`（`Mutex<HashMap>` 全局单例）；`UnlockedVault` 持 kek/kdf/dek + last_activity + auto_lock；自动锁定计时与过期回收 |
+| `asset.rs` | 加密图片/附件：`.dat/<逻辑名>.mdat` 落盘、解锁解密到应用缓存、改密码重包裹、锁定/退出清缓存 |
 | `vault.rs` | 业务流程：创建/解锁/读写/改密码/锁定、库树遍历、文件增删改移、**搜索** |
 
 ### 3.2 密钥链路
@@ -75,6 +77,7 @@ wrapped_dek ──▶ DEK（32B）
 - **`.mdl` 单文件**：每个文件独立随机 DEK，文件头自带 KDF 参数与 wrapped_dek，独立密码。
 - **`.mdlb` 单文件库**：全库共享一个 DEK；文件头存「全库共享 DEK」的 wrapped_dek，数据区是整棵文件树（文件名+目录结构+正文）的 JSON 序列化密文。磁盘上只有一个不透明 blob。
 - **改主密码**：只重包裹 DEK（`rewrap`），不重加密正文。
+- **图片/附件**：每个附件一份独立 DEK、同样由会话 KEK 包裹，与正文共用同一把主密码锁；因此改密码时必须连 `.dat` 里的附件一起重包裹。
 
 ### 3.3 文件布局
 
@@ -89,6 +92,12 @@ wrapped_dek ──▶ DEK（32B）
 │  AES-256-GCM 加密的       │           │  AES-256-GCM 加密的正文   │
 │  整棵文件树 JSON          │           │                          │
 └──────────────────────────┘           └──────────────────────────┘
+
+附件（与文档同级的 .dat 目录，每个附件一份独立容器）
+note.mdlb / note.mdl
+note.dat/截图.png.mdat    头（wrapped_dek 由会话 KEK 包裹）+ 密文图片字节
+      ↓ 解锁后解密到应用缓存，预览按它解析相对链接
+<app_cache_dir>/mlk-assets/<hash(库id)>/note.dat/截图.png
 ```
 
 ---
@@ -140,6 +149,8 @@ src/
 - 顶部页签栏（可拖拽排序，独立开关）
 - 编辑模式：编辑 / 分屏 / 预览（marked 渲染，任务清单复选框可交互）
 - 「更多」菜单：新建文件 / 新建加密库 / 复制到加密库 / 偏好设置 / 侧边栏显隐开关
+- **菜单小图标**：主菜单与自绘右键菜单的少数重点项配线性小图标（`MENU_ICONS` 映射 → `menuIcon()` 生成内联 svg）。两个坑写死在实现里：`v-html` 注入的内容拿不到 scoped CSS（`data-v` 只加在模板节点上），尺寸与描边必须写在 svg 自身属性上，否则 WebKit 渲染成 0×0；图标用**绝对定位压在左侧勾选槽上**而不是流内元素——图标与 `✓` 不会同时出现，占位只算一份，有无图标的项文字才从同一 x 起排。
+- **预览里点附件**：文档类型开页签；zip / 图片 / pdf 等二进制无法按文本解析，改弹保存对话框再复制过去（下载流），避免一点击就报 UTF-8 / 文件头错误。
 
 ### 4.3 状态管理（Pinia + localStorage）
 
@@ -155,7 +166,7 @@ src/
 | `marklock.sectionOrder` | 侧边栏分组顺序 |
 | `marklock.workdir` | 工作目录根 |
 
-密钥与明文一律不进 store。
+密钥与明文一律不进 store。页签上的 `assetDir` 是个例外口径：它只是「该库附件缓存根目录」这一个路径字符串，既不持久化（不在 `marklock.openFiles` 的字段白名单里），也不带内容——锁定时会连同后端缓存一起清掉，重新解锁再 materialize 一次。
 
 ---
 
@@ -198,6 +209,12 @@ src/
 | `search(query, workdirs?)` | 全局搜索（库 + 工作目录明文） |
 | `file_stamps(paths)` | 批量查文件 mtime + 大小（外部修改监控）|
 | `set_backup_enabled(enabled)` | 同步「保存时保留上一版备份」开关到 Rust 侧 |
+| `write_encrypted_asset(vaultId, destDir, name, base64)` / `copy_encrypted_asset(vaultId, destDir, srcPath)` | 加密写入 / 加密复制一个附件，返回逻辑名 |
+| `materialize_vault_assets(vaultId, datDir, datDirName)` | 把 `.dat` 内密文附件解密到应用缓存，返回 `{ cache_dir, failed }` |
+| `copy_file_to(src, dest)` | 覆盖式复制到指定路径（预览点二进制附件的下载流） |
+| `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」） |
+
+> 可能长时间阻塞在磁盘上的读写命令（解锁/读/写/附件 materialize/批量加密）都包在 `spawn_crypto` 里跑阻塞线程池，同步命令在主线程执行会冻结 WebView。
 
 ### 5.4 外部修改监控
 
@@ -269,6 +286,23 @@ src/
 - **缩放**：右下角不可见热区（16px，斜向双箭头光标）自行跟手，不用系统原生缩放（`startResizeDragging`）。原因：Windows 的原生 sizing 循环开始瞬间会切一次焦点，WebView2 随之触发 `blur`，与「失焦即收起」冲突，表现为按住手柄一动便签就消失。实现用 pointer capture（拖出窗口仍继续收 `pointermove`）+ `requestAnimationFrame` 节流 `setSize`，`screenX/Y` 是 CSS 像素、窗口尺寸是物理像素，需乘 `scaleFactor`；下限 300×220 与 Rust `min_inner_size` 对齐。macOS 不显示手柄：无边框窗的 `styleMask` 仍含 `Resizable`，边缘本就能直接拖拽缩放（且 tao 在 mac 的 `drag_resize_window` 返回 `NotSupported`，代码也触发不了），再放一块热区只是噪声。
 - **失焦收起**：`blur` 不等于窗口失去激活，非 mac 平台收起前先问 `sticky_is_active`（Windows 直接比对 `GetForegroundWindow()` 与本窗 hwnd，绕开 WebView 内部焦点）；仍在前台就忽略这次 blur。打开系统文件选择框同理由 `picking` 标志挡住。
 
+### 6.7 图片与附件（密文落盘 + 解密缓存）
+
+- **为什么绕一道缓存**：预览显示图片要有文件路径，而附件在磁盘上是 `.mdat` 密文，渲染层读不了。所以这条链的形状是固定的：解锁 → 解密到应用缓存 → 预览拿缓存目录当 `assetBaseDir`。缓存内按 `<.dat 目录名>/<逻辑名>` 镜像，正文里的相对链接不改写就能命中。
+- **写入即密文**：粘贴走 `write_encrypted_asset`（base64 → 容器），拖入走 `copy_encrypted_asset`（磁盘字节 → 容器），磁盘名 `逻辑名.mdat`，重名在扩展名前补 `-1`/`-2`。目录库（文件夹模型）与普通明文文件的附件仍是明文，未接入这套。
+- **一张坏图不该拖垮整库**：单条读不了 / 解不开只跳过它自己并计入 `failed`，前端提示「N 个附件无法解密」；会话不存在（未解锁 / 已过期）整体返回 `NotUnlocked`，与「附件损坏」区分——否则整目录解析失败被前端静默 catch，所有图片一起消失。
+- **缓存生命周期**：`lock` / `lock_all` / `quit_app` / `reap_expired` 删除对应库的缓存子目录；进程被强杀或崩溃来不及清，`setup` 时（此刻必然还没有任何会话）整目录清空兜底。store 侧同步清掉页签的 `assetDir`，重新解锁会再 materialize 一次。
+- **改密码同锁**：附件的小 DEK 由会话 KEK 包裹，改主密码必须一起重包裹（单文件 / 单文件库走 `asset::rewrap_assets`，目录库在遍历库内文件时顺带处理 `.dat`）。两处都遵循「先算完所有新字节、再统一写盘」，中途失败不会留下半新半旧的库。
+- **导出**：导出前先 `ensureAssetsMaterialized` 让附件进缓存，再由 `inlineExportAssets` 把图片与非图片附件一并复制进导出文件旁的 `<html名>.dat/` 并改写为相对链接；成功消息带「打开文件 / 打开文件夹」两个行内动作。
+
+### 6.8 iCloud「仅在线」文件（召回兼容）
+
+- **症状**：macOS 上被 iCloud 云端化、本地没有字节的文件，读它会在触发下载的瞬间返回 error 11（`Resource deadlock avoided`）。直接抛给用户就成了「读文件失败」，而真实状态只是「还在下载」。
+- **处理**：读写入口统一收进 `crypto::io::read` / `write`，先用 `stat` 的 `UF_DATALESS` 标志位判断要不要召回（免开文件、无副作用），首次撞墙时再用 `NSFileManager.startDownloadingUbiquitousItemAtURL` 主动触发，然后 400ms 退避重试、上限 20 秒。只认 error 11，其它 IO 错误原样返回。
+- **可见性**：召回开始 / 结束各发一次 `marklock://cloud-recall(-done)` 事件，广播到所有窗口，前端按路径为 key 显示 / 关闭带转圈的 loading——数秒等待不再表现为无声卡顿。
+- **前提**：这些读写可能真的在等，所以六个读写命令必须走 `spawn_crypto`（见 §5.3 注）；主线程同步执行会把 WebView 冻住，loading 来不及绘制，用户只看到卡死。
+- **边界**：全局搜索仍在主线程用裸 `fs::read`，未接召回——iCloud 未下载的笔记在搜索里只按文件名命中，不会卡住界面，这是有意的取舍。
+
 ---
 
 ## 七、演进时间线（2026-09-24 起）
@@ -333,6 +367,11 @@ src/
 - AntD 全量引入导致 chunk 偏大（>500KB），可做按需引入/manualChunks 优化
 - 单文件 `.mdl` 会话 `dek=None`，Rust 侧 `search_vaults` 用 `dek.is_some()` 判库类型会误判（已解锁 `.mdl` 目前靠前端页签命中兜底，Rust 侧未修）
 - macOS Overlay 模式窗口未聚焦时无法拖动（Tauri issue #4316）
+- **附件加密只覆盖 `.mdl` / `.mdlb`**：目录库（文件夹模型）与普通明文文件的插图仍以明文落在 `.dat`（判据在 `isEncryptedAssetFile`）。接入目录库要一起决定预览基准、改密重包裹范围与「库内出现明文图」是否可接受。
+- **便签不接附件缓存**：便签的预览基准取笔记自己在磁盘上的目录，指向 `.mdl` 的便签里 `.mdat` 附件不显示（会话在同一进程里，补 materialize 可行，未做）。
+- **附件明文在解锁期间驻留应用缓存**：`<app_cache_dir>/mlk-assets` 本身不加密，同用户的其它进程可读；锁定 / 退出 / 自动锁定清除，强杀残留由启动清理兜底。
+- **目录库改密的判定口径**：`.dat` 目录内条目与非文本扩展名的散落文件按附件跳过；名字仍像笔记（文本扩展名或无扩展名）却不是容器的文件会拒绝整次改密——现在拒绝是安全的（先算完再写盘，库未被改动），但库里放了个明文 `.json` 之类仍会挡住改密。
+- **搜索不触发 iCloud 召回**：`search` 仍在主线程用裸 `fs::read`，未下载的文件读不了就只按文件名命中；接召回需要先把它挪到线程池并设逐文件短超时，否则一次搜索能等 20 秒。
 
 ---
 
@@ -347,6 +386,9 @@ Rust 侧 `cargo test --lib`，覆盖：
 - 单文件库全流程（增删改移 + 改密码 + 磁盘单文件）
 - 路径穿越防护
 - 明文目录搜索（中文命中、大小写不敏感、隐藏文件/密文跳过）
+- 加密附件：加解密往返与篡改检测、写入 → 解密到缓存 → 清缓存生命周期、历史明文附件的兼容复制
+- 改密码带动附件重包裹（用旧钥匙再也解不开、非容器条目被跳过）、坏附件只跳过自己且其余照常可用、缓存已新于源时不重复解密
+- 目录库内含明文附件（`.dat` 里的图片 + 散落 png）时改密码照样成功、附件字节不变；塞一个「像笔记却不是容器」的文件时改密码被拒，且旧密码仍能解锁读正文（证明没有半新半旧）
 
 ---
 
@@ -367,3 +409,7 @@ Rust 侧 `cargo test --lib`，覆盖：
 | 文件头解析失败（`BadHeader`） | `.mdl` / `.mdlb` 文件损坏或格式不符 | 校验 `header.format`、`cipher`、`kdf.algo` |
 | 会话过期（`NotUnlocked`） | 自动锁定超时，`SessionStore` 已回收会话 | 通过 `reap_expired` 拿到被锁 id 并刷新 UI，重新解锁 |
 | 「路径超出库范围」 | 相对路径含 `..` 或绝对路径 | 前端只传库内相对路径；后端已做拒绝 |
+| 图片全不显示但正文正常 | 附件未解密到缓存（会话丢失 / materialize 失败被静默 catch） | 重新解锁该库；确认页签的缓存根目录非空 |
+| 提示「N 个附件无法解密」 | `.dat` 内某些 `.mdat` 损坏或不是当前主密码加密的 | 其余附件照常显示；坏的那几张需重新导入 |
+| 改主密码报格式/头错误 | 库根或子目录里有「名字像笔记却不是 `mlk/1` 容器」的文件（明文 `.json`、无扩展名文件等） | 把它移出库或改名成非文本扩展名；`.dat` 内的明文附件已被自动跳过 |
+| mac 上读文件报 error 11（`Resource deadlock avoided`） | iCloud「仅在线」文件正在召回下载 | 等 loading 结束（上限 20 秒）；反复失败就在访达里右键「立即下载」 |

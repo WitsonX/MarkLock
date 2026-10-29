@@ -80,7 +80,7 @@ pub fn unlock_file(
     password: &str,
     auto_lock: Option<Duration>,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| io_err(path, e, "加密文件"))?;
+    let bytes = io::read(path).map_err(|e| io_err(path, e, "加密文件"))?;
     let (header, _rest) = file::parse_header(&bytes)?;
 
     let salt = format::b64::decode(&header.kdf.salt)?;
@@ -161,7 +161,7 @@ pub fn unlock_vault_dir(
 /// 读取库元数据（不校验密码）。
 pub fn read_vault_meta(dir: &Path) -> Result<VaultMeta> {
     let meta_path = dir.join(format::VAULT_META_FILE);
-    let json = fs::read(&meta_path).map_err(|e| io_err(dir, e, "库"))?;
+    let json = io::read(&meta_path).map_err(|e| io_err(dir, e, "库"))?;
     serde_json::from_slice(&json)
         .map_err(|e| CryptoError::BadHeader(format!("库元数据解析失败: {e}")))
 }
@@ -293,7 +293,7 @@ pub fn read_file(
     vault_id: &str,
     path: &Path,
 ) -> Result<String> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     let (header, rest) = file::parse_header(&bytes)?;
     let body = file::parse_body(rest)?;
 
@@ -314,7 +314,7 @@ pub fn write_file(
     path: &Path,
     plaintext: &str,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     let (header, _rest) = file::parse_header(&bytes)?;
 
     let out = store.with_vault(vault_id, |vault| {
@@ -357,7 +357,7 @@ fn change_file_password(
     old_password: &str,
     new_password: &str,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     let (mut header, rest) = file::parse_header(&bytes)?;
 
     let salt = format::b64::decode(&header.kdf.salt)?;
@@ -367,6 +367,10 @@ fn change_file_password(
     // 用新密码派生新 KEK，重包裹 DEK
     let new_kek = keys::derive_kek(&new_password, &salt, header.kdf.m, header.kdf.t, header.kdf.p)?;
     header.wrapped_dek = dek.rewrap(&new_kek)?;
+
+    // 同级 `.dat` 里的图片附件同样是用这把 KEK 包裹的，必须在换会话 KEK 之前一起重包裹，
+    // 否则改完密码历史图片就永久解不开了。任一条写失败会在此返回 Err，容器与会话都不落新值。
+    super::asset::rewrap_assets(&super::asset::sibling_dat_dir(path), &old_kek, &new_kek)?;
 
     // 更新会话（KEK 换成新的，沿用原自动锁定时长）
     store.insert(
@@ -440,9 +444,56 @@ fn change_vault_dir_password(
 
 /// 递归遍历目录内所有加密文件，用旧 KEK 解出 DEK、新 KEK 重包裹并写回。
 ///
-/// 库内所有普通文件（除 `vault.json`）都是加密的 `.mdl` 内容，
-/// 与扩展名无关（用户可能用 `.md` / `.txt` 等作为 markdown 文件）。
+/// 分两趟：先只算新字节，全部成功后再统一落盘。原实现边解析边写，库内任一文件
+/// 解析不了都会在中途报错——此时前面的文件已换成新 KEK，而 `vault.json` 与会话仍是旧的，
+/// 那些文件从此打不开（半新半旧）。改完顺序后，报错即「什么都没动」。
 fn rewrite_dir_deks(dir: &Path, old_kek: &Kek, new_kek: &Kek) -> Result<()> {
+    let mut pending: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    collect_dir_rewrites(dir, old_kek, new_kek, false, &mut pending)?;
+    for (path, out) in pending {
+        io::atomic_write(&path, &out)?;
+    }
+    Ok(())
+}
+
+/// 库内的附件目录约定：与文档同级的 `<名>.dat`（与前端 `assetAnchorInfo`、
+/// [`super::asset::sibling_dat_dir`] 同一规则）。
+fn is_asset_dir(name: &str) -> bool {
+    Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case(super::asset::DAT_DIR_EXT))
+        .unwrap_or(false)
+}
+
+/// 文件名是否「像笔记」——扩展名在文本白名单内，或根本没有扩展名。
+/// 用于区分「库里的明文附件」与「损坏的笔记」，见 [`collect_dir_rewrites`]。
+fn is_note_like(name: &str) -> bool {
+    match Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_lowercase())
+    {
+        Some(ext) => is_plain_text_ext(&ext) || ext == super::asset::ASSET_EXT,
+        None => true,
+    }
+}
+
+/// 收集 [`rewrite_dir_deks`] 第一趟的结果：需要重包裹的文件及其新字节。
+///
+/// 库内除笔记还可能有**明文附件**（插图、zip 等）——粘贴图片就往笔记同级的 `.dat` 目录落明文，
+/// 用户自己往库里塞图片也一样。它们不是 `mlk/1` 容器，按容器解析必然失败。以前这份失败和
+/// 「笔记坏了」同等对待直接报错，结果是「往文件夹库里贴过一张图，就再也改不了主密码」。
+/// 因此：附件目录里的条目、以及扩展名不属于文本类的散落文件，跳过（它们本就该留在原地）；
+/// 看着仍像笔记却解不开的照旧报错——此刻尚未写盘，拒绝这次改密不会留下半新半旧的库。
+/// 附件目录内的 `.mdat`（真加密附件）能按容器解开，会一并重包裹，不会漏下。
+fn collect_dir_rewrites(
+    dir: &Path,
+    old_kek: &Kek,
+    new_kek: &Kek,
+    in_asset_dir: bool,
+    pending: &mut Vec<(PathBuf, Vec<u8>)>,
+) -> Result<()> {
     for entry in fs::read_dir(dir).map_err(|e| CryptoError::Io(e.to_string()))? {
         let entry = entry.map_err(|e| CryptoError::Io(e.to_string()))?;
         let path = entry.path();
@@ -452,18 +503,39 @@ fn rewrite_dir_deks(dir: &Path, old_kek: &Kek, new_kek: &Kek) -> Result<()> {
             continue;
         }
         if path.is_dir() {
-            rewrite_dir_deks(&path, old_kek, new_kek)?;
-        } else {
-            let bytes = fs::read(&path).map_err(|e| CryptoError::Io(e.to_string()))?;
-            let (mut header, rest) = file::parse_header(&bytes)?;
-            let dek = Dek::unwrap(&header.wrapped_dek, old_kek)?;
-            header.wrapped_dek = dek.rewrap(new_kek)?;
-            let body = file::parse_body(rest)?;
-            let out = file::serialize(&header, &body)?;
-            io::atomic_write(&path, &out)?;
+            collect_dir_rewrites(&path, old_kek, new_kek, is_asset_dir(&name), pending)?;
+            continue;
+        }
+        let skipable = in_asset_dir || !is_note_like(&name);
+        let bytes = match io::read(&path) {
+            Ok(b) => b,
+            Err(_) if skipable => continue,
+            Err(e) => return Err(io_err(&path, e, "读取库内文件")),
+        };
+        match rewrap_container(&bytes, old_kek, new_kek) {
+            Ok(out) => pending.push((path, out)),
+            Err(_) if skipable => continue,
+            Err(e) => return Err(e),
         }
     }
     Ok(())
+}
+
+/// 用旧 KEK 解出 DEK、新 KEK 重包裹，序列化回容器字节（数据区不重新加密，开销与正文大小无关）。
+fn rewrap_container(bytes: &[u8], old_kek: &Kek, new_kek: &Kek) -> Result<Vec<u8>> {
+    let (mut header, rest) = file::parse_header(bytes)?;
+    if header.format != format::FORMAT && header.format != format::VAULT_FILE_FORMAT {
+        return Err(CryptoError::Unsupported(format!(
+            "format={}（期望 {} 或 {}）",
+            header.format,
+            format::FORMAT,
+            format::VAULT_FILE_FORMAT
+        )));
+    }
+    let dek = Dek::unwrap(&header.wrapped_dek, old_kek)?;
+    header.wrapped_dek = dek.rewrap(new_kek)?;
+    let body = file::parse_body(rest)?;
+    file::serialize(&header, &body)
 }
 
 // ==================== 单文件库（.mdlb） ====================
@@ -548,7 +620,7 @@ pub fn unlock_file_vault(
     password: &str,
     auto_lock: Option<Duration>,
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| io_err(path, e, "库文件"))?;
+    let bytes = io::read(path).map_err(|e| io_err(path, e, "库文件"))?;
     let (header, _rest) = file::parse_header(&bytes)?;
     if header.format != format::VAULT_FILE_FORMAT {
         return Err(CryptoError::Unsupported(format!(
@@ -587,7 +659,7 @@ fn vault_dek(vault: &UnlockedVault) -> Result<&Dek> {
 
 /// 读取单文件库的明文树（要求已解锁）。
 fn read_plain_tree(store: &SessionStore, vault_id: &str, path: &Path) -> Result<Vec<PlainNode>> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     store.with_vault(vault_id, |vault| {
         let dek = vault_dek(vault)?;
         decrypt_plain_tree(dek, &bytes)
@@ -601,7 +673,7 @@ fn write_plain_tree(
     path: &Path,
     tree: &[PlainNode],
 ) -> Result<()> {
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     let (header, _rest) = file::parse_header(&bytes)?;
     let out = store.with_vault(vault_id, |vault| {
         let dek = vault_dek(vault)?;
@@ -919,7 +991,7 @@ pub fn change_file_vault_password(
 ) -> Result<()> {
     check_password_strength(new_password)?;
 
-    let bytes = fs::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
+    let bytes = io::read(path).map_err(|e| CryptoError::Io(e.to_string()))?;
     let (mut header, rest) = file::parse_header(&bytes)?;
     if header.format != format::VAULT_FILE_FORMAT {
         return Err(CryptoError::Unsupported(format!(
@@ -934,6 +1006,9 @@ pub fn change_file_vault_password(
 
     let new_kek = keys::derive_kek(new_password, &salt, header.kdf.m, header.kdf.t, header.kdf.p)?;
     header.wrapped_dek = dek.rewrap(&new_kek)?;
+
+    // 库内文件的图片附件锁在同一把 KEK 上，换钥匙前一并重包裹同级 `.dat`（见 change_file_password）
+    super::asset::rewrap_assets(&super::asset::sibling_dat_dir(path), &old_kek, &new_kek)?;
 
     store.insert(
         vault_id.to_string(),
@@ -1594,7 +1669,7 @@ pub fn batch_encrypt(
     for p in paths {
         let src = Path::new(p);
         // 读原文（必须 UTF-8）
-        let content = match fs::read(src) {
+        let content = match io::read(src) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(s) => s,
                 Err(_) => {
@@ -1877,6 +1952,41 @@ mod tests {
         let store2 = SessionStore::new();
         assert!(unlock_vault_dir(&store2, "v", &dir, "vaultpass123", None).is_err());
         assert!(unlock_vault_dir(&store2, "v2", &dir, "newvault789", None).is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 目录库里有明文附件时，改主密码不该被它们挡住；而「仍像笔记却解不开」的文件要拒绝且不动盘。
+    #[test]
+    fn dir_vault_change_password_skips_plaintext_attachments() {
+        let dir = std::env::temp_dir().join("marklock_vault_attach");
+        let _ = fs::remove_dir_all(&dir);
+        create_vault_dir(&dir, "vaultpass123", None).unwrap();
+
+        let store = SessionStore::new();
+        let vault_id = dir.to_string_lossy().to_string();
+        unlock_vault_dir(&store, &vault_id, &dir, "vaultpass123", None).unwrap();
+        create_file_in_vault(&store, &vault_id, "notes.md", "# 第一篇").unwrap();
+
+        // 明文附件：笔记同级 `.dat` 目录里的图片（粘贴流程正是这么落的）+ 库里散落的一张
+        let dat = dir.join("notes.dat");
+        fs::create_dir_all(&dat).unwrap();
+        fs::write(dat.join("pic.png"), b"\x89PNG-plain").unwrap();
+        fs::write(dir.join("loose.png"), b"\x89PNG-loose").unwrap();
+
+        change_password(&store, &vault_id, &dir, "vaultpass123", "newvault789").unwrap();
+        let f1 = dir.join("notes.md");
+        assert_eq!(read_file(&store, &vault_id, &f1).unwrap(), "# 第一篇");
+        // 附件原样留在磁盘，没被当容器改写
+        assert_eq!(fs::read(dat.join("pic.png")).unwrap(), b"\x89PNG-plain");
+        assert_eq!(fs::read(dir.join("loose.png")).unwrap(), b"\x89PNG-loose");
+
+        // 名字仍像笔记、却不是容器的文件：拒绝这次改密，且库里一个字节都没换
+        fs::write(dir.join("broken.md"), b"plain note, not a container").unwrap();
+        assert!(change_password(&store, &vault_id, &dir, "newvault789", "thirdpwd999").is_err());
+        let store2 = SessionStore::new();
+        assert!(unlock_vault_dir(&store2, "v2", &dir, "newvault789", None).is_ok());
+        assert_eq!(read_file(&store2, "v2", &f1).unwrap(), "# 第一篇");
 
         let _ = fs::remove_dir_all(&dir);
     }

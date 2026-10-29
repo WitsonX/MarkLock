@@ -63,6 +63,11 @@ impl SessionStore {
         m.insert(id, vault);
     }
 
+    /// 会话是否存在：供附件 materialize 等场景区分「未解锁/会话已过期」与「单条附件损坏」。
+    pub fn contains(&self, id: &str) -> bool {
+        self.vaults.lock().unwrap().contains_key(id)
+    }
+
     /// 以闭包方式访问会话（持锁期间执行，避免引用逃逸）。
     pub fn with_vault<T>(
         &self,

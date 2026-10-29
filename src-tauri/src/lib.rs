@@ -15,7 +15,7 @@ mod appinfo_win;
 
 use crypto::session::SessionStore;
 use crypto::vault;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
@@ -99,7 +99,7 @@ mod screenlock {
 mod hotcorner {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::{Duration, Instant};
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
 
     /// 是否启用热角（前端经 set_hot_corner 同步）。
     pub static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -126,6 +126,10 @@ mod hotcorner {
     /// 才开始计时，任一条件回到满足即重置。2 秒足够让用户从当前 App 点入便签（含 macOS
     /// first-mouse 首击即夺焦），也让停在触发角落不前的鼠标不会把便签长期撑在桌面上。
     const LEAVE_GRACE_MS: u128 = 2000;
+    /// 武装期间（热角弹出后、用户尚未点进便签）的加密轮询间隔（毫秒）。
+    /// 一次点击的按住时长通常只有几十毫秒，按 POLL_MS 采样会漏掉，故武装期间提速；
+    /// 该状态最多持续到点进 / 收起，开销有界。
+    const POLL_FAST_MS: u64 = 30;
 
     #[cfg(target_os = "macos")]
     mod cursor {
@@ -185,6 +189,34 @@ mod hotcorner {
         }
     }
 
+    /// 鼠标左 / 右键是否正被按下（全局硬件态，同样无需输入监听权限）。
+    /// 用于识别「热角弹出后不移鼠标、直接在原处点击」——此时用户要操作的是光标下的东西，
+    /// 便签应立即让路。
+    #[cfg(target_os = "macos")]
+    fn button_down() -> bool {
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+        }
+        // kCGEventSourceStateHIDSystemState = 1：反映真实硬件按下态；CGMouseButton 0=左 1=右
+        unsafe { CGEventSourceButtonState(1, 0) || CGEventSourceButtonState(1, 1) }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn button_down() -> bool {
+        extern "system" {
+            fn GetAsyncKeyState(virt_key: i32) -> i16;
+        }
+        // 返回值最高位为 1 表示当前正被按下；VK_LBUTTON / VK_RBUTTON
+        let down = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16) & 0x8000 != 0 };
+        down(0x01) || down(0x02)
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn button_down() -> bool {
+        false
+    }
+
     /// 修饰键是否正被按下（全局硬件态，无需输入监听权限）。
     /// 编码：0=Shift 1=Control 2=Alt/Option 3=Command(macOS) / Win(Windows)。
     /// 供「按住修饰键 + 移到角落」触发模式使用。
@@ -232,8 +264,14 @@ mod hotcorner {
             let mut fired = false;
             // 「移开即隐藏」状态机：仅记录光标移出「保持区域」的时刻，达到宽限即收起。
             let mut left_at: Option<Instant> = None;
+            // 上一轮左 / 右键是否按下：只在「抬起 → 按下」的边沿算作一次点击，
+            // 免得热角弹出时用户正拖着东西（按键早已按住）被误判成点击而收起。
+            let mut btn_prev = button_down();
             loop {
-                std::thread::sleep(Duration::from_millis(POLL_MS));
+                // 武装期间改用更短的轮询间隔（见 POLL_FAST_MS）：否则几十毫秒的点击会漏采。
+                let armed = AUTOHIDE.load(Ordering::SeqCst);
+                let poll_ms = if armed { POLL_FAST_MS } else { POLL_MS };
+                std::thread::sleep(Duration::from_millis(poll_ms));
 
                 // 光标坐标空间与显示器尺寸对齐：macOS 光标为逻辑点、Windows 为物理像素，
                 // 显示器/窗口物理尺寸按平台换算到同一空间再比较。
@@ -273,8 +311,36 @@ mod hotcorner {
                     _ => false,
                 };
 
+                // 点击边沿：上一轮抬起、这一轮按下（是否据此收起见下方的热角武装判定）。
+                let btn = button_down();
+                let clicked = btn && !btn_prev;
+                btn_prev = btn;
+
                 // ---- 未交互即隐藏（仅热角武装时生效）----
                 if AUTOHIDE.load(Ordering::SeqCst) {
+                    // 「弹出后不移鼠标直接点击」：用户此刻要的是光标下的东西（桌面 / 菜单栏 / 别的
+                    // 窗口），便签立即收起让路——这一击系统已派发给光标下的窗口，不受影响。
+                    // 光标落在便签窗口内则不算：那一击点在便签上，交给前端 pointerdown → engage。
+                    // 坐标或便签边界取不到时按「不算点击让路」处理：宁可这次不收，也不把点在
+                    // 便签上的一击误判成点在外面（用户正要点进来，窗却凭空消失更难解释）。
+                    let click_outside_sticky = match (cursor, sticky_bounds_logical(&app, scale)) {
+                        (Some((cx, cy)), Some((x, y, w, h))) => {
+                            !(cx >= x && cx <= x + w && cy >= y && cy <= y + h)
+                        }
+                        _ => false,
+                    };
+                    if clicked && click_outside_sticky {
+                        if let Some(w) = app.get_webview_window(super::STICKY_WINDOW) {
+                            // 极端情况下（Windows 上 show() 可能自动激活窗口，用户只敲键盘未动鼠标）
+                            // 可能有未落盘内容：与托盘菜单键同一路径，先让前端静默落盘再隐藏。
+                            let _ = w.emit("marklock://sticky-hide", ());
+                            let _ = w.hide();
+                        }
+                        AUTOHIDE.store(false, Ordering::SeqCst);
+                        POPUP_PENDING.store(false, Ordering::SeqCst);
+                        left_at = None;
+                        continue;
+                    }
                     // 「保持区域」= 便签窗口（外扩 HIT_PAD）。触发角落不算：弹出后鼠标仍停在
                     // 角落视为未交互，宽限到点照样收起。
                     let in_hold_zone = cursor
@@ -554,6 +620,26 @@ fn store() -> &'static SessionStore {
     STORE.get_or_init(SessionStore::new)
 }
 
+/// 加密图片/附件解密后的缓存根目录，`setup` 时初始化为 `app_cache_dir/mlk-assets`。
+/// 每个库在其下用 `hash(vault_id)` 子目录隔离；锁定时清除对应子目录。
+static ASSET_CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// 取附件缓存根目录（未初始化时退回临时目录，保证不落在工作目录）。
+fn asset_cache_root() -> PathBuf {
+    ASSET_CACHE_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::temp_dir().join("marklock-assets"))
+}
+
+/// 清除所有已解锁库的附件缓存（在 lock_all / quit 锁定前调用，锁定后会话即丢失）。
+fn clear_all_asset_caches() {
+    let root = asset_cache_root().to_string_lossy().to_string();
+    for id in store().unlocked_ids() {
+        crypto::asset::clear_asset_cache(&id, &root);
+    }
+}
+
 /// 退出是否已经前端确认。为 true 时放行 ExitRequested，避免 quit_app 再次被拦截。
 /// 初始为 false：首次退出请求（如 macOS Cmd+Q）会被 prevent_exit，转为前端未保存确认弹窗。
 static EXIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
@@ -671,24 +757,34 @@ fn list_file_vault(
 }
 
 /// 读取单文件库内一个文件的正文。
+///
+/// 走 `spawn_crypto` 放入阻塞线程池：iCloud「仅在线」文件的读取会阻塞数秒等召回，
+/// 若在主线程同步执行会冻结 WebView，导致 `cloud-recall` loading 提示来不及渲染
+/// （表现为只卡顿、无提示）。
 #[tauri::command]
-fn read_file_vault(
+async fn read_file_vault(
     vault_id: String,
     path: String,
     rel: String,
 ) -> Result<String, crypto::CryptoError> {
-    vault::read_file_vault(store(), &vault_id, Path::new(&path), &rel)
+    spawn_crypto(move || vault::read_file_vault(store(), &vault_id, Path::new(&path), &rel)).await
 }
 
 /// 写回单文件库内一个文件的正文。
+///
+/// 走 `spawn_crypto`：覆盖 iCloud dataless 文件要先召回，主线程同步执行会冻结 WebView
+/// （与 `read_file_vault` 对称）。
 #[tauri::command]
-fn write_file_vault(
+async fn write_file_vault(
     vault_id: String,
     path: String,
     rel: String,
     content: String,
 ) -> Result<(), crypto::CryptoError> {
-    vault::write_file_vault(store(), &vault_id, Path::new(&path), &rel, &content)
+    spawn_crypto(move || {
+        vault::write_file_vault(store(), &vault_id, Path::new(&path), &rel, &content)
+    })
+    .await
 }
 
 /// 在单文件库内创建文件。
@@ -835,11 +931,13 @@ fn rename_in_vault(
 #[tauri::command]
 fn lock(vault_id: String) {
     vault::lock_vault(store(), &vault_id);
+    crypto::asset::clear_asset_cache(&vault_id, &asset_cache_root().to_string_lossy());
 }
 
 /// 锁定全部库。
 #[tauri::command]
 fn lock_all() {
+    clear_all_asset_caches();
     vault::lock_all_vaults(store());
 }
 
@@ -847,6 +945,7 @@ fn lock_all() {
 /// 前端在用户确认「退出」后调用（关窗事件已改为交由前端弹窗确认）。
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
+    clear_all_asset_caches();
     vault::lock_all_vaults(store());
     // 标记已确认，放行随后的 ExitRequested（否则会被 run 回调再次 prevent_exit）。
     EXIT_CONFIRMED.store(true, Ordering::SeqCst);
@@ -1761,9 +1860,12 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 /// 读取并解密一个已解锁文件的正文。
+///
+/// 走 `spawn_crypto`：读 iCloud dataless 文件会阻塞等召回，主线程同步执行会冻结 WebView，
+/// 令 `cloud-recall` loading 提示无法渲染（详见 `read_file_vault`）。
 #[tauri::command]
-fn read_file(vault_id: String, path: String) -> Result<String, crypto::CryptoError> {
-    vault::read_file(store(), &vault_id, Path::new(&path))
+async fn read_file(vault_id: String, path: String) -> Result<String, crypto::CryptoError> {
+    spawn_crypto(move || vault::read_file(store(), &vault_id, Path::new(&path))).await
 }
 
 /// 加密并写回一个已解锁文件。
@@ -1809,17 +1911,29 @@ async fn change_password(
 }
 
 /// 读取一个普通（未加密）文件的明文正文。
+///
+/// 走 `spawn_crypto`：iCloud「仅在线」明文文件的读取会阻塞数秒等召回，主线程同步执行
+/// 会冻结 WebView，令 `cloud-recall` loading 提示来不及渲染（表现为只卡顿、无提示）。
 #[tauri::command]
-fn read_plain_file(path: String) -> Result<String, crypto::CryptoError> {
-    let bytes = std::fs::read(Path::new(&path)).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
-    String::from_utf8(bytes).map_err(|_| crypto::CryptoError::BadHeader("文件不是合法 UTF-8".into()))
+async fn read_plain_file(path: String) -> Result<String, crypto::CryptoError> {
+    spawn_crypto(move || {
+        let bytes =
+            crypto::io::read(Path::new(&path)).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+        String::from_utf8(bytes).map_err(|_| crypto::CryptoError::BadHeader("文件不是合法 UTF-8".into()))
+    })
+    .await
 }
 
 /// 明文写回一个普通（未加密）文件。
+///
+/// 走 `spawn_crypto`：覆盖 iCloud dataless 文件同样要先召回，主线程同步执行会冻结 WebView。
 #[tauri::command]
-fn write_plain_file(path: String, content: String) -> Result<(), crypto::CryptoError> {
-    std::fs::write(Path::new(&path), content.as_bytes())
-        .map_err(|e| crypto::CryptoError::Io(e.to_string()))
+async fn write_plain_file(path: String, content: String) -> Result<(), crypto::CryptoError> {
+    spawn_crypto(move || {
+        crypto::io::write(Path::new(&path), content.as_bytes())
+            .map_err(|e| crypto::CryptoError::Io(e.to_string()))
+    })
+    .await
 }
 
 /// 在工作目录（普通未加密目录）中创建一个新文件；已存在则失败（不覆盖）。
@@ -1940,6 +2054,32 @@ fn reveal_in_finder(path: String) -> Result<(), crypto::CryptoError> {
     let res = std::process::Command::new("xdg-open")
         .arg(p.parent().unwrap_or(p))
         .spawn();
+    res.map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// 用系统默认应用打开一个本地文件（导出 HTML 成功消息的「打开文件」动作）。
+///
+/// 与 `open_url` 的协议白名单不同，此命令只接受磁盘上已存在的普通文件
+/// （`is_file` 校验），直接交平台默认程序派发，不存在任意协议注入面。
+/// macOS 用 `open`、Windows 用 `explorer`、Linux 用 `xdg-open`。
+#[tauri::command]
+fn open_local_file(path: String) -> Result<(), crypto::CryptoError> {
+    let p = Path::new(&path);
+    if !p.is_file() {
+        return Err(crypto::CryptoError::Io(format!("文件不存在: {path}")));
+    }
+    #[cfg(target_os = "macos")]
+    let res = std::process::Command::new("open").arg(p).spawn();
+    #[cfg(target_os = "windows")]
+    let res = std::process::Command::new("explorer").arg(p).spawn();
+    #[cfg(target_os = "linux")]
+    let res = std::process::Command::new("xdg-open").arg(p).spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    let res: std::io::Result<std::process::Child> = Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "当前平台不支持打开本地文件",
+    ));
     res.map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
     Ok(())
 }
@@ -2317,7 +2457,13 @@ fn unlocked_count() -> usize {
 /// 回收过期的会话（返回被自动锁定的库 id）。
 #[tauri::command]
 fn reap_expired() -> Vec<String> {
-    vault::reap_expired(store())
+    let ids = vault::reap_expired(store());
+    // 自动锁定的库同步清除其附件缓存（reap 后会话已移除，用返回的 id 列表）。
+    let root = asset_cache_root().to_string_lossy().to_string();
+    for id in &ids {
+        crypto::asset::clear_asset_cache(id, &root);
+    }
+    ids
 }
 
 /// 刷新某个库会话的活动时间：前端在输入等不落盘活动时按节流调用，
@@ -2387,6 +2533,19 @@ async fn copy_asset(dest_dir: String, src: String) -> Result<String, crypto::Cry
     spawn_crypto(move || assets::copy_into(&dest_dir, &src)).await
 }
 
+/// 把源文件复制到指定目标路径（覆盖写）。
+///
+/// 用于预览区点非文档链接（zip/图片等二进制附件）的「另存为」下载流：
+/// 前端先弹保存对话框拿目标路径，再调这里复制字节。
+#[tauri::command]
+async fn copy_file_to(src: String, dest: String) -> Result<(), crypto::CryptoError> {
+    spawn_crypto(move || {
+        std::fs::copy(&src, &dest).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+        Ok(())
+    })
+    .await
+}
+
 /// 把 base64 二进制内容写入目标 `.dat` 目录下的 `name`（重名自动加序号），返回最终绝对路径。
 ///
 /// 用于「粘贴截图/剪贴板图片」：前端读出图片字节的 base64 交给这里落盘。
@@ -2403,6 +2562,56 @@ async fn write_asset_bytes(
 #[tauri::command]
 async fn read_asset_data_url(path: String) -> Result<String, crypto::CryptoError> {
     spawn_crypto(move || assets::read_data_url(&path)).await
+}
+
+/// 加密写入一个附件（图片二进制）到容器同级 `.dat` 目录，返回逻辑名（供拼 markdown 链接）。
+///
+/// 用于 `.mdl` / `.mdlb` 的粘贴截图：base64 → 用会话 KEK 加密 → 写 `name.mdat`（磁盘不含明文）。
+#[tauri::command]
+async fn write_encrypted_asset(
+    vault_id: String,
+    dest_dir: String,
+    name: String,
+    base64: String,
+) -> Result<String, crypto::CryptoError> {
+    spawn_crypto(move || {
+        let bytes = assets::decode_data_url_base64(&base64)?;
+        crypto::asset::write_encrypted_asset(store(), &vault_id, &dest_dir, &name, &bytes)
+    })
+    .await
+}
+
+/// 把一个磁盘源文件加密复制进 `.dat` 目录（拖入 → 复制到加密资源），返回逻辑名。
+#[tauri::command]
+async fn copy_encrypted_asset(
+    vault_id: String,
+    dest_dir: String,
+    src_path: String,
+) -> Result<String, crypto::CryptoError> {
+    spawn_crypto(move || {
+        let p = Path::new(&src_path);
+        let bytes = crypto::io::read(p).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .ok_or_else(|| crypto::CryptoError::Io("源路径无文件名".into()))?;
+        crypto::asset::write_encrypted_asset(store(), &vault_id, &dest_dir, &name, &bytes)
+    })
+    .await
+}
+
+/// 解锁后把 `.dat` 里的加密附件解密到应用缓存，返回缓存根目录（前端 assetBaseDir）与失败条数。
+#[tauri::command]
+async fn materialize_vault_assets(
+    vault_id: String,
+    dat_dir: String,
+    dat_dir_name: String,
+) -> Result<crypto::asset::Materialized, crypto::CryptoError> {
+    spawn_crypto(move || {
+        let root = asset_cache_root().to_string_lossy().to_string();
+        crypto::asset::materialize_assets(store(), &vault_id, &dat_dir, &root, &dat_dir_name)
+    })
+    .await
 }
 
 pub fn run() {
@@ -2495,6 +2704,7 @@ pub fn run() {
             inspect_path,
             path_exists,
             reveal_in_finder,
+            open_local_file,
             open_url,
             launch_local,
             app_display_name,
@@ -2513,8 +2723,12 @@ pub fn run() {
             import_dir_to_vault,
             clipboard_file_paths,
             copy_asset,
+            copy_file_to,
             write_asset_bytes,
             read_asset_data_url,
+            write_encrypted_asset,
+            copy_encrypted_asset,
+            materialize_vault_assets,
             sync_native_menu,
             set_native_menu_lang
         ])
@@ -2522,6 +2736,14 @@ pub fn run() {
             // Windows 冷启动：把命令行里的文件路径暂存，前端 mounted 后拉取打开。
             #[cfg(target_os = "windows")]
             buffer_open_paths(argv_file_paths());
+            // 初始化加密附件（图片）解密缓存根目录：app_cache_dir/mlk-assets。
+            // 启动时先整目录清空：此刻还没有任何会话，残留只可能来自上次被强杀/崩溃的运行，
+            // 里面是上一轮留在磁盘上的明文图片（正常锁定/退出/自动锁定路径都会自行清除）。
+            if let Ok(cache) = app.path().app_cache_dir() {
+                let root = cache.join("mlk-assets");
+                let _ = std::fs::remove_dir_all(&root);
+                let _ = ASSET_CACHE_ROOT.set(root);
+            }
             let handle = app.handle();
 
             // 开机自启启动（tauri-plugin-autostart 写入的 --autostarted 标记）：先以隐藏态创建主窗，
@@ -2579,6 +2801,23 @@ pub fn run() {
                     }
                 });
             }
+
+            // iCloud「仅在线」文件召回提示：crypto::io 读写前后回调（开始 / 结束），
+            // 这里转成前端事件显示 / 关闭 loading，召回下载的数秒停滞不会被误认为卡死。
+            // 事件广播到所有窗口（主窗 + 便签窗都是读停滞的重灾区，见 App.vue 监听）。
+            crypto::io::set_recall_notifier(Box::new({
+                let ev = handle.clone();
+                move |path: &str, started: bool| {
+                    let _ = ev.emit(
+                        if started {
+                            "marklock://cloud-recall"
+                        } else {
+                            "marklock://cloud-recall-done"
+                        },
+                        path.to_string(),
+                    );
+                }
+            }));
 
             // 系统托盘（全平台）：创建逻辑见 install_tray（set_tray_enabled 运行时开关共用）。
             install_tray(handle)?;

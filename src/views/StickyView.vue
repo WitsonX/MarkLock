@@ -28,6 +28,9 @@ export default defineComponent({
       dirty: false,
       loading: false,
       needUnlock: false,
+      // 读取失败且与「库未解锁」无关（明文笔记 IO 失败等）：展示原因 + 重试，
+      // 不能落进解锁表单（明文目标无 vaultId，解锁按钮按下也无事发生）
+      loadErr: '',
       picking: false,
       syncingScroll: false,
       saving: false,
@@ -137,6 +140,7 @@ export default defineComponent({
       if (!t) {
         this.content = ''
         this.needUnlock = false
+        this.loadErr = ''
         return
       }
       this.loading = true
@@ -144,9 +148,21 @@ export default defineComponent({
         this.content = await readNote(t)
         this.dirty = false
         this.needUnlock = false
-      } catch {
-        // 读失败最常见原因是库未解锁；交由解锁表单处理（明文读取失败也走这里提示）
-        this.needUnlock = true
+        this.loadErr = ''
+      } catch (e) {
+        // 读失败最常见原因是库未解锁：交由解锁表单处理。
+        // 其余失败（明文笔记 IO 失败、库文件被移动等）展示原因 + 重试：
+        // 明文目标根本没有库可解，误显示密码表单会卡死在无意义的解锁页
+        const msg = String(e)
+        if (t.kind !== 'plain' && msg.includes('尚未解锁')) {
+          this.needUnlock = true
+          this.loadErr = ''
+        } else {
+          this.needUnlock = false
+          this.loadErr = msg || this.$t('sticky.loadFail')
+          this.content = ''
+          this.dirty = false
+        }
       } finally {
         this.loading = false
       }
@@ -183,6 +199,7 @@ export default defineComponent({
       this.pwd = ''
       this.unlockErr = false
       this.needUnlock = true
+      this.loadErr = ''
       message.info(this.$t('toast.locked'))
     },
     onInput(v: string) {
@@ -442,6 +459,12 @@ export default defineComponent({
         />
         <p v-if="unlockErr" class="err">{{ $t('sticky.unlockFail') }}</p>
         <button class="primary" @click="doUnlock">{{ $t('sticky.unlock') }}</button>
+      </div>
+
+      <!-- 读取失败（与解锁无关）：展示后端原因 + 重试按钮 -->
+      <div v-else-if="loadErr" class="unlock">
+        <p class="err">{{ loadErr }}</p>
+        <button class="primary" @click="load">{{ $t('sticky.retry') }}</button>
       </div>
 
       <!-- 正常三态：面板常驻布局流 + flex-basis 滑动过渡（对齐主编辑器 .panes 切换动画；不用 v-show，

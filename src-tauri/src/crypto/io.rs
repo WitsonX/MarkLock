@@ -13,8 +13,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use super::error::{CryptoError, Result};
 
@@ -40,6 +42,111 @@ const BAK_MARK: &str = ".mlk-bak";
 /// 必须在目录列举与改密重包裹时被排除，否则会显示为幽灵笔记或被误处理。
 pub fn is_sidecar(name: &str) -> bool {
     name.starts_with('.') && (name.contains(TMP_MARK) || name.contains(BAK_MARK))
+}
+
+// ==================== iCloud 未下载文件召回兼容 ====================
+
+/// macOS 上 iCloud / FileProvider 的「仅在线」（dataless）文件在 open 触发召回（下载）时，
+/// 召回进行中或无法同步等待会瞬时返回 EDEADLK（os error 11，"Resource deadlock avoided"），
+/// 直接把它当 IO 错误抛给用户很不友好。读写入口统一做退避重试，并在首次遇到时
+/// 用 NSFileManager 主动触发召回。
+const MACOS_EDEADLK: i32 = 11;
+/// 单次召回的累计等待上限（笔记级小文件的召回通常秒级完成）。
+const CLOUD_RECALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// 召回等待期间的重试间隔。
+const CLOUD_RECALL_POLL: Duration = Duration::from_millis(400);
+
+fn is_cloud_recall(e: &std::io::Error) -> bool {
+    cfg!(target_os = "macos") && e.raw_os_error() == Some(MACOS_EDEADLK)
+}
+
+/// macOS：文件是否处于 iCloud「仅在线」（dataless）态——读它必然触发召回下载。
+/// 用 stat 的 UF_DATALESS 标志位判断，免开文件、无副作用。
+#[cfg(target_os = "macos")]
+fn is_dataless(path: &Path) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const UF_DATALESS: u32 = 0x4000_0000;
+    std::fs::metadata(path)
+        .map(|m| m.st_flags() & UF_DATALESS != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_dataless(_path: &Path) -> bool {
+    false
+}
+
+/// 召回提示钩子：crypto 层不依赖 Tauri，由 lib.rs 启动时注入，
+/// 把「召回开始 / 结束」转成前端事件（loading 提示的显示 / 关闭）。
+static RECALL_NOTIFY: OnceLock<Box<dyn Fn(&str, bool) + Send + Sync>> = OnceLock::new();
+
+/// 安装召回提示闭包：参数为 (路径, 是否开始)。重复安装忽略。
+pub fn set_recall_notifier(f: Box<dyn Fn(&str, bool) + Send + Sync>) {
+    let _ = RECALL_NOTIFY.set(f);
+}
+
+fn notify_recall(path: &Path, started: bool) {
+    if let Some(f) = RECALL_NOTIFY.get() {
+        f(&path.to_string_lossy(), started);
+    }
+}
+
+/// 后台主动触发 iCloud 下载（fire-and-forget）：官方 NSFileManager API，
+/// 兜底「open 未自动触发召回」的场景（新版 macOS 的 brctl 已无 download 子命令）。
+/// 所有失败忽略：非 iCloud 路径立即报错返回，恰为想要的兜底语义。
+#[cfg(target_os = "macos")]
+fn trigger_cloud_download(path: &Path) {
+    use objc2_foundation::{NSFileManager, NSString, NSURL};
+    let ns_path = NSString::from_str(&path.to_string_lossy());
+    let url = NSURL::fileURLWithPath(&ns_path);
+    // 失败（非 iCloud 项 / 已在下载等）一律忽略：仅为兜底触发，不作为读写成败依据
+    let _ = NSFileManager::defaultManager().startDownloadingUbiquitousItemAtURL_error(&url);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trigger_cloud_download(_path: &Path) {}
+
+/// 读整个文件：macOS iCloud dataless 文件召回（EDEADLK）时退避重试到超时，其余错误原样返回。
+pub fn read(path: &Path) -> std::io::Result<Vec<u8>> {
+    retry_cloud(path, || fs::read(path))
+}
+
+/// 写整个文件：覆盖 dataless 文件同样要先召回，与 [`read`] 同套召回兼容。
+pub fn write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    retry_cloud(path, || fs::write(path, data))
+}
+
+/// 退避重试公共件：仅对 EDEADLK 且未超超时重试，其余错误立即返回。
+/// 召回开始 / 结束各发一次通知（读前已是 dataless 必召回；或首次撞 EDEADLK 时补报），
+/// 供前端在下载等待期显示 loading，避免静默卡顿。
+fn retry_cloud<T>(path: &Path, op: impl Fn() -> std::io::Result<T>) -> std::io::Result<T> {
+    let deadline = Instant::now() + CLOUD_RECALL_TIMEOUT;
+    let mut triggered = false;
+    let mut notified = is_dataless(path);
+    if notified {
+        notify_recall(path, true);
+    }
+    let result = loop {
+        match op() {
+            Ok(v) => break Ok(v),
+            Err(e) if is_cloud_recall(&e) && Instant::now() < deadline => {
+                if !notified {
+                    notified = true;
+                    notify_recall(path, true);
+                }
+                if !triggered {
+                    triggered = true;
+                    trigger_cloud_download(path);
+                }
+                std::thread::sleep(CLOUD_RECALL_POLL);
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    if notified {
+        notify_recall(path, false);
+    }
+    result
 }
 
 /// 原子写入 `path`：写临时文件 → fsync → 滚动备份上一版 → rename → fsync 父目录。
@@ -146,7 +253,7 @@ fn rotate_backups(path: &Path) -> Result<()> {
 
 /// 读全量再写并 fsync 的复制（库文件较小，整体读入内存可接受）。
 fn copy_with_sync(from: &Path, to: &Path) -> std::io::Result<()> {
-    let data = fs::read(from)?;
+    let data = read(from)?;
     let mut f = OpenOptions::new()
         .write(true)
         .create(true)
@@ -173,7 +280,7 @@ pub fn restore_latest_backup(path: &Path) -> Result<usize> {
     if !bak.exists() {
         return Err(CryptoError::Io("没有可恢复的上一版备份".into()));
     }
-    let data = fs::read(&bak).map_err(|e| CryptoError::Io(format!("读取备份失败: {e}")))?;
+    let data = read(&bak).map_err(|e| CryptoError::Io(format!("读取备份失败: {e}")))?;
     // 当前目标 → 新 .bak，旧 .bak → .bak.1，备份内容 → 目标（仅当备份开关开启时才滚动）。
     atomic_write(path, &data)?;
     Ok(data.len())

@@ -61,6 +61,11 @@ export interface OpenFile {
    * 用于页签角标提醒 + 手动「重新加载」。
    */
   external?: ExternalState
+  /**
+   * 加密图片附件解密后的缓存根目录（仅 .mdl/.mdlb 解锁后有值）。
+   * 预览时作为相对图片链接的基准目录，替代明文 `.dat`；锁定后后端会清除该缓存。
+   */
+  assetDir?: string
 }
 
 /** 一个最近打开的文件条目 */
@@ -875,6 +880,8 @@ export const useVaultStore = defineStore('vault', {
           f.content = ''
           f.dirty = false
           f.external = ''
+          // 附件缓存已被后端清除，重置 assetDir 以便重新解锁后再次 materialize
+          f.assetDir = undefined
           // 单文件加密（vaultId 即文件路径）→ 显示密码框
           if (f.vaultId === f.path) f.locked = true
         }
@@ -894,6 +901,7 @@ export const useVaultStore = defineStore('vault', {
           f.content = ''
           f.dirty = false
           f.external = ''
+          f.assetDir = undefined
           if (f.vaultId === f.path) f.locked = true
         }
       })
@@ -1391,6 +1399,7 @@ export const useVaultStore = defineStore('vault', {
             f.content = ''
             f.dirty = false
             f.external = ''
+            f.assetDir = undefined
             if (f.vaultId === f.path) f.locked = true
           }
         })

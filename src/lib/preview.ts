@@ -32,18 +32,21 @@ const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = tr
  *  与 code 同为 .codespan-wrap 的兄弟节点，选中 code 文本时不会带入按钮文字。 */
 const INLINE_COPY_BTN = () => CODE_COPY_BTN(translate('common.copy'), translate('editor.copyInlineAria'))
 
-/** 模块级：当前预览文件所在目录（解析正文里相对图片路径的基准）。
- *  渲染前由调用方经 setAssetBaseDir 写入，image 渲染器读取它拼绝对路径再转 asset URL。 */
-let __assetBaseDir = ''
+/** 当前预览文件所在目录（解析正文里相对图片路径的基准）。
+ *  渲染前由调用方经 setAssetBaseDir 写入，image 渲染器读取它拼绝对路径再转 asset URL。
+ *  存于 globalThis 而非模块作用域：marked 渲染器闭包在模块初始化时固化，dev 热重载下
+ *  旧闭包与新模块会各持一份模块级变量，导致预览按陈旧/空基准解析相对链接（404 裂图）；
+ *  挂到全局后任意模块实例的闭包都读到同一份当前值，热重载不再产生此类错位。 */
+const __global = globalThis as any
 
 /** 设置相对图片解析的基准目录（当前文件所在目录）；空串表示无基准（如未保存草稿）。 */
 export function setAssetBaseDir(dir: string) {
-  __assetBaseDir = dir
+  __global.__marklockAssetBaseDir = dir
 }
 
 /** 读取当前基准目录（导出 HTML 等需要临时切换并还原基准的场景）。 */
 export function getAssetBaseDir(): string {
-  return __assetBaseDir
+  return __global.__marklockAssetBaseDir || ''
 }
 
 /** HTML 属性值转义（image 渲染器自管 alt/title，marked 默认转义被我们接管后需自行处理）。 */
@@ -74,7 +77,8 @@ function resolveImgSrc(href: string): string {
     }
   })()
   const isAbs = decoded.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(decoded)
-  const abs = isAbs || !__assetBaseDir ? decoded : joinFs(__assetBaseDir, decoded)
+  const base = getAssetBaseDir()
+  const abs = isAbs || !base ? decoded : joinFs(base, decoded)
   try {
     return convertFileSrc(abs)
   } catch {

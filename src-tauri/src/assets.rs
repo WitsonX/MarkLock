@@ -115,12 +115,9 @@ pub fn copy_into(dest_dir: &str, src: &str) -> Result<String> {
         .ok_or_else(|| CryptoError::Io("路径含非法字符".into()))
 }
 
-/// 把 base64 二进制内容写入 `dest_dir/<name>`（重名自动加序号），返回最终绝对路径。
-///
-/// 用于「粘贴截图/剪贴板图片」：WKWebView 能给出图片字节但没有磁盘路径，前端读出
-/// base64 交给这里落盘。`base64_data` 允许是完整 data URL（`data:…;base64,XXXX`），
+/// 解码 base64 载荷为字节。允许传入完整 data URL（`data:…;base64,XXXX`），
 /// 此时按第一个逗号剥离前面的 metadata（data URL 的 metadata 段不含逗号）。
-pub fn write_bytes(dest_dir: &str, name: &str, base64_data: &str) -> Result<String> {
+pub fn decode_data_url_base64(base64_data: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     let payload = match base64_data.strip_prefix("data:") {
         Some(rest) => match rest.find(',') {
@@ -129,9 +126,18 @@ pub fn write_bytes(dest_dir: &str, name: &str, base64_data: &str) -> Result<Stri
         },
         None => base64_data,
     };
-    let bytes = base64::engine::general_purpose::STANDARD
+    base64::engine::general_purpose::STANDARD
         .decode(payload.trim())
-        .map_err(|e| CryptoError::Io(format!("base64 解码失败: {e}")))?;
+        .map_err(|e| CryptoError::Io(format!("base64 解码失败: {e}")))
+}
+
+/// 把 base64 二进制内容写入 `dest_dir/<name>`（重名自动加序号），返回最终绝对路径。
+///
+/// 用于「粘贴截图/剪贴板图片」：WKWebView 能给出图片字节但没有磁盘路径，前端读出
+/// base64 交给这里落盘。`base64_data` 允许是完整 data URL（`data:…;base64,XXXX`），
+/// 此时按第一个逗号剥离前面的 metadata（data URL 的 metadata 段不含逗号）。
+pub fn write_bytes(dest_dir: &str, name: &str, base64_data: &str) -> Result<String> {
+    let bytes = decode_data_url_base64(base64_data)?;
     let name = sanitize_name(name);
     std::fs::create_dir_all(dest_dir).map_err(io_err)?;
     let target = unique_path(Path::new(dest_dir), &name);
