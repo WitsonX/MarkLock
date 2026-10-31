@@ -21,6 +21,7 @@ All key material is derived and used inside Rust. **Keys never leave the device,
 ## Why this one
 
 - **A vault is one file** — the whole tree, filenames and folder names included, encrypts into a single `.mdlb`. Drop it in iCloud, Dropbox, or an external drive; anyone who opens it sees an opaque blob.
+- **Images are ciphertext too** — pictures and files you paste or drop into an encrypted note hit the disk as encrypted containers, never plaintext. They are decrypted into the app cache only while unlocked, and a password change re-wraps them along with the text.
 - **Changing the password doesn't re-encrypt** — the master password only wraps the data key, so switching it is instant even on a huge vault.
 - **Locking means amnesia** — idle timeout, screen lock, or sleep zeroizes the keys in memory, and tabs from a locked vault relabel themselves to `vault file` so even filenames stop leaking.
 - **Small** — the default Windows installer is 3.5MB, macOS ships a single small app. It uses the system WebView instead of bundling a browser.
@@ -61,6 +62,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 |---|---|
 | Vault `.mdlb` | **MarkLock Bundle** — a single-file container holding an encrypted file tree. Filenames, directory structure, and contents are all ciphertext. One opaque blob you can sync anywhere. |
 | File `.mdl` | **MarkDown Lock** — a single encrypted Markdown file, usable standalone (e.g. `investment-notes.mdl` on your Desktop). |
+| Attachment folder `<name>.dat` | Images and attachments live beside the document, not inside the container: one encrypted container per attachment, each with its own data key, all locked by the same master password. Decrypted into the app cache while unlocked, wiped on lock or exit. |
 | Master password | Lives only in your head. Derived into a KEK via Argon2id. Never written to disk, never transmitted. |
 | DEK | Random data key, wrapped by the KEK and stored in the file header. Changing your master password only re-wraps the DEK — contents are never re-encrypted. |
 
@@ -73,12 +75,16 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Standalone `.mdl` files keep their own password, for the "just this one" case
 - Plain `.md` opens and edits like normal, with right-click **Convert to encrypted file** (optionally deleting the plaintext); whole directories can be batch-encrypted
 - Change master password, switch the cipher scheme (full re-encryption), export to plaintext (double-confirmed as destructive)
+- Images and attachments (zip, pdf, anything else) pasted or dropped into an `.mdl` or a file inside a vault are stored as ciphertext in a sibling `<name>.dat` folder and share the vault's master password; changing that password re-wraps them too, and one unreadable attachment only skips itself instead of blanking every image
 
 ### Editing & browsing
 
 - CodeMirror 6 source editing with Markdown highlighting, edit / split / preview modes, formatting toolbar
 - Autosave with 800ms debounce, encrypted on write; can be turned off
 - Full-text search (decryption happens in memory only), outline navigation, starring, HTML export
+- Exported HTML carries its attachments: images and other files are copied next to it under `<export-name>.dat/` and relinked relatively, so the file you hand someone shows everything; the success toast offers **Open file** and **Open folder**
+- Clicking an attachment in the preview opens document types as a tab, while binaries (zip, images, pdf) raise a save dialog and copy out instead of failing text decoding
+- On macOS, files iCloud has kept "online only" are recalled and downloaded on read with a progress toast, so a few seconds of waiting no longer looks like "failed to read the file"
 - VSCode-style sidebar — open files, open vaults, starred, recent, working directory; groups are reorderable and individually toggleable; switch documents by tabs or by list
 - Browse the local filesystem tree in the working-directory view, with vaults shown as atomic nodes
 - External-change watching reloads a file when another program rewrites it; if you have unsaved edits it only raises an amber badge instead of clobbering your work
@@ -89,6 +95,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Or use a **hot corner**: hold the pointer in a chosen screen corner for a moment; optionally require a modifier key so brushing past the corner never triggers it
 - Edit / split / preview in one small window, saved straight to ciphertext; if the vault is locked you can type the password right in the note
 - A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label)
+- When a note can't be read (plaintext I/O failure, the file moved out of its vault) the window shows the reason plus **Retry**, instead of always routing you into an unlock form
 
 ### Security & polish
 
@@ -126,6 +133,8 @@ Prerequisites (macOS needs Xcode Command Line Tools; Windows needs both Rust and
 ## Roadmap
 
 1.0 already covers both encrypted forms (vault and single file), the CodeMirror editor, full-text search, starring, outline, external-change watching, Sticky Notes, and packaged distribution.
+
+1.1 extends "ciphertext on the disk" to images and attachments: nothing but ciphertext is left behind, text included.
 
 Requests and feedback belong in [Issues](https://github.com/WitsonX/MarkLock/issues).
 

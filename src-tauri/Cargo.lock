@@ -2126,7 +2126,7 @@ dependencies = [
 
 [[package]]
 name = "marklock"
-version = "1.0.4"
+version = "1.1.0"
 dependencies = [
  "aes-gcm",
  "argon2",
