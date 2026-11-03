@@ -94,7 +94,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Pin any `.md` / `.mdl` file as a sticky note, summoned by clicking the tray (menu-bar) icon
 - Or use a **hot corner**: hold the pointer in a chosen screen corner for a moment; optionally require a modifier key so brushing past the corner never triggers it
 - Edit / split / preview in one small window, saved straight to ciphertext; if the vault is locked you can type the password right in the note
-- A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label)
+- A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label); each item can carry its own launch arguments (space-separated, quote anything containing a space)
 - When a note can't be read (plaintext I/O failure, the file moved out of its vault) the window shows the reason plus **Retry**, instead of always routing you into an unlock form
 
 ### Security & polish

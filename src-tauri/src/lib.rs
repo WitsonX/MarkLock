@@ -2122,12 +2122,29 @@ fn open_url(url: String) -> Result<(), crypto::CryptoError> {
 /// 交给系统「默认方式」打开：macOS `open`、Windows `explorer`、Linux `xdg-open`。
 /// 路径一律作为独立参数传入、不拼接 shell 字符串，避免命令注入；`.exe`/`.app` 会被直接运行，
 /// 目录与文档则按系统关联打开。
+/// `args` 为启动参数数组（前端把设置里的原始串按引号感知拆分后传入）：macOS 经 `open --args`
+/// 透传给应用，Windows 直接追加到可执行文件路径后；其余平台（xdg-open 无透传语义）忽略。
+/// 参数仍逐个传给 `Command`，不进 shell，依旧无注入面。
+/// macOS 带参时固定加 `open -n` 另起进程：`open` 对已运行应用只激活、argv 不送达，
+/// 新进程则能把 argv 交给应用的单实例回调（常驻后台类应用尤为依赖这条路）。
 #[tauri::command]
-fn launch_local(path: String) -> Result<(), crypto::CryptoError> {
+fn launch_local(path: String, args: Vec<String>) -> Result<(), crypto::CryptoError> {
     #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg(&path).spawn();
+    let res = {
+        let mut cmd = std::process::Command::new("open");
+        if !args.is_empty() {
+            cmd.arg("-n").arg(&path).arg("--args").args(&args);
+        } else {
+            cmd.arg(&path);
+        }
+        cmd.spawn()
+    };
     #[cfg(target_os = "windows")]
-    let res = std::process::Command::new("explorer").arg(&path).spawn();
+    let res = {
+        let mut cmd = std::process::Command::new("explorer");
+        cmd.arg(&path).args(&args);
+        cmd.spawn()
+    };
     #[cfg(target_os = "linux")]
     let res = std::process::Command::new("xdg-open").arg(&path).spawn();
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -2135,6 +2152,9 @@ fn launch_local(path: String) -> Result<(), crypto::CryptoError> {
         std::io::ErrorKind::Other,
         "当前平台不支持快速启动本地应用",
     ));
+    // Linux 的 xdg-open 无参数透传入口，不参与编译（避免未使用告警）
+    #[cfg(target_os = "linux")]
+    let _ = args;
     res.map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
     Ok(())
 }

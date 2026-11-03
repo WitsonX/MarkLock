@@ -191,6 +191,7 @@ note.dat/              附件目录（与容器同级）
 | `unlock_vault` / `create_vault` / `list_vault` / `create_in_vault` / `create_folder_in_vault` / `delete_in_vault` / `rename_in_vault` | 旧目录库模型，保留兼容 |
 | `copy_file_to(src, dest)` | 覆盖式复制到指定路径（预览点二进制附件的「另存为」下载流） |
 | `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」）；只接受 `is_file` 的路径，与 `open_url` 的协议白名单是两套 |
+| `launch_local(path, args)` | 快速启动本地应用 / 路径，`args` 为已拆分的启动参数数组：macOS 经 `open --args` 透传且带参时固定加 `-n` 另起进程，Windows 追加到程序参数后，Linux 的 `xdg-open` 无透传语义故忽略 |
 | `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` / `saveAttachmentDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
 
 ## 前端结构与状态
@@ -200,6 +201,7 @@ note.dat/              附件目录（与容器同级）
 - **编辑器**：`src/components/CodeMirrorEditor.vue` 封装 CodeMirror 6，每个文件常驻实例以保留光标与滚动位置。
 - **外部修改监控**：`src/lib/filewatch.ts` 是模块级单例，默认 2 秒轮询磁盘 mtime / 大小，并在窗口重新获得焦点时立刻检查。库内文件按整个容器监控，只重读已打开的那几个文件。
 - **预览**：`src/lib/preview.ts` 是主编辑器与便携便签共用的 Markdown 渲染层，`src/components/MarkdownPreview.vue` 为对应组件。相对链接的基准目录由 `setAssetBaseDir` 写入，加密文件（`.mdl` / `.mdlb`）指向附件缓存根、其余指向磁盘上的锚点目录；该基准存 `globalThis` 而非模块作用域——marked 渲染器的闭包在模块初始化时就固化，dev 热重载会让新旧模块实例各持一份变量，旧闭包读到陈旧/空基准就表现为裂图 404。预览里点非文档类型的链接（zip、图片等）不按文本开页签，而是弹保存对话框走复制下载流。
+- **从系统打开文件**：macOS 走 `RunEvent::Opened`（访达双击、拖到 Dock、「打开方式」、`open -a MarkLock 文件` 都汇到这一条），Windows 冷启动读 argv、二次启动由单实例插件把参数转给已运行实例；Linux 没有接入口。路径一律先进 Rust 侧的 `PENDING_OPEN_PATHS` 缓冲，再发 `marklock://open-paths`，前端用 `take_pending_open_paths` 一次取干——事件不缓冲，冷启动时先于 `listen()` 触发就丢了，所以缓冲必须放后端，取干也保证不重复建页签。监听分两处：`EditorView` 在位时直接取；不在编辑器页（设置 / 解锁）时由常驻的 `App.vue` 置 `pendingOpenPathsNavigate` 并跳回 `/editor`，`EditorView` 在 `onMounted` 末尾消费——那时 `_sessionRestore` 已赋值，能与冷启动恢复串行。
 - **i18n**：`src/locales/{zh,en}.ts`，zh 为原文，en 结构一一对应；仅收录用户可见文案。
 
 ## 目录结构
@@ -214,7 +216,7 @@ MarkLock/
 │   ├── styles/global.css   # CSS 变量主题，迁移自原型 base.css
 │   ├── components/         # TitleBar / CodeMirrorEditor / MarkdownPreview / EncIcon / VaultTreeNode / WorkdirNode / AboutCard
 │   ├── stores/vault.ts     # Pinia store
-│   ├── lib/                # tauri.ts 桥接 / filewatch.ts / preview.ts / fonts.ts / sticky.ts / appinfo.ts / update.ts / aboutDialog.ts / links.ts / platform.ts / splash.ts / tooltip.ts
+│   ├── lib/                # tauri.ts 桥接 / filewatch.ts / preview.ts / fonts.ts / sticky.ts / appinfo.ts / update.ts / aboutDialog.ts / links.ts / platform.ts / splash.ts / tooltip.ts / launchArgs.ts
 │   ├── locales/            # zh.ts（原文）/ en.ts
 │   └── views/              # UnlockView / EditorView / SettingsView / DialogsView / StickyView
 ├── src-tauri/
@@ -246,7 +248,7 @@ MarkLock/
 - **内容源**：任意 `.md` 明文或 `.mdl` 加密文件；所在库锁定时便签内直接给密码框解锁。`.mdlb` 是多文件容器，暂不作为单个便签源。
 - **读取失败要说清是哪种失败**：读不到正文不能一律当作「库未解锁」——明文笔记根本没有库可解，误显示密码框等于把人卡在一个按了没反应的表单上。故按原因分流：库未解锁走解锁表单，其余（IO 失败、库文件被移动）显示后端给出的原因加重试按钮；判别依据是后端错误消息里的固定中文文案，后端措辞变了这里要跟着改。
 - **编辑预览一体**：编辑 / 分屏 / 预览三态复用主编辑器的 CodeMirror 与 `preview.ts`，保存走同一套 `write_file` / `write_file_vault` 命令，因此落盘一样是密文。相对链接的基准目录取便签文件**自己在磁盘上的目录**，不接主编辑器那套附件缓存，所以指向 `.mdl` 的便签里、以 `.mdat` 密文存储的图片当前不显示（明文库/普通文件的插图不受影响）。
-- **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。
+- **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。每项可另存「启动参数」原始串（空格分隔、引号段视为整体，`lib/launchArgs.ts` 拆分），`launch_local` 收到参数数组后 macOS 走 `open <路径> --args …`、Windows 追加到程序后；参数逐个传给 `Command` 不经 shell，无注入面。因 `open` 对已运行应用只激活、argv 不送达，macOS 带参时固定附 `open -n` 另起进程（无开关，对新实例行为用户无感）。
 - **开机自启动**：写 macOS LaunchAgent / Windows 当前用户启动项 / Linux XDG autostart，可选手否静默后台启动；若托盘图标被关闭则强制显示窗口，避免应用不可达。
 
 ## 开发与调试

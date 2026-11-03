@@ -250,9 +250,12 @@ export function setHotCorner(
   return invoke<void>('set_hot_corner', { enabled, dwellMs, requireModifier, modifier })
 }
 
-/** 快速启动一个本地应用 / 路径（便签底部快速启动条）。 */
-export function launchLocal(path: string) {
-  return invoke<void>('launch_local', { path })
+/**
+ * 快速启动一个本地应用 / 路径（便签底部快速启动条）。
+ * args：已拆分的启动参数（macOS 经 open --args 透传，带参时后端自动加 open -n 另起进程）。
+ */
+export function launchLocal(path: string, args: string[] = []) {
+  return invoke<void>('launch_local', { path, args })
 }
 
 /** 取本地应用/路径在系统层面的显示名（macOS 本地化名；非 macOS 返回 null，由前端兜底）。 */

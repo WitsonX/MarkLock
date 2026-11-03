@@ -1007,6 +1007,13 @@ export default defineComponent({
       this.store.pendingQuit = false
       this.handleAppClose()
     }
+    // 消费「非编辑器页双击打开文件」的跳转意图（设置/解锁页收到 open-paths → App 跳回编辑器）：
+    // 放在 onMounted 末尾确保 _sessionRestore 已赋值，再 drain 能与冷启动恢复串行、不建重复页签；
+    // 上方冷启动 drain 若已抢先取走路径，这里再 drain 也只是拿到空数组，无害。
+    if (this.store.pendingOpenPathsNavigate) {
+      this.store.pendingOpenPathsNavigate = false
+      this.drainPendingOpenPaths()
+    }
   },
   unmounted() {
     if (this._unlistenDrag) this._unlistenDrag()

@@ -142,6 +142,8 @@ export interface HotCornerSettings {
 export interface QuickLaunchItem {
   name: string
   path: string
+  /** 启动参数原始串（空格分隔，双/单引号段视为整体）；空表示无参数，旧数据无此字段 */
+  args?: string
 }
 
 export interface Settings {
@@ -484,6 +486,9 @@ export const useVaultStore = defineStore('vault', {
     pendingExpandVault: '' as string,
     /** 待处理的退出请求：非编辑器页收到关闭事件时置位并跳回编辑器，由未保存检查确认后退出 */
     pendingQuit: false,
+    /** 待打开文件意图：非编辑器页（如设置页）收到系统「打开文件」时由 App 置位并跳回编辑器，
+     *  EditorView 挂载后 watch/末尾消费，复用冷启动 drain 拉取 Rust 缓存的路径 */
+    pendingOpenPathsNavigate: false,
     /** 收藏的库（自持对象快照） */
     favorites: loadFavorites() as VaultInfo[],
     /** 最近打开的文件列表 */

@@ -5,11 +5,12 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PhysicalSize } from '@tauri-apps/api/dpi'
 import { useVaultStore } from '../stores/vault'
-import type { StickyNoteTarget } from '../stores/vault'
+import type { QuickLaunchItem, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
 import { isMac } from '../lib/platform'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
+import { splitLaunchArgs } from '../lib/launchArgs'
 import appIcon from '../assets/about-icon.png'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
 import MarkdownPreview from '../components/MarkdownPreview.vue'
@@ -417,8 +418,9 @@ export default defineComponent({
     openMain() {
       tauri.showMainWindow().catch(() => {})
     },
-    launch(path: string) {
-      tauri.launchLocal(path).catch((e) => message.error(String(e)))
+    /** 快速启动：把参数原始串按引号感知拆分后交给 Rust（macOS 经 open --args 透传，带参时后端自动 open -n 另起进程）。 */
+    launch(item: QuickLaunchItem) {
+      tauri.launchLocal(item.path, splitLaunchArgs(item.args)).catch((e) => message.error(String(e)))
     },
   },
 })
@@ -488,7 +490,7 @@ export default defineComponent({
     </div>
 
     <div v-if="quickLaunch.length" class="sticky-launch" :class="{ 'icon-only': !launchShowText }">
-      <button v-for="item in quickLaunch" :key="item.path" :title="item.path" @click="launch(item.path)">
+      <button v-for="(item, i) in quickLaunch" :key="`${item.path}#${i}`" :title="item.args ? `${item.path} ${item.args}` : item.path" @click="launch(item)">
         <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
         <span v-if="launchShowText">{{ item.name }}</span>
       </button>

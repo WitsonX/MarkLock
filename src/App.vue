@@ -142,6 +142,16 @@ export default defineComponent({
         router.push('/editor')
       }).catch(() => {})
 
+      // 系统级「打开文件」兜底（与上面的 close-requested 同模式）：监听上移到常驻的 App.vue，
+      // 否则停留在设置/解锁页时 EditorView 未挂载，双击 md 只能等下次进编辑器才被打开。
+      // 编辑器在位时交给 EditorView 自己的监听直接处理（不重复跳转）；其他页面则置位意图
+      // 并跳回编辑器（退出设置页），由 EditorView 挂载后消费 pendingOpenPathsNavigate 拉取打开。
+      listen('marklock://open-paths', () => {
+        if (router.currentRoute.value.name === 'editor') return
+        store.pendingOpenPathsNavigate = true
+        router.push('/editor')
+      }).catch(() => {})
+
       // 原生菜单「关于 MarkLock」：直接弹应用内独立对话框（常驻于本组件模板），
       // 不再路由到设置页；卡片内容与设置页「关于」页签共用 AboutCard。
       listen<string>('marklock://menu', (e) => {

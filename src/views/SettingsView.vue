@@ -50,6 +50,9 @@ export default defineComponent({
       // 快速启动项内联重命名：当前编辑行的下标（-1 表示无）与草稿名
       editingLaunch: -1,
       editingName: '',
+      // 快速启动项的启动参数编辑弹窗：下标（-1 表示关闭）与草稿原始串
+      launchArgsIdx: -1,
+      launchArgsDraft: '',
       // 自定义皮肤编辑器：草稿（null=关闭）、正在编辑的明暗档位、删除确认目标
       skinDraft: null as CustomSkin | null,
       skinDraftMode: 'light' as 'light' | 'dark',
@@ -405,16 +408,17 @@ greet('MarkLock');`
       // 便签窗口是独立 webview，store 不共享；清除文件后直接隐藏它，避免还显示旧内容
       tauri.hideStickyNote().catch(() => {})
     },
-    /** 添加快速启动项：无过滤器选任意本地应用 / 路径，名称取文件名去扩展名。 */
+    /** 添加快速启动项：无过滤器选任意本地应用 / 路径，名称取文件名去扩展名（参数默认为空）。 */
     async addLaunch() {
       const path = await tauri.openAnyFileDialog()
       if (!path) return
       const cur = this.store.settings.quickLaunch
-      if (cur.some((x) => x.path === path)) return
+      // 仅当同路径且同样无参时才算重复：允许同一应用配不同参数放多项
+      if (cur.some((x) => x.path === path && !x.args)) return
       // 优先用系统层面的本地化应用名（macOS / Windows）；读不到时回退到文件名（去扩展名）
       const fallback = (path.split(/[\\/]/).pop() || path).replace(/\.[^.]+$/, '')
       const name = (await tauri.appDisplayName(path)) || fallback
-      this.store.updateSettings({ quickLaunch: [...cur, { name, path }] })
+      this.store.updateSettings({ quickLaunch: [...cur, { name, path, args: '' }] })
       ensureAppIcons([path])
     },
     removeLaunch(i: number) {
@@ -447,6 +451,30 @@ greet('MarkLock');`
         }
       }
       this.editingLaunch = -1
+    },
+    /** 打开启动参数编辑弹窗（草稿取当前项的 args，旧数据无字段时为空）。 */
+    openLaunchArgs(i: number) {
+      this.launchArgsIdx = i
+      this.launchArgsDraft = this.store.settings.quickLaunch[i]?.args ?? ''
+      // 下一帧聚焦并全选，便于一改版参数（弹窗首次展开时 DOM 可能未就绪，取不到就放弃）
+      this.$nextTick(() => {
+        const el = this.$refs.launchArgsInput as HTMLInputElement | undefined
+        if (el) { el.focus(); el.select() }
+      })
+    },
+    /** 提交启动参数：存原始串，启动时再拆分；清空即恢复无参启动。 */
+    commitLaunchArgs() {
+      const i = this.launchArgsIdx
+      const item = this.store.settings.quickLaunch[i]
+      if (item) {
+        const args = this.launchArgsDraft.trim()
+        if ((item.args ?? '') !== args) {
+          const cur = [...this.store.settings.quickLaunch]
+          cur[i] = { ...item, args }
+          this.store.updateSettings({ quickLaunch: cur })
+        }
+      }
+      this.launchArgsIdx = -1
     },
     /** 「开机自启」开关：调用 Rust 写入 / 移除系统启动项；失败时 toast 提示并回退开关。
      *  与 store.settings.autoStart 双向绑定：先乐观更新 UI，后端拒绝时再回写。 */
@@ -1160,7 +1188,7 @@ greet('MarkLock');`
                 <span :class="{ on: store.settings.stickyLaunchDisplay === 'iconText' }" @click="store.updateSettings({ stickyLaunchDisplay: 'iconText' })">{{ $t('settings.sticky.launchDisplayIconText') }}</span>
               </div>
             </div>
-            <div v-for="(item, i) in store.settings.quickLaunch" :key="item.path" class="row">
+            <div v-for="(item, i) in store.settings.quickLaunch" :key="`${item.path}#${i}`" class="row">
               <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
               <div v-else class="ql-ico ql-ico-ph" aria-hidden="true"></div>
               <div class="info">
@@ -1176,11 +1204,13 @@ greet('MarkLock');`
                 />
                 <div v-else class="t" :title="$t('settings.sticky.renameD')" @dblclick="startEditLaunch(i)">{{ item.name }}</div>
                 <div class="d">{{ item.path }}</div>
+                <div v-if="item.args" class="d ql-args" :title="$t('settings.sticky.argsD')" @click="openLaunchArgs(i)">{{ item.args }}</div>
               </div>
               <a-button size="small" @click="startEditLaunch(i)">{{ $t('settings.sticky.rename') }}</a-button>
+              <a-button size="small" :class="{ 'ql-args-on': item.args }" @click="openLaunchArgs(i)">{{ $t('settings.sticky.args') }}</a-button>
               <a-button size="small" danger @click="removeLaunch(i)">{{ $t('settings.sticky.remove') }}</a-button>
             </div>
-            <div class="row" data-key="quickLaunch" data-keywords="快速启动 应用 launch">
+            <div class="row" data-key="quickLaunch" data-keywords="快速启动 应用 launch 参数 args">
               <div class="info"><div class="t">{{ $t('settings.sticky.addLaunch') }}</div><div class="d">{{ $t('settings.sticky.addLaunchD') }}</div></div>
               <a-button size="small" @click="addLaunch">{{ $t('settings.sticky.choose') }}</a-button>
             </div>
@@ -1217,6 +1247,33 @@ greet('MarkLock');`
         <div class="modal-foot">
           <button class="btn" :disabled="resetting" @click="resetModalOpen = false">{{ $t('settings.resetModal.cancel') }}</button>
           <button class="btn btn-danger" :disabled="resetting" @click="submitReset">{{ resetting ? $t('settings.resetModal.resetting') : $t('settings.resetModal.confirm') }}</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 快速启动项的启动参数：空格分隔，引号段视为整体；保存后便签点击该快捷方式即带参启动 -->
+    <a-modal
+      :open="launchArgsIdx >= 0"
+      :title="$t('settings.sticky.argsTitle')"
+      :width="460"
+      :footer="null"
+      @cancel="launchArgsIdx = -1"
+    >
+      <div class="launch-args-box">
+        <input
+          ref="launchArgsInput"
+          class="la-input"
+          :value="launchArgsDraft"
+          :placeholder="$t('settings.sticky.argsPh')"
+          spellcheck="false"
+          @input="launchArgsDraft = ($event.target as HTMLInputElement).value"
+          @keydown.enter="commitLaunchArgs()"
+          @keydown.esc="launchArgsIdx = -1"
+        />
+        <div class="modal-hint">{{ $t('settings.sticky.argsHint') }}</div>
+        <div class="modal-foot">
+          <button class="btn" @click="launchArgsIdx = -1">{{ $t('common.cancel') }}</button>
+          <button class="btn btn-primary" @click="commitLaunchArgs()">{{ $t('common.confirm') }}</button>
         </div>
       </div>
     </a-modal>
@@ -1411,6 +1468,21 @@ greet('MarkLock');`
   background: var(--panel); color: var(--text); outline: none;
 }
 .ql-rename:focus { border-color: var(--primary); }
+/* 启动参数子行：字面值等宽展示，点击重新打开参数弹窗 */
+.ql-args { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; }
+.ql-args:hover { color: var(--primary); }
+/* 已配参数的启动项：「参数」按钮主色描边，便于在列表里一眼看出哪项带参 */
+.ql-args-on { color: var(--primary); border-color: var(--primary); }
+/* 启动参数弹窗：输入框 + 说明 + 底部按钮的纵向间距 */
+.launch-args-box { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
+.la-input {
+  width: 100%; font-size: 13px; padding: 5px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border: 1px solid var(--border-pop); border-radius: 6px;
+  background: var(--panel); color: var(--text); outline: none;
+}
+.la-input:focus { border-color: var(--primary); }
+.launch-args-box .modal-hint { font-size: 12px; color: var(--text-3); line-height: 1.6; }
 .row .info .t { cursor: text; }
 .row .info .t:hover { color: var(--primary); }
 

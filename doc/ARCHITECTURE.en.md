@@ -131,6 +131,7 @@ src/
 │   ├── skins.ts             # Skin registry: built-in list, token groups, custom-skin CSS generation/injection/live preview
 │   ├── locales/             # zh/en language packs + switching
 │   ├── sticky.ts            # Sticky-window detection + note body read/write by file type
+│   ├── launchArgs.ts        # Quote-aware split of a quick-launch item's raw "launch arguments" string
 │   ├── splash.ts            # Splash screen fade-out control
 │   └── update.ts            # Lightweight update check (GitHub/Gitee dual source + rate gating)
 └── views/
@@ -213,6 +214,8 @@ Keys and plaintext never enter the store. `assetDir` on a tab is an exception wo
 | `materialize_vault_assets(vaultId, datDir, datDirName)` | Decrypt the ciphertext attachments under `.dat` into the app cache; returns `{ cache_dir, failed }` |
 | `copy_file_to(src, dest)` | Overwrite-style copy to a chosen path (the download flow when a binary attachment is clicked in preview) |
 | `open_local_file(path)` | Hand an existing plain file on disk to the system default app (the "open file" action in the export-success message) |
+| `launch_local(path, args)` | Quick-launch a local app and pass launch arguments through (macOS `open --args`, plus `-n` when arguments are present; Windows appends them; Linux ignores them) |
+| `take_pending_open_paths()` | Drain the backend's buffer of "opened from the OS" paths (once on cold start, once after navigating back from a non-editor page) |
 
 > Commands that can block on disk for a long time (unlock / read / write / attachment materialize / batch encryption) run in the blocking thread pool via `spawn_crypto`; running them synchronously on the main thread freezes the WebView.
 
@@ -303,6 +306,19 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **Precondition**: these reads genuinely wait, so the six read/write commands must go through `spawn_crypto` (see the note in §5.3); executed synchronously on the main thread they freeze the WebView, the loading indicator never gets painted, and all the user sees is a hang.
 - **Boundary**: global search still uses bare `fs::read` on the main thread and is not wired to recall — an iCloud-online-only note matches by filename only and won't stall the UI. That is a deliberate trade-off.
 
+### 6.9 Launch arguments on quick-launch items
+
+- **The raw string is what gets stored**: `QuickLaunchItem.args?: string` holds exactly what the user typed in Settings (empty means no arguments; older data has no such field), and it is split into an array only at click time by `splitLaunchArgs` in `lib/launchArgs.ts` — quoted segments (double or single) count as one piece, everything else splits on whitespace. Storing the raw string means revisiting or re-editing shows the user the very sentence they wrote, not a mangled array.
+- **No injection surface**: arguments go to `Command::args` as a `Vec<String>`, one parameter at a time, never spliced into a shell string. This is a completely separate door from `open_url`'s scheme allowlist.
+- **Platform differences**: macOS runs `open <path> --args …`, and because `open` merely activates an already-running application without delivering argv, **arguments always come with `-n` to start a fresh process** (no arguments keeps the old behavior — no extra instance). Windows appends them after `explorer <path>`. Linux's `xdg-open` has no pass-through semantics, so arguments are silently dropped.
+- **Same path can appear twice**: the duplicate check loosened from "same path is a duplicate" to "same path and both argument-free", so one app can sit in the list several times with different arguments. That is why the list key changed from `item.path` to `path#i` — in the sticky bar too. Icon lookups still key on path, so those entries share one icon.
+
+### 6.10 How a file opened from the OS arrives
+
+- **Entry points fork per platform**: macOS relies entirely on `RunEvent::Opened` (Finder double-click, dropping onto the Dock icon, "Open with", `open -a MarkLock file`); Windows reads argv on a cold start and forwards a second launch to the running instance through the single-instance plugin; Linux has no entry point.
+- **Why a buffer is mandatory**: Tauri events don't queue. On a cold start `Opened` usually fires before the frontend registers `listen()`, so emitting directly loses the path forever. Paths therefore go into Rust's `PENDING_OPEN_PATHS` first and the event is only a "go fetch it" signal; `take_pending_open_paths` drains it in one shot, which also guarantees no duplicate tabs.
+- **Two listeners, split by route**: while `EditorView` is mounted its own listener drains directly; on any non-editor screen (settings / unlock / dialogs) the always-alive `App.vue` takes over, sets `pendingOpenPathsNavigate` and routes back to `/editor`, and `EditorView` consumes the intent at the **end** of `onMounted` — `_sessionRestore` is assigned by then, so the fetch stays serialized with cold-start restoration. If the startup drain already took the paths, the second drain just gets an empty array; harmless.
+
 ---
 
 ## 7. Evolution timeline (starting 2026-09-24)
@@ -372,6 +388,10 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **Attachment plaintext sits in the app cache while unlocked**: `<app_cache_dir>/mlk-assets` is itself unencrypted and readable by other processes under the same user; it is cleared on lock / quit / auto-lock, and force-kill residue is handled by the startup wipe.
 - **The directory vault's password-change rule**: entries inside a `.dat` directory and stray files with non-text extensions are skipped as attachments; a file whose name looks like a note (text extension, or no extension) but isn't a container blocks the whole password change — refusing is now safe (compute first, write after, the vault stays untouched) — but a plaintext `.json` left in the vault still blocks it.
 - **Search doesn't trigger iCloud recall**: `search` still uses bare `fs::read` on the main thread, so an undownloaded file simply isn't readable and only the filename matches. Adding recall means moving it to a thread pool with a short per-file timeout, otherwise one search can wait 20 seconds.
+- **Launch arguments are documented from the code, not from testing**: macOS `open -n … --args` depends on the target app doing its own single-instance forwarding; Windows goes through `explorer <path> <args…>`, and `explorer` has its own `/e`, `/root` semantics, so whether trailing arguments actually arrive is still unverified (if they don't, switch to `cmd /c start "" <path> <args>`); Linux's `xdg-open` has no pass-through entry — arguments vanish without any UI hint.
+- **macOS always starts a new process when arguments are present**: argument-free launches keep the old behavior, but with arguments `-n` is unconditional and has no toggle — it is the only way `open` delivers argv. Apps that don't support multi-instance will pile up.
+- **The sticky launcher bar doesn't show which item carries arguments**: only the hover title appends `path args`, while Settings has a primary-outlined "Args" button — the two surfaces aren't equivalent.
+- **Double-clicking a file yanks the user back to the editor**: the trade-off buys "the file opens promptly", at the cost of whatever form state was in progress, such as an unsaved skin draft.
 
 ---
 
@@ -413,3 +433,5 @@ Rust side, `cargo test --lib`, covering:
 | "N attachments could not be decrypted" | Some `.mdat` under `.dat` are corrupted, or weren't encrypted with the current master password | The rest still display; the broken ones need re-importing |
 | Changing the master password reports a format/header error | The vault root or a subfolder holds a file whose name looks like a note but isn't an `mlk/1` container (plaintext `.json`, extensionless files, etc.) | Move it out of the vault or give it a non-text extension; plaintext attachments inside `.dat` are already skipped |
 | Reading a file fails with error 11 (`Resource deadlock avoided`) on mac | An iCloud "not downloaded here" file is being recalled | Wait for the spinner to finish (20-second ceiling); if it keeps failing, right-click the file in Finder → "Download Now" |
+| Clicking an argument-carrying launcher item does nothing | The target app doesn't read argv (on macOS the fresh `-n` instance lacks single-instance forwarding; on Windows `explorer` may swallow the trailing arguments) | First confirm the item launches at all without arguments, then adjust to the app's own argument syntax |
+| Double-clicking a `.md` jumps to the editor but opens nothing (Linux) | Linux has no "open file" entry point (mac uses `RunEvent::Opened`, Windows uses argv plus the single-instance plugin) | Use in-app "Open file" for now; a Linux entry point is still a to-do |
