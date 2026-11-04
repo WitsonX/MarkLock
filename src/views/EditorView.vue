@@ -8,7 +8,7 @@ import type { OpenFile, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
-import { isMac } from '../lib/platform'
+import { isMac, isLinux } from '../lib/platform'
 import { t as translate, lang } from '../locales'
 import { resolveFontStack } from '../lib/fonts'
 import { cssVar, BUILTIN_SKINS } from '../lib/skins'
@@ -42,7 +42,7 @@ const revealLabel = () => {
 /** 菜单小图标：以 strings 映射（viewBox 24 / stroke currentColor，与工具栏线性图标同风格）。
  *  主菜单经 v-html 注入 .m-icn 容器，右键菜单项的 icon 字段同样走此映射；
  *  克制原则：只给少数有辨识度的重点项配图标（新建/打开文件、新建加密库、偏好设置、退出、
- *  收藏星标、在访达中显示、关闭），同组重复的变体（关闭其它/已保存/全部）与勾选切换类保持纯文字。 */
+ *  收藏星标、在访达中显示、关闭、导出子菜单、撤销关闭页签），同组重复的变体（关闭其它/已保存/全部）与勾选切换类保持纯文字。 */
 const MENU_ICONS: Record<string, string> = {
   file: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" />',
   folderOpen: '<path d="M3 8a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z" /><path d="M3 11h18l-2.2 8H5.2z" />',
@@ -50,6 +50,9 @@ const MENU_ICONS: Record<string, string> = {
   star: '<path d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
   starFilled: '<path fill="currentColor" stroke="none" d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
   reveal: '<path d="M11 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /><path d="M14 4h6v6" /><path d="M20 4l-8.5 8.5" />',
+  // 导出（从托盘向上送出）与撤销关闭（回旋箭头）：子菜单入口与「可恢复的关闭」两处语义标识
+  export: '<path d="M12 15V4" /><path d="M8 8l4-4 4 4" /><path d="M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />',
+  undo: '<path d="M4 9h11a5 5 0 0 1 0 10h-6" /><path d="M8 5L4 9l4 4" />',
   close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />',
   settings: '<circle cx="12" cy="12" r="3" /><path d="M12 2.8l1.5 2.6 2.9-.4.4 2.9 2.6 1.5-1.4 2.6 1.4 2.6-2.6 1.5-.4 2.9-2.9-.4L12 21.2l-1.5-2.6-2.9.4-.4-2.9L4.6 14l1.4-2.6-1.4-2.6L7.2 7.9l.4-2.9 2.9.4z" />',
   power: '<path d="M12 3v8" /><path d="M6.3 6.5a8 8 0 1 0 11.4 0" />',
@@ -61,6 +64,8 @@ const MENU_ICON_COLORS: Record<string, string> = {
   file: '#5b9bd5',
   folderOpen: '#5b9bd5',
   reveal: '#3f9ae0',
+  export: '#4a9e8f',
+  undo: '#8a919e',
   lock: '#c99a3f',
   star: '#c9a227',
   starFilled: '#e0a92b',
@@ -85,7 +90,8 @@ export default defineComponent({
       menuIcon,
       moreOpen: false,
       // 自绘右键上下文菜单（标题栏/状态栏/页签栏/页签项/侧边栏共用）；title 仅部分菜单用（如状态栏字号/自动锁定）
-      ctxMenu: { visible: false, x: 0, y: 0, items: [] as any[], title: '' },
+      // subLeft：含子菜单的项是否把子菜单翻到左侧展开（右侧宽度不够时，见 showCtxMenu）
+      ctxMenu: { visible: false, x: 0, y: 0, items: [] as any[], title: '', subLeft: false },
       // 右键菜单打开期间对被右键节点的临时高亮（菜单关闭即清除），避免切换激活页签的副作用
       ctxSelPath: '',
       // 侧边栏文件/文件夹拖拽（移动/复制）：源、命中的放置目标 key、跟随光标的浮层与 ⌥ 复制/移动态
@@ -313,6 +319,10 @@ export default defineComponent({
     },
     activeFile() {
       return this.store.activeFile
+    },
+    /** PDF 静默生成只有 macOS(WKWebView) 与 Windows(WebView2) 有实现，Linux 不给这一项 */
+    canExportPdf() {
+      return !isLinux
     },
     unlockedVaults() {
       return this.store.unlockedVaults
@@ -1147,6 +1157,8 @@ export default defineComponent({
         case 'menu:batch-encrypt': this.openBatchEncrypt(); break
         case 'menu:import-dir': this.openImportDir(); break
         case 'menu:export-html': this.exportHtml(); break
+        case 'menu:export-html-single': this.exportHtmlSingle(); break
+        case 'menu:export-pdf': this.exportPdf(); break
         case 'menu:find': {
           // 预览模式下无编辑器实例，先切回分屏再定位搜索面板。
           if (this.currentMode === 'preview') this.setMode('split')
@@ -2085,7 +2097,7 @@ export default defineComponent({
         items = [
           { kind: 'item', label: this.$t('menu.newFile'), sc: '⌘N', run: () => this.openNewDraft() },
           { kind: 'item', label: this.$t('menu.openFile'), sc: '⌘O', run: () => this.openFileAction() },
-          { kind: 'item', label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
+          { kind: 'item', icon: menuIcon('undo'), label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
           ...this.viewToggleItems(),
         ]
@@ -2098,7 +2110,7 @@ export default defineComponent({
           { kind: 'item', label: this.$t('menu.closeOthers'), run: () => this.closeOthers(p) },
           { kind: 'item', label: this.$t('menu.closeSaved'), run: () => this.store.closeSaved() },
           { kind: 'item', label: this.$t('menu.closeAll'), run: () => this.closeAllFiles() },
-          { kind: 'item', label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
+          { kind: 'item', icon: menuIcon('undo'), label: this.$t('menu.undoClose'), sc: '⌘⇧T', disabled: !this.store.recentlyClosed.length, run: () => this.reopenLastClosed() },
           { kind: 'sep' },
           { kind: 'item', icon: menuIcon('reveal'), label: revealLabel(), disabled: !f || f.isNew, run: () => this.revealTab(p) },
           {
@@ -2122,11 +2134,19 @@ export default defineComponent({
               ]
             : []),
           {
-            kind: 'item' as const,
-            label: this.$t('menu.exportHtml'),
-            // 锁定（本页签或所属库）时无明文可渲染；草稿有内存正文仍可导出
+            // 三项导出收进子菜单；锁定（本页签或所属库）时无明文可渲染，
+            // 整个子项置灰（disabled 项 pointer-events:none，子菜单也不会展开）；草稿有内存正文仍可导出
+            kind: 'sub' as const,
+            icon: menuIcon('export'),
+            label: this.$t('menu.exportGroup'),
             disabled: !f || f.locked || this.isVaultFileLocked(f),
-            run: () => this.exportHtml(p),
+            items: [
+              { kind: 'item' as const, label: this.$t('menu.exportHtml'), run: () => this.exportHtml(p) },
+              { kind: 'item' as const, label: this.$t('menu.exportHtmlSingle'), run: () => this.exportHtmlSingle(p) },
+              ...(this.canExportPdf
+                ? [{ kind: 'item' as const, label: this.$t('menu.exportPdf'), run: () => this.exportPdf(p) }]
+                : []),
+            ],
           },
           { kind: 'sep' },
           {
@@ -2206,9 +2226,20 @@ export default defineComponent({
           { kind: 'sep' },
         )
       } else {
-        // 库内文件：仅「导出 HTML」（内容已加密，转加密/复制到库不适用）；确保对应页签已打开后复用导出逻辑
+        // 库内文件：仅导出（HTML / HTML（单文件）/ PDF，收在「导出」子菜单）（内容已加密，转加密/复制到库不适用）；确保对应页签已打开后复用导出逻辑
         items.push(
-          { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node, v.id) },
+          {
+            kind: 'sub',
+            icon: menuIcon('export'),
+            label: this.$t('menu.exportGroup'),
+            items: [
+              { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node, v.id) },
+              { kind: 'item', label: this.$t('menu.exportHtmlSingle'), run: () => this.exportNodeHtml(node, v.id, 'htmlSingle') },
+              ...(this.canExportPdf
+                ? [{ kind: 'item', label: this.$t('menu.exportPdf'), run: () => this.exportNodeHtml(node, v.id, 'pdf') }]
+                : []),
+            ],
+          },
           { kind: 'sep' },
         )
       }
@@ -2280,12 +2311,23 @@ export default defineComponent({
           { kind: 'item', label: this.$t('menu.newFolder'), run: () => this.wdOpenNewFolder(node) },
         )
       }
-      // 工作目录明文文件（非目录、非库/加密节点）：转为加密 / 添加到加密库 / 导出 HTML
+      // 工作目录明文文件（非目录、非库/加密节点）：转为加密 / 添加到加密库 / 导出（收在「导出」子菜单）
       if (!node.is_dir && !node.is_vault) {
         items.push(
           { kind: 'item', label: this.$t('menu.convertEnc'), run: () => this.convertNodeToEncrypted(node) },
           { kind: 'item', label: this.$t('menu.addToVault'), run: () => this.copyNodeToVault(node) },
-          { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node) },
+          {
+            kind: 'sub',
+            icon: menuIcon('export'),
+            label: this.$t('menu.exportGroup'),
+            items: [
+              { kind: 'item', label: this.$t('menu.exportHtml'), run: () => this.exportNodeHtml(node) },
+              { kind: 'item', label: this.$t('menu.exportHtmlSingle'), run: () => this.exportNodeHtml(node, undefined, 'htmlSingle') },
+              ...(this.canExportPdf
+                ? [{ kind: 'item', label: this.$t('menu.exportPdf'), run: () => this.exportNodeHtml(node, undefined, 'pdf') }]
+                : []),
+            ],
+          },
           { kind: 'sep' },
         )
       }
@@ -2325,10 +2367,13 @@ export default defineComponent({
       const tp = await this.ensureNodeTab(node)
       if (tp) this.openCopyToVault(tp)
     },
-    /** 节点右键「导出 HTML…」：先打开页签（取内存正文）再导出；vaultId 为空表示工作目录明文文件。 */
-    async exportNodeHtml(node: FsNode, vaultId?: string) {
+    /** 节点右键「导出…」：先打开页签（取内存正文）再导出；vaultId 为空表示工作目录明文文件。 */
+    async exportNodeHtml(node: FsNode, vaultId?: string, kind: 'html' | 'htmlSingle' | 'pdf' = 'html') {
       const tp = await this.ensureNodeTab(node, vaultId)
-      if (tp) this.exportHtml(tp)
+      if (!tp) return
+      if (kind === 'pdf') this.exportPdf(tp)
+      else if (kind === 'htmlSingle') this.exportHtmlSingle(tp)
+      else this.exportHtml(tp)
     },
     wdOpenNewFile(dirNode: FsNode) {
       this.wdNewFileAt(dirNode.path)
@@ -2412,6 +2457,8 @@ export default defineComponent({
      *  右侧出界时整体左移、保证距窗口右缘 20px；title：菜单顶部的标题（可省）。 */
     showCtxMenu(e: MouseEvent, items: any[], above?: HTMLElement, title?: string) {
       const menuW = 208
+      // 子菜单固定宽（与 CSS 的 .ctx-menu .sub-menu 一致），用于算右侧能不能展开
+      const subW = 224
       // 高度按真实盒模型估算：项 30，分隔线 1 + margin 5×2，容器 padding 5×2 + border 1×2，
       // 标题复用上排分组名的 .m-cap（padding 6+4 + 11px 字 ×1.5715 行高）
       const headH = title ? 28 : 0
@@ -2426,7 +2473,9 @@ export default defineComponent({
       }
       if (x + menuW > window.innerWidth) x = window.innerWidth - menuW - 4
       if (y + menuH > window.innerHeight) y = window.innerHeight - menuH - 4
-      this.ctxMenu = { visible: true, x: Math.max(4, x), y: Math.max(4, y), items, title: title || '' }
+      // 子菜单默认向右展开；主菜单 + 子菜单总宽超出视口时整体翻到左侧（箭头同步改方向）
+      const subLeft = items.some((it) => it.kind === 'sub') && x + menuW + subW > window.innerWidth - 4
+      this.ctxMenu = { visible: true, x: Math.max(4, x), y: Math.max(4, y), items, title: title || '', subLeft }
     },
     closeContextMenu() {
       this.ctxMenu.visible = false
@@ -5370,33 +5419,83 @@ export default defineComponent({
       return html
     },
 
-    // ---------- 导出 HTML ----------
+    // ---------- 导出 HTML / PDF ----------
+    /**
+     * 取导出目标文件：主菜单入口不传路径→当前激活页签；页签右键菜单传入被右键页签的路径（可能非激活）。
+     * 锁定/无内容时提示并返回 null。
+     */
+    exportTarget(targetPath?: string): OpenFile | null {
+      const f = targetPath ? this.openFiles.find((x) => x.path === targetPath) : this.activeFile
+      if (!f) {
+        message.warning(this.$t('toast.openBeforeExport'))
+        return null
+      }
+      if (f.locked) {
+        message.warning(this.$t('toast.unlockBeforeExport'))
+        return null
+      }
+      if (!f.content) {
+        message.warning(this.$t('toast.emptyToExport'))
+        return null
+      }
+      return f
+    },
     /**
      * 把当前页签的 Markdown 渲染为独立可打开的 HTML（内嵌样式与代码高亮配色），
      * 经保存对话框选路径后明文写盘。内容取自内存正文（未保存的编辑也会被导出）；
-     * 锁定/无内容时提示。主题与代码高亮跟随当前设置，导出后离线用浏览器打开即可还原观感。
+     * 主题与代码高亮跟随当前设置，导出后离线用浏览器打开即可还原观感。
      * 正文里的图片及其它附件等本地资源会复制到导出文件旁的 `<html文件名>.dat/`
      * 并改写为相对链接（见 inlineExportAssets）；复制失败时图片退回内联 data URL。
      */
     async exportHtml(targetPath?: string) {
-      // 主菜单入口不传路径→当前激活页签；页签右键菜单传入被右键页签的路径（可能非激活）。
-      const f = targetPath ? this.openFiles.find((x) => x.path === targetPath) : this.activeFile
-      if (!f) {
-        message.warning(this.$t('toast.openBeforeExport'))
-        return
+      const f = this.exportTarget(targetPath)
+      if (!f) return
+      try {
+        const target = await this.exportRenderedDoc(f, { inlineAll: false, forPdf: false })
+        if (target) this.exportDoneToast(target, 'exportedHtml')
+      } catch (e) {
+        message.error(String(e))
       }
-      if (f.locked) {
-        message.warning(this.$t('toast.unlockBeforeExport'))
-        return
+    },
+    /** 导出单文件 HTML：图片与附件全部内联为 data URL，不产生 `.dat` 附件目录。 */
+    async exportHtmlSingle(targetPath?: string) {
+      const f = this.exportTarget(targetPath)
+      if (!f) return
+      try {
+        const target = await this.exportRenderedDoc(f, { inlineAll: true, forPdf: false })
+        if (target) this.exportDoneToast(target, 'exportedHtmlSingle')
+      } catch (e) {
+        message.error(String(e))
       }
-      if (!f.content) {
-        message.warning(this.$t('toast.emptyToExport'))
-        return
+    },
+    /** 导出 PDF：渲染为 A4 版式的自包含 HTML，交后端隐藏 WebView 静默生成。 */
+    async exportPdf(targetPath?: string) {
+      const f = this.exportTarget(targetPath)
+      if (!f) return
+      try {
+        const target = await this.exportRenderedDoc(f, { inlineAll: true, forPdf: true })
+        if (target) this.exportDoneToast(target, 'exportedPdf')
+      } catch (e) {
+        message.error(String(e))
       }
-      // 取展示名的扩展名替换为 .html（草稿名无扩展名时直接追加）
+    },
+    /**
+     * 渲染页签正文为独立 HTML 并按模式落盘：
+     * - 常规 HTML：本地资源复制到 `<html文件名>.dat/` 并改相对链接（与既有导出一致）；
+     * - 单文件 HTML / PDF：全部本地资源内联为 data URL（PDF 的隐藏 WebView 无 base URL，必须自包含）；
+     * - PDF：交给后端隐藏 WebView 渲染成 PDF（forPdf 版式：固定 A4 宽度、代码块不截断）。
+     * 返回写盘路径（保存对话框取消返回 null）。
+     */
+    async exportRenderedDoc(
+      f: OpenFile,
+      opts: { inlineAll: boolean; forPdf: boolean },
+    ): Promise<string | null> {
+      // 取展示名的扩展名替换为 .html/.pdf（草稿名无扩展名时直接追加）
       const base = f.name.replace(/\.[^.]+$/, '') || f.name || this.$t('common.untitled')
-      const target = await tauri.saveHtmlDialog(base + '.html')
-      if (!target) return
+      const target = opts.forPdf
+        ? await tauri.savePdfDialog(base + '.pdf')
+        : await tauri.saveHtmlDialog(base + '.html')
+      if (!target) return null
       // 复用预览渲染，但去掉仅在应用内有效的代码块复制按钮（离线 HTML 里无脚本）。
       // 基准目录临时指向被导出文件（可能非激活页签），保证相对图片链接解析正确，渲完恢复。
       const savedBase = getAssetBaseDir()
@@ -5411,46 +5510,57 @@ export default defineComponent({
       body = body.replace(/<button[^>]*class="code-copy-btn"[\s\S]*?<\/button>/g, '')
       // 预览里可点的任务复选框在离线页面无回写能力，补回 disabled 保持只读观感
       body = body.replace(/<input type="checkbox" class="task-cb"/g, '<input type="checkbox" disabled="" class="task-cb"')
-      // 本地资源（图片+附件）：复制到 `<html文件名>.dat/` 并改写相对链接，失败时图片退回内联 data URL
-      body = await this.inlineExportAssets(body, target, this.assetPreviewBaseDir(f))
-      const html = this.buildStandaloneHtml(f.name, body)
-      try {
-        await tauri.writePlainFile(target, html)
-        // 成功消息带「打开文件 / 打开文件夹」行内动作：分别交系统默认应用打开与在访达中定位；
-        // 点击即关闭 toast，停留放宽到 6s 留出行内操作时间
-        const action = (label: string, run: () => void) =>
-          h(
-            'a',
-            {
-              style: 'margin-inline-start: 10px; font-weight: 600; cursor: pointer',
-              onClick: () => {
-                inst() // ant-design-vue 的 MessageType 可直接调用以关闭该条消息
-                run()
-              },
+      // 本地资源（图片+附件）：常规 HTML 复制到 `<html文件名>.dat/`，其余模式全部内联为 data URL
+      body = await this.inlineExportAssets(body, target, this.assetPreviewBaseDir(f), opts.inlineAll)
+      const html = this.buildStandaloneHtml(f.name, body, opts.forPdf)
+      if (opts.forPdf) await tauri.exportPdf(html, target)
+      else await tauri.writePlainFile(target, html)
+      return target
+    },
+    /**
+     * 导出成功 toast：带「打开文件 / 打开文件夹」行内动作，分别交系统默认应用打开与在访达中定位；
+     * 点击即关闭 toast，停留放宽到 6s 留出行内操作时间。
+     */
+    exportDoneToast(target: string, key: 'exportedHtml' | 'exportedHtmlSingle' | 'exportedPdf') {
+      const action = (label: string, run: () => void) =>
+        h(
+          'a',
+          {
+            style: 'margin-inline-start: 10px; font-weight: 600; cursor: pointer',
+            onClick: () => {
+              inst() // ant-design-vue 的 MessageType 可直接调用以关闭该条消息
+              run()
             },
-            label,
-          )
-        const inst = message.success({
-          content: h('span', [
-            this.$t('toast.exportedHtml', { name: target.split(/[\\/]/).pop() || '' }) as string,
-            action(this.$t('toast.openFileAction'), () =>
-              tauri.openLocalFile(target).catch((e) => message.error(String(e))),
-            ),
-            action(this.$t('toast.openFolderAction'), () =>
-              tauri.revealInFinder(target).catch((e) => message.error(String(e))),
-            ),
-          ]),
-          duration: 6,
-        })
-      } catch (e) {
-        message.error(String(e))
-      }
+          },
+          label,
+        )
+      const inst = message.success({
+        content: h('span', [
+          this.$t(`toast.${key}`, { name: target.split(/[\\/]/).pop() || '' }) as string,
+          action(this.$t('toast.openFileAction'), () =>
+            tauri.openLocalFile(target).catch((e) => message.error(String(e))),
+          ),
+          action(this.$t('toast.openFolderAction'), () =>
+            tauri.revealInFinder(target).catch((e) => message.error(String(e))),
+          ),
+        ]),
+        duration: 6,
+      })
+    },
+    /** 判断一个 src/href 是不是渲染期由 `convertFileSrc` 生成的本地资源 URL。
+     *  两端形态不同（tauri scripts/core.js）：macOS/Linux 是 `asset://localhost/<编码路径>`，
+     *  Windows/Android 是 `http(s)://asset.localhost/<编码路径>`（内核不认自定义协议，
+     *  wry 用 `.localhost` 虚拟主机绕开）；导出时两种都要反解回本地绝对路径。 */
+    isAssetRef(ref: string): boolean {
+      return /^(?:assets?:\/\/|https?:\/\/asset\.localhost\/)/i.test(ref)
     },
     /** 从 asset 协议 URL 反解本地绝对路径。主机写法与编码形态各平台/版本不一，逐一探测：
+     *  - Windows/Android（`http://asset.localhost/C%3A%5C…`）：主机固定，路径整串 encodeURIComponent，
+     *    直接 decodeURIComponent 即得原路径（反斜杠/盘符原样）；
      *  - 编码形态（如 macOS wry：`asset://localhost/%2FUsers%2F…`）：整串 decodeURIComponent；
      *  - 未编码形态（`asset://localhost//Users/…`、`asset://localhost/Users/a%20b…`）：
      *    decodeURI 只还原 %XX 转义、保留字面 '/'；
-     *  - 盘符开头（C:/…）补回前导 '/'。解错只会导致复制失败，后续仍有内联兜底。 */
+     *  解错只会导致复制失败，后续仍有内联兜底。 */
     assetUrlToLocalPath(ref: string): string {
       const i = ref.indexOf('://')
       if (i < 0) return ''
@@ -5475,9 +5585,16 @@ export default defineComponent({
       const looksPath = (s: string) => !!s && (s.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(s))
       const fix = (s: string) => {
         if (!s) return s
-        if (/^[a-zA-Z]:[\\/]/.test(s)) return '/' + s
+        // 盘符路径原样返回：后端拿它直接做 fs 读写，补前导 '/' 会变成 `/C:\…` 打不开
+        if (/^[a-zA-Z]:[\\/]/.test(s)) return s
         if (!s.startsWith('/')) return '/' + s
         return s
+      }
+      // 0) Windows/Android 形态：主机固定为 asset.localhost，其后整串就是编码过的绝对路径
+      const win = /^https?:\/\/asset\.localhost\/(.*)$/i.exec(ref)
+      if (win) {
+        const p = dec(win[1])
+        if (p) return fix(p)
       }
       // 1) 主机位整串解码即得合法本地路径 → 编码形态（asset://localhost/%2F…）
       const pA = dec(segA)
@@ -5505,28 +5622,43 @@ export default defineComponent({
       return fix(decURI(rem || segA))
     },
     /** 导出 HTML 的后处理：把渲染产物里指向本地磁盘的资源变成离线可看：
-     *  - 统一复制到导出文件同级的 `<html文件名>.dat/` 下，src/href 改写为相对链接
+     *  - 默认（inlineAll=false）：统一复制到导出文件同级的 `<html文件名>.dat/` 下，src/href 改写为相对链接
      *    （图片渲染期已转 asset 协议，反解回绝对路径；其它附件是 marked 默认渲染器
      *    保留的相对/绝对本地路径，基于 baseDir 解析）；含空格等字符直接原样写入
-     *    属性值（HTML 属性不需要 Markdown 的 `<…>` 包裹）；
-     *  - 复制失败时图片退回读文件内联 data URL；仍失败则原样保留不阻断导出。
+     *    属性值（HTML 属性不需要 Markdown 的 `<…>` 包裹）；复制失败时图片退回读文件内联
+     *    data URL；仍失败则原样保留不阻断导出；
+     *  - 内联（inlineAll=true，单文件 HTML / PDF）：所有本地资源一律读为 data URL，不产生附件目录；
+     *    附件补 `download` 属性保住原文件名。
      *  同一 src 多次出现一并替换；http/data/mailto 等外部链接不处理。 */
-    async inlineExportAssets(body: string, target: string, baseDir: string): Promise<string> {
+    async inlineExportAssets(
+      body: string,
+      target: string,
+      baseDir: string,
+      inlineAll = false,
+    ): Promise<string> {
       const exportDir = this.parentDir(target)
       // 附件目录随导出的 HTML 文件名（如 123.html → 123.dat），不再取所在文件夹名
       const exportBase = this.fileName(target).replace(/\.[^.]+$/, '') || this.$t('editor.exportFallback')
       const destDir = this.joinPath(exportDir, exportBase + '.dat')
       const relPrefix = exportBase + '.dat/'
-      // 1) asset 协议引用（渲染期已转绝对路径的图片等）：反解源文件后复制
+      // 1) asset 协议引用（渲染期已转绝对路径的图片等）：反解源文件后复制或内联
       const refs = new Set<string>()
       const re = /(?:src|href)="([^"]*)"/g
       let m: RegExpExecArray | null
       while ((m = re.exec(body))) {
-        if (/^assets?:\/\//i.test(m[1])) refs.add(m[1])
+        if (this.isAssetRef(m[1])) refs.add(m[1])
       }
       for (const ref of refs) {
         const abs = this.assetUrlToLocalPath(ref)
         if (!abs) continue
+        if (inlineAll) {
+          // 内联模式：一律读为 data URL（自包含），不产生附件目录
+          try {
+            const dataUrl = await tauri.readAssetDataUrl(abs)
+            body = body.split(ref).join(dataUrl)
+          } catch {}
+          continue
+        }
         // 与文件同策略：复制到导出目录旁的 `.dat`，改写为相对路径
         try {
           const finalAbs = await tauri.copyAsset(destDir, abs)
@@ -5564,6 +5696,15 @@ export default defineComponent({
         })()
         const isAbs = decoded.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(decoded)
         const abs = isAbs || !baseDir ? decoded : this.joinPath(baseDir, decoded)
+        if (inlineAll) {
+          // 内联模式：附件读为 data URL，非图片补 download 属性保住原文件名
+          try {
+            const dataUrl = await tauri.readAssetDataUrl(abs)
+            const attr = this.isImageName(abs) ? '' : ` download="${this.fileName(abs)}"`
+            body = body.split(`href="${ref}"`).join(`href="${dataUrl}"${attr}`)
+          } catch {}
+          continue
+        }
         try {
           const finalAbs = await tauri.copyAsset(destDir, abs)
           const rel = relPrefix + this.fileName(finalAbs)
@@ -5572,8 +5713,11 @@ export default defineComponent({
       }
       return body
     },
-    /** 组装独立 HTML 文档：内嵌 Markdown 版式（内容栏宽跟随「预览内容最大宽度」设置）+ 当前代码高亮主题的 token 配色（具体色值，不依赖 CSS 变量）。 */
-    buildStandaloneHtml(title: string, bodyHtml: string): string {
+    /** 组装独立 HTML 文档：内嵌 Markdown 版式（内容栏宽跟随「预览内容最大宽度」设置）+ 当前代码高亮主题的 token 配色（具体色值，不依赖 CSS 变量）。
+     *  `forPdf`（导出 PDF）时改用固定 A4 宽度的打印版式：内容宽为 A4 内容区，且按平台调基准字号，
+     *  使两平台 PDF 的 pt 字号一致（macOS 截取 1px→1pt 用 11.25px，Windows 打印 1px→1/96in 用 15px，
+     *  均得 11.25pt 正文）；em 相对尺寸与分页规则因此两端一致，代码块折行不截断。 */
+    buildStandaloneHtml(title: string, bodyHtml: string, forPdf = false): string {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark'
       const codeTheme = this.store.settings.codeTheme
       const indent = this.store.settings.codeIndent === 2 ? 2 : 4
@@ -5666,7 +5810,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 .hljs-built_in, .hljs-type, .hljs-class { color: ${HL.built}; }
 .hljs-meta, .hljs-section, .hljs-deletion { color: ${HL.meta}; }
 .hljs-emphasis { font-style: italic; }
-.hljs-strong { font-weight: 600; }`
+.hljs-strong { font-weight: 600; }${forPdf ? `
+@page { margin: 0; }
+body { width: ${isMac ? 595 : 793}px; font-size: ${isMac ? 11.25 : 15}px; }
+.md { max-width: none; padding: 2.13em 2.4em 3.73em; }
+.md pre { padding: 0.8em 1.07em; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+.md img, .md pre, .md blockquote, .md table { break-inside: avoid; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { break-after: avoid; }` : ''}`
       const safeTitle = (title || this.$t('editor.exportTitle')).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
       return `<!DOCTYPE html>
 <html lang="zh">
@@ -5824,15 +5974,17 @@ ${bodyHtml}
             <div class="m-cap">{{ $t('menu.capOpen') }}</div>
             <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="m-icn" v-html="menuIcon('folderOpen')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">⌘O</span></div>
             <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openWorkdirDots') }}</span></div>
-            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">⌘⇧T</span></div>
+            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="m-icn" v-html="menuIcon('undo')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">⌘⇧T</span></div>
             <div class="m-sep"></div>
             <div class="m-item has-sub">
-              <span class="ck"></span>{{ $t('menu.importExport') }}<span class="sub-arrow">◂</span>
+              <span class="ck"></span>{{ $t('menu.importExport') }}<span class="sub-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6" /></svg></span>
               <div class="sub-menu">
                 <div class="m-item" @click="openBatchEncrypt(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.batchEncrypt') }}</span></div>
                 <div class="m-item" @click="openImportDir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.importDir') }}</span></div>
                 <div class="m-sep"></div>
                 <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtml(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.exportHtml') }}</span></div>
+                <div class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportHtmlSingle(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.exportHtmlSingle') }}</span></div>
+                <div v-if="canExportPdf" class="m-item" :class="{ disabled: !activeFile || activeFile.locked }" @click="exportPdf(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.exportPdf') }}</span></div>
               </div>
             </div>
             <div class="m-sep"></div>
@@ -5841,7 +5993,7 @@ ${bodyHtml}
             <div class="m-item" @click="store.updateSettings({ showToolbar: !store.settings.showToolbar })"><span class="ck">{{ store.settings.showToolbar ? '✓' : '' }}</span>{{ $t('menu.fmtToolbar') }}</div>
             <div class="m-item" @click="store.updateSettings({ showStatusbar: !store.settings.showStatusbar })"><span class="ck">{{ store.settings.showStatusbar ? '✓' : '' }}</span>{{ $t('menu.viewStatusbar') }}</div>
             <div class="m-item has-sub">
-              <span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span>{{ $t('menu.viewSidebar') }}<span class="sub-arrow">◂</span>
+              <span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span>{{ $t('menu.viewSidebar') }}<span class="sub-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6" /></svg></span>
               <div class="sub-menu">
                 <div class="m-item" @click="store.updateSettings({ showSidebar: !store.settings.showSidebar })"><span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span><span class="m-label">{{ $t('menu.showSidebar') }}</span><span class="kbd-hint">⌘J</span></div>
                 <div class="m-sep"></div>
@@ -6887,6 +7039,16 @@ ${bodyHtml}
       <template v-for="(it, i) in ctxMenu.items" :key="i">
         <div v-if="it.kind === 'sep'" class="m-sep"></div>
         <div v-else-if="it.kind === 'cap'" class="m-cap m-cap-in">{{ it.label }}</div>
+        <!-- 子菜单项（如「导出」）：悬停展开，靠 CSS :hover 驱动（无额外状态）；置灰时 pointer-events:none 连带不展开 -->
+        <div v-else-if="it.kind === 'sub'" class="m-item has-sub" :class="{ disabled: it.disabled, 'sub-left': ctxMenu.subLeft }">
+          <span v-if="it.icon" class="m-icn" v-html="it.icon"></span><span class="ck"></span><span class="m-label">{{ it.label }}</span><span class="sub-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path :d="ctxMenu.subLeft ? 'M15 6l-6 6 6 6' : 'M9 6l6 6-6 6'" /></svg></span>
+          <div class="sub-menu">
+            <template v-for="(s, j) in it.items" :key="j">
+              <div v-if="s.kind === 'sep'" class="m-sep"></div>
+              <div v-else class="m-item" :class="{ disabled: s.disabled }" @click="runCtxItem(s)"><span class="ck"></span><span class="m-label">{{ s.label }}</span><span v-if="s.sc" class="kbd-hint">{{ s.sc }}</span></div>
+            </template>
+          </div>
+        </div>
         <div v-else class="m-item" :class="{ disabled: it.disabled }" @click="runCtxItem(it)">
           <span v-if="it.icon" class="m-icn" v-html="it.icon"></span><span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ it.sc }}</span>
         </div>
@@ -6975,7 +7137,7 @@ ${bodyHtml}
 
 /* 子菜单 */
 .m-item.has-sub { position: relative; }
-.m-item.has-sub .sub-arrow { margin-left: auto; font-size: 10px; color: var(--text-4); }
+.m-item.has-sub .sub-arrow { margin-left: auto; display: inline-flex; align-items: center; color: var(--text-3); }
 .m-item.has-sub > .sub-menu {
   display: none;
   position: absolute; right: 100%; top: -6px;
@@ -6988,6 +7150,11 @@ ${bodyHtml}
   z-index: 70;
 }
 .m-item.has-sub:hover > .sub-menu { display: block; }
+/* 右键菜单的子菜单向右展开：主菜单固定贴在窗口右缘所以向左开，
+   而右键菜单可出现在任意位置（多贴左侧），默认向右更自然；
+   右侧宽度不够时 showCtxMenu 置 ctxMenu.subLeft，翻回左侧并同步箭头方向。 */
+.ctx-menu .m-item.has-sub > .sub-menu { left: 100%; right: auto; top: -5px; width: 224px; }
+.ctx-menu .m-item.has-sub.sub-left > .sub-menu { left: auto; right: 100%; }
 
 /* 右键上下文菜单（复用 .m-item/.m-cap/.m-sep/.ck） */
 .ctx-menu {

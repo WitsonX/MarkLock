@@ -659,6 +659,17 @@ export const useVaultStore = defineStore('vault', {
       this.sectionOrder.splice(to, 0, fromId)
       this.persistSectionOrder()
     },
+    /** 拖拽排序：把 from 项插到「原第 to 行之前」（to 可为末尾之后，表示移到最末）。数组顺序即便签底部顺序。 */
+    reorderQuickLaunch(from: number, to: number) {
+      const cur = [...this.settings.quickLaunch]
+      if (from < 0 || to < 0 || from >= cur.length || to > cur.length) return
+      // 先摘出 from，它后面的行整体前移一格，插入点随之减一
+      const at = from < to ? to - 1 : to
+      if (at === from) return
+      const [item] = cur.splice(from, 1)
+      cur.splice(at, 0, item)
+      this.updateSettings({ quickLaunch: cur })
+    },
     /** 持久化分组顺序。 */
     persistSectionOrder() {
       localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(this.sectionOrder))

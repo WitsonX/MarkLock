@@ -81,8 +81,10 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 
 - CodeMirror 6 source editing with Markdown highlighting, edit / split / preview modes, formatting toolbar
 - Autosave with 800ms debounce, encrypted on write; can be turned off
-- Full-text search (decryption happens in memory only), outline navigation, starring, HTML export
+- Full-text search (decryption happens in memory only), outline navigation, starring, export (HTML / single-file HTML / PDF)
 - Exported HTML carries its attachments: images and other files are copied next to it under `<export-name>.dat/` and relinked relatively, so the file you hand someone shows everything; the success toast offers **Open file** and **Open folder**
+- **Export HTML (single file)** inlines every image and attachment, so the artifact is one file with no folder alongside it
+- **Export PDF** hands the same preview typography to the system WebView and renders it silently as A4 (macOS / Windows), following the active skin, with images, code blocks and tables kept whole across page breaks; there is no such entry point on Linux yet
 - Clicking an attachment in the preview opens document types as a tab, while binaries (zip, images, pdf) raise a save dialog and copy out instead of failing text decoding
 - On macOS, files iCloud has kept "online only" are recalled and downloaded on read with a progress toast, so a few seconds of waiting no longer looks like "failed to read the file"
 - VSCode-style sidebar — open files, open vaults, starred, recent, working directory; groups are reorderable and individually toggleable; switch documents by tabs or by list
@@ -94,7 +96,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Pin any `.md` / `.mdl` file as a sticky note, summoned by clicking the tray (menu-bar) icon
 - Or use a **hot corner**: hold the pointer in a chosen screen corner for a moment; optionally require a modifier key so brushing past the corner never triggers it
 - Edit / split / preview in one small window, saved straight to ciphertext; if the vault is locked you can type the password right in the note
-- A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label); each item can carry its own launch arguments (space-separated, quote anything containing a space)
+- A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label); each item can carry its own launch arguments (space-separated, quote anything containing a space); in Settings a grip at the head of each item drags to reorder, and that is exactly the order the note shows them in
 - When a note can't be read (plaintext I/O failure, the file moved out of its vault) the window shows the reason plus **Retry**, instead of always routing you into an unlock form
 
 ### Security & polish

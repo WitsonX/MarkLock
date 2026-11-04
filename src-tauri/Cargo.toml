@@ -12,7 +12,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon", "macos-private-api"] }
+# webview-data-url：PDF 导出把内联全部资源的 HTML 以 data URL 交给隐藏 WebView 渲染（无该 feature 时 Tauri 会拒绝 data URL）
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "macos-private-api", "webview-data-url"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2"
@@ -30,10 +31,19 @@ tauri-plugin-window-state = "2"
 # Windows 双击/右键打开文件：二次启动把参数转发给已运行实例（仅 Windows 启用）
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-plugin-single-instance = "2"
+# 导出 PDF：WebView2 PrintToPdfStream 静默生成（wry/tauri 依赖树内已有，不引入新下载）
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_System_Com_StructuredStorage"] }
 
 # 便签定位读 NSScreen.visibleFrame 剔除菜单栏/Dock（tauri 依赖树里已有此 crate，不引入新下载）
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen"] }
 # iCloud 未下载文件主动召回：NSFileManager startDownloadingUbiquitousItemAtURL（同在依赖树内）
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSFileManager", "NSURL", "NSString", "NSError"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSFileManager", "NSURL", "NSString", "NSError", "NSData"] }
+# 导出 PDF：WKWebView createPDFWithConfiguration 静默生成（wry/tauri 依赖树内已有，不引入新下载）
+objc2-web-kit = { version = "0.3", default-features = false, features = ["std", "WKWebView", "WKPDFConfiguration", "block2", "objc2-core-foundation"] }
+# 导出 PDF：逐页截取后用 PDFKit 合并为多页文档（系统框架绑定）
+objc2-pdf-kit = { version = "0.3", default-features = false, features = ["std", "PDFDocument", "PDFPage"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFCGTypes"] }
+block2 = "0.6"

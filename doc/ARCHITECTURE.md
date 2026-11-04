@@ -151,6 +151,7 @@ src/
 - 编辑模式：编辑 / 分屏 / 预览（marked 渲染，任务清单复选框可交互）
 - 「更多」菜单：新建文件 / 新建加密库 / 复制到加密库 / 偏好设置 / 侧边栏显隐开关
 - **菜单小图标**：主菜单与自绘右键菜单的少数重点项配线性小图标（`MENU_ICONS` 映射 → `menuIcon()` 生成内联 svg）。两个坑写死在实现里：`v-html` 注入的内容拿不到 scoped CSS（`data-v` 只加在模板节点上），尺寸与描边必须写在 svg 自身属性上，否则 WebKit 渲染成 0×0；图标用**绝对定位压在左侧勾选槽上**而不是流内元素——图标与 `✓` 不会同时出现，占位只算一份，有无图标的项文字才从同一 x 起排。
+- **右键子菜单**：自定义菜单项新增 `kind:'sub'`（带 `items` 数组），展开靠 CSS `:hover` 而不是 JS 状态；子菜单固定 224px 宽，`showCtxMenu` 按「鼠标 x + 主菜单宽 + 子菜单宽 > 视口宽」置 `subLeft`，把它翻到左侧，避免贴右边界时被裁。导出三项就收在这一层，与 macOS 主菜单里「文件 → 导出」的层级对齐。
 - **预览里点附件**：文档类型开页签；zip / 图片 / pdf 等二进制无法按文本解析，改弹保存对话框再复制过去（下载流），避免一点击就报 UTF-8 / 文件头错误。
 
 ### 4.3 状态管理（Pinia + localStorage）
@@ -216,6 +217,7 @@ src/
 | `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」） |
 | `launch_local(path, args)` | 快速启动本地应用并透传启动参数（macOS `open --args`，带参时加 `-n` 另起；Windows 追加；Linux 忽略） |
 | `take_pending_open_paths()` | 取干后端缓存的「系统打开文件」路径（冷启动 / 非编辑器页跳转后各取一次） |
+| `export_pdf(html, target)` | 把自包含 HTML 交隐藏 WebView 静默渲染成 PDF 写入 target（macOS `createPDFWithConfiguration` 逐页截取 + PDFKit 合并，Windows WebView2 `PrintToPdfStream`，Linux 返回不支持） |
 
 > 可能长时间阻塞在磁盘上的读写命令（解锁/读/写/附件 materialize/批量加密）都包在 `spawn_crypto` 里跑阻塞线程池，同步命令在主线程执行会冻结 WebView。
 
@@ -267,7 +269,7 @@ src/
 - **自定义皮肤**：存于 `settings.customSkins`（localStorage），由 `lib/skins.ts` 的 `buildCustomSkinCss` 生成与内置同形状的 CSS，用 `textContent` 写入 `<style id="marklock-custom-skins">`（不走 innerHTML，变量名与值均经白名单/`;{}<>` 过滤）。编辑时用独立的 `<style id="marklock-skin-preview">` + `data-skin="__preview__"` 做所见即所得，取消 / 保存 / 组件卸载时清理。
 - **以内置皮肤为底稿**：卡片上的「复制并编辑」走 `forkSkin`——`snapshotSkinTokens` 从 `document.styleSheets` 里读出该皮肤浅、深两套**显式声明**的令牌（跨域样式表读取失败即跳过），连同新 id 交给编辑器；只取显式声明的令牌，未声明的项继续继承基线，改起来不会把整套底色硬抄一遍。
 - **CodeMirror**：不再引 `oneDark`，改用 `EditorView.theme(spec, { dark })` 直接读 CSS 变量，语法色由 `HighlightStyle.define` 走 `--cm-*` / `--hl-*`，`defaultHighlightStyle` 仅作 fallback。
-- **导出 HTML**：`buildStandaloneHtml` 通过 `cssVar()` 读运行时变量，导出件跟随当前皮肤。
+- **导出 HTML / PDF**：`buildStandaloneHtml` 通过 `cssVar()` 读运行时变量，导出件跟随当前皮肤；PDF 一并带上背景色（Windows 侧显式 `SetShouldPrintBackgrounds(true)`），代码块底色与表格斑马纹不会在成品里丢掉。
 
 ### 6.4 搜索
 
@@ -296,7 +298,7 @@ src/
 - **一张坏图不该拖垮整库**：单条读不了 / 解不开只跳过它自己并计入 `failed`，前端提示「N 个附件无法解密」；会话不存在（未解锁 / 已过期）整体返回 `NotUnlocked`，与「附件损坏」区分——否则整目录解析失败被前端静默 catch，所有图片一起消失。
 - **缓存生命周期**：`lock` / `lock_all` / `quit_app` / `reap_expired` 删除对应库的缓存子目录；进程被强杀或崩溃来不及清，`setup` 时（此刻必然还没有任何会话）整目录清空兜底。store 侧同步清掉页签的 `assetDir`，重新解锁会再 materialize 一次。
 - **改密码同锁**：附件的小 DEK 由会话 KEK 包裹，改主密码必须一起重包裹（单文件 / 单文件库走 `asset::rewrap_assets`，目录库在遍历库内文件时顺带处理 `.dat`）。两处都遵循「先算完所有新字节、再统一写盘」，中途失败不会留下半新半旧的库。
-- **导出**：导出前先 `ensureAssetsMaterialized` 让附件进缓存，再由 `inlineExportAssets` 把图片与非图片附件一并复制进导出文件旁的 `<html名>.dat/` 并改写为相对链接；成功消息带「打开文件 / 打开文件夹」两个行内动作。
+- **导出**：三种成品（HTML / 单文件 HTML / PDF，见 §6.11）共用一条链：先 `ensureAssetsMaterialized` 让附件进缓存，再由 `inlineExportAssets` 处理本地资源——常规 HTML 把图片与非图片附件一并复制进导出文件旁的 `<html名>.dat/` 并改写为相对链接（单个复制失败时图片退回内联 data URL），单文件 HTML 与 PDF 一律内联成 data URL。成功消息带「打开文件 / 打开文件夹」两个行内动作。
 
 ### 6.8 iCloud「仅在线」文件（召回兼容）
 
@@ -312,12 +314,25 @@ src/
 - **无注入面**：参数作为 `Vec<String>` 逐个交给 `Command::args`，不拼 shell 字符串，与 `open_url` 那套协议白名单是两个不相干的口子。
 - **平台差异**：macOS `open <路径> --args …`，且因为 `open` 对已在运行的应用只激活、argv 不送达，**带参时固定附 `-n` 另起进程**（不带参保持原样，不额外起实例）；Windows 把参数直接追加到 `explorer <路径>` 之后；Linux 的 `xdg-open` 没有参数透传语义，参数被静默忽略。
 - **允许同路径多项**：重复判定从「同路径即重复」放宽成「同路径且同样无参才算重复」，好让同一个应用带不同参数各占一项；因此列表 key 从 `item.path` 换成 `path#i`，便签那条也一样。图标缓存仍按路径取，两项共用同一图标。
+- **可拖拽排序**：设置页每项前的把手按下、移动超 4px 才进入拖动（仍是 §6.2 那套纯鼠标事件，`document.elementFromPoint` + `closest('[data-ql-index]')` 命中行）。指针在悬停行的上半/下半决定插到该行**之前/之后**，高亮线跟着画该行顶边或底边——线画在哪，最终就落在哪。`store.reorderQuickLaunch(from, to)` 的 `to` 是「插到原第 `to` 行之前」，摘出 `from` 会让它之后的行整体前移一格，故插入点随之减一；`at === from` 时直接返回，不做无意义的写盘。便签底部按这同一份数组顺序渲染。
 
 ### 6.10 从系统打开文件的到达路径
 
 - **入口按平台分叉**：macOS 全靠 `RunEvent::Opened`（访达双击、拖到 Dock、「打开方式」、`open -a MarkLock 文件`），Windows 冷启动读 argv、二次启动由单实例插件把参数转给已运行实例，Linux 没做接入口。
 - **为什么必须缓冲**：Tauri 事件不排队，冷启动时 `Opened` 往往早于前端 `listen()` 注册，直接发就永久丢失。所以路径先进 Rust 侧 `PENDING_OPEN_PATHS`，事件只当「去取」的信号，`take_pending_open_paths` 一次取干——顺带保证不会重复建页签。
 - **两处监听按路由分工**：`EditorView` 在位时自己的监听直接 drain；不在编辑器页（设置 / 解锁 / 对话框）时由常驻的 `App.vue` 接手，置 `pendingOpenPathsNavigate` 再跳回 `/editor`，`EditorView` 在 `onMounted` **末尾**消费——此时 `_sessionRestore` 已赋值，拉取能与冷启动恢复串行；若上面的启动 drain 已抢先取走路径，再 drain 只拿到空数组，无害。
+
+### 6.11 导出 PDF（隐藏 WebView 静默渲染）
+
+- **为什么不引第三方引擎**：PDF 的排版必须和屏上预览一致，另起一套渲染（wkhtmltopdf / Typst / 手搓 print CSS）等于维护第二份样式。所以链路是「复用屏上渲染出的 HTML，交系统 WebView 自己打印」。
+- **自包含是硬前提**：渲染窗口的加载源是 `data:text/html;base64,…`（macOS）或临时文件 `file://`（Windows），两者都没有可用的 base URL，正文里的相对链接一律解不出来。因此 PDF 走 `inlineAll`，图片与非图片附件在拼 HTML 时全部内联成 data URL。
+- **一次导出一个窗口，标签自增**：`pdf-export-<seq>`（`AtomicU64`）。固定标签会撞 `webview already exists`——上一个窗口的 `destroy` 经事件循环异步生效，销毁还没完成就复用同名标签必然失败。窗口 `visible(false)` + `skip_taskbar(true)`，尺寸取接近 A4 的 794×1123（96dpi 逻辑像素），让字体与图片按接近打印的分辨率布局。
+- **编排形状**：命令线程把「建窗」派发到主线程，然后在通道上 `recv_timeout(120s)`；`on_page_load` 只认首次 `Finished`（`AtomicBool` 挡住后续加载），等 500ms 让图片与字体绘制稳定，再 `run_on_main_thread(capture_pdf)`。`Sender` 不是 `Sync`，而 `on_page_load` 要求闭包 `Fn + Send + Sync`，故套进 `Arc<Mutex<Option<Sender>>>`、截取时取走。收尾（按标签销毁窗口 + 删临时文件）统一放在 `export_pdf`，成功 / 平台报错 / 超时三条路径都不留窗口；平台回调里不销毁自己的宿主窗口——Windows 的完成回调是 WebView2 调进来的，在里面销毁宿主有 use-after-free 风险。
+- **macOS 必须自己分页**：`WKWebView.createPDFWithConfiguration` 的 `rect` 只是单页裁剪区域、不产生多页，直接截得到的是被截断的一页。做法是先注入一段 JS，把 `.md` 的直接子块逐个装进固定页高（841.89px）的 `overflow:hidden` 容器、装不下就开新页并返回页数，再按 `rect.y = i × 页高` 逐页截取，最后用 PDFKit `insertPage_atIndex` 顺序合并。分页点落在**块边界**，不会出现半行字跨页；容器继承 `.md` 的原内边距，每页留白一致。
+- **Windows 交给引擎**：`ICoreWebView2_16::PrintToPdfStream` + `ICoreWebView2Environment6::CreatePrintSettings`（A4 英寸、四边距 0、无页眉页脚、打背景色——代码块底色与表格斑马纹全靠背景，不打就成白底），分页由 Chromium 的打印排版完成，不跑分页脚本。老 Runtime 缺接口时 cast 失败，明确报「WebView2 运行时版本过低」，而不是静默出一个空白 PDF。回调没用 `wait_for_async_operation`：本函数本身就跑在主线程回调里，再套一层 `GetMessage` 消息泵有重入风险。
+- **版式按平台给不同 px**：mac 的 `createPDF` 按 pt 出图（A4 = 595×842pt），WebView2 按 CSS px 排版（96dpi 下 A4 = 794×1123px）。前端按平台写 `body { width }` 与 `font-size`（595 / 11.25 对 793 / 15），两端换算出的 pt 才相等，同一份文档在两端的字号与行位置观感一致；`@page { margin: 0 }` 把留白交给 `.md` 的内边距，与 mac 分页容器继承的内边距是同一份。
+- **平台能力缺口**：Linux 的 WebKitGTK 既没有 `createPDF` 也没有 WebView2 的打印接口，`spawn_pdf_window` 在非 mac/Win 上编译成一个直接经通道报「当前平台不支持导出 PDF」的桩（不建窗口）；命令仍照常注册，前端四处菜单按 `isLinux` 不给这一项（macOS 主菜单本就只在 mac 安装）。
+- **写盘复用 `crypto::io::write`**：PDF 是明文产物，但落点可能落在被 iCloud 云端化的目录上，所以走同一套召回与原子写盘，不为导出一条单独的写路径。
 
 ---
 
@@ -377,6 +392,7 @@ src/
 ### 剩余待办
 
 - 备份文件的**前端恢复入口**（当前仅 Rust 侧滚动备份落盘，暂无「一键恢复上一版」UI）
+- **Linux 的 PDF 导出**（WebKitGTK 没有静默打印 API，要么驱动它走 CDP/`Page.printToPDF`，要么引外部引擎；现在直接不给入口）
 
 ### 已知技术债
 
@@ -392,6 +408,12 @@ src/
 - **macOS 带参启动恒另起新进程**：不带参时保持原样，带参就固定 `-n`，没有开关——`open` 对已运行应用不送 argv，这是唯一能让参数送达的路。不支持多实例的应用会越点越多。
 - **便签快捷方式条看不出哪项带参**：只在 hover 的 title 里拼了 `路径 参数`，而设置页有主色描边的「参数」按钮，两处不对等。
 - **双击文件会把用户从设置页拽回编辑器**：这是「让文件尽快打开」的取舍，正在编辑的皮肤草稿等表单状态会随之丢失。
+- **导出 PDF 的两端分页不可能逐页对齐**：macOS 靠注入的 JS 按块边界装箱切页，Windows 直接吃 WebView2 的打印排版，同一份文档在两端的换页位置会有差异；追求逐页一致需要统一成一种分页策略（mac 之外也跑脚本，或 mac 改用 CSS 分页），目前接受。
+- **macOS 分页只在块边界切，不切内容**：单个块（超长代码块、超长表格、超高图片）高过一页时，装它的那页容器 `overflow:hidden` 会把超出部分裁掉。分页高度在 `Finished` 后固定 500ms 一次性测量，图片尚未解码完时量到的高度偏低，结果可能是页数偏少、末页内容被截。
+- **macOS 单页截取失败是静默的**：某页的 `createPDF` 回调拿到 nil 只 `eprintln!` 一行，合并时跳过，成品表现为「少一页」而不是报错。宁可失败得吵一些，但目前实现如此。
+- **图文档的自包含 HTML 很大**：PDF / 单文件 HTML 把所有附件内联成 base64，体积按 4/3 膨胀；macOS 走超长 `data:` URL、Windows 走临时文件（超长 data URL 会被 WebView2 拒绝）。极大图片密度下仍可能触及 WebView 的 URL 长度或内存上限，失败表现为 120 秒超时或空白 PDF，没有前置检查。
+- **导出期间没有进度/等待提示**：后端最长等 120 秒，前端只在结束时提示成功或错误；期间菜单已收起，用户看不出应用在做这件事。
+- **Windows 的 PDF 代码在本机无法编译验证**：`cargo check --target x86_64-pc-windows-msvc` 在 `tauri-winres` 构建脚本处失败（需要 `llvm-rc`），首次真编译发生在 CI；接口链（`ICoreWebView2_16` / `Environment6`）与 `IStream` 读取的运行时行为同样待 CI/真机确认。
 
 ---
 
@@ -409,6 +431,8 @@ Rust 侧 `cargo test --lib`，覆盖：
 - 加密附件：加解密往返与篡改检测、写入 → 解密到缓存 → 清缓存生命周期、历史明文附件的兼容复制
 - 改密码带动附件重包裹（用旧钥匙再也解不开、非容器条目被跳过）、坏附件只跳过自己且其余照常可用、缓存已新于源时不重复解密
 - 目录库内含明文附件（`.dat` 里的图片 + 散落 png）时改密码照样成功、附件字节不变；塞一个「像笔记却不是容器」的文件时改密码被拒，且旧密码仍能解锁读正文（证明没有半新半旧）
+
+> 导出 PDF 没有自动化测试：它依赖真实 WebView 的渲染与系统打印接口，`cargo test --lib` 覆盖不到。改动后需手工在三端验证，至少覆盖纯文本文档、含图文档与超长代码块三种情况（后者最容易暴露分页裁剪）。
 
 ---
 
@@ -435,3 +459,7 @@ Rust 侧 `cargo test --lib`，覆盖：
 | mac 上读文件报 error 11（`Resource deadlock avoided`） | iCloud「仅在线」文件正在召回下载 | 等 loading 结束（上限 20 秒）；反复失败就在访达里右键「立即下载」 |
 | 便签点了带参的快捷方式没反应 | 目标应用不接 argv（macOS 另起的新实例没做单实例转发；Windows `explorer` 可能吞掉参数） | 先去掉参数验证启动本身是否正常，再按应用自己的参数语法调整 |
 | 双击 `.md` 后应用跳到编辑器却没开文件（Linux） | Linux 未接「打开文件」入口（mac 走 `RunEvent::Opened`、Win 走 argv + 单实例插件） | 暂用应用内「打开文件」；Linux 侧接入口是待办 |
+| 导出 PDF 报「WebView2 运行时版本过低」 | `PrintToPdfStream` 在 `ICoreWebView2_16`（约 Edge 115+）、`CreatePrintSettings` 在 `Environment6`（约 105+），cast 失败即老 Runtime | 更新 WebView2 Runtime（随 Edge 浏览器 / 系统更新）后重试；老机器可先导出单文件 HTML |
+| 导出 PDF 卡住后报「超时或失败」 | 命令线程最多等 120 秒；图文档内联成自包含 HTML 后过大、隐藏窗口没能渲染完 | 减少正文图片或改用「导出 HTML（单文件）」；仍失败看 stderr 的 `[PDF-CAPTURE]` |
+| 导出的 PDF 少页或内容被裁 | macOS 按块边界装箱，单个块高过一页时超出部分被 `overflow:hidden` 裁掉；某页截取失败只写 stderr 并在合并时跳过 | 拆短超长代码块 / 表格；图片高的话改用分页更碎的排版 |
+| Linux 菜单里没有「导出 PDF」 | WebKitGTK 无静默打印接口，`export_pdf` 在该平台只返回「当前平台不支持导出 PDF」 | 有意为之（见 §6.11 与 §8 待办）；可用「导出 HTML（单文件）」交给浏览器打印 |

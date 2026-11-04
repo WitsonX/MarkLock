@@ -16,9 +16,13 @@ mod appinfo_win;
 use crypto::session::SessionStore;
 use crypto::vault;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
+// 导出 PDF（Windows）：`IStream` 用在 `read_pdf_stream` 的签名上，
+// 而函数体内的 `use` 对本函数签名不可见，故提到模块级（仅此目标存在）。
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Com::IStream;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_window_state::AppHandleExt;
 
@@ -1700,6 +1704,12 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
     let workdir_toggle = MenuItemBuilder::with_id("menu:workdir-toggle", ml("打开工作目录", "Open Working Directory")).build(handle)?;
     let save = MenuItemBuilder::with_id("menu:save", ml("保存", "Save")).accelerator("Cmd+S").build(handle)?;
     let close_tab = MenuItemBuilder::with_id("menu:close-tab", ml("关闭页签", "Close Tab")).accelerator("Cmd+W").build(handle)?;
+    // 三项导出收进「导出」子菜单（与应用内右键/节点菜单的层级一致）；主菜单的「导入/导出」分组保持平铺。
+    let export_submenu = SubmenuBuilder::new(handle, ml("导出", "Export"))
+        .text("menu:export-html", ml("导出 HTML…", "Export HTML…"))
+        .text("menu:export-html-single", ml("导出 HTML（单文件）…", "Export HTML (Single File)…"))
+        .text("menu:export-pdf", ml("导出 PDF…", "Export PDF…"))
+        .build()?;
     let file_submenu = SubmenuBuilder::new(handle, ml("文件", "File"))
         .item(&new_file)
         .text("menu:new-vault", ml("新建加密库", "New Encrypted Vault"))
@@ -1714,7 +1724,7 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
         .separator()
         .text("menu:batch-encrypt", ml("批量加密文件…", "Batch Encrypt Files…"))
         .text("menu:import-dir", ml("导入目录到库…", "Import Directory to Vault…"))
-        .text("menu:export-html", ml("导出 HTML…", "Export HTML…"))
+        .item(&export_submenu)
         .build()?;
 
     // 编辑：保留系统剪贴板预定义项（⌘C/⌘V 等），否则覆盖默认菜单后这些快捷键失效。
@@ -2584,6 +2594,461 @@ async fn read_asset_data_url(path: String) -> Result<String, crypto::CryptoError
     spawn_crypto(move || assets::read_data_url(&path)).await
 }
 
+// ==================== 导出 PDF ====================
+
+/// PDF 导出用的隐藏渲染窗口标签前缀；每次导出取唯一后缀标签，
+/// 避免上一次窗口销毁（事件循环异步生效）完成前与新建窗口标签冲突。
+const PDF_WINDOW: &str = "pdf-export";
+static PDF_WINDOW_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 把前端拼好的、已内联全部本地资源的独立 HTML 交给隐藏 WebView 渲染，静默生成 PDF 写入 `target`。
+///
+/// 编排：主线程建隐藏窗口（加载源见 `pdf_render_source`，不挂载前端应用）→
+/// 内容加载完成（on_page_load）后等 500ms 稳定期再截 PDF，字节经通道送回命令线程写盘。
+/// on_page_load 在两端都由主线程派发（WKWebView 导航代理 / WebView2 NavigationCompleted），
+/// 平台实现可直接调 WebKit / WebView2 API。命令线程只阻塞等待通道结果（最长 120s 防悬挂）；
+/// 收尾（销毁隐藏窗口、删临时文件）统一在本命令做，成功 / 平台报错 / 超时三条路径都覆盖。
+///
+/// 平台实现：
+/// - macOS：WKWebView `createPDFWithConfiguration`（A4 rect）静默生成，完成块在主线程取回 NSData 字节；
+/// - Windows：WebView2 `PrintToPdfStream`（A4 设置），完成回调由 WebView2 派发到主线程后读 IStream。
+#[tauri::command]
+async fn export_pdf(
+    app: tauri::AppHandle,
+    html: String,
+    target: String,
+) -> Result<(), crypto::CryptoError> {
+    let bytes = spawn_crypto(move || {
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+        let handle = app.clone();
+        // 每次导出取唯一窗口标签：上一窗口的 destroy 经事件循环异步生效，
+        // 复用固定标签会在销毁完成前撞「webview already exists」。
+        let label = format!("{PDF_WINDOW}-{}", PDF_WINDOW_SEQ.fetch_add(1, Ordering::SeqCst));
+        // 渲染源按平台准备（Windows 需先落临时文件，见 pdf_render_source）
+        let (url, tmp_file) = pdf_render_source(&html, &label)?;
+        let url_main = url.clone();
+        let tmp_main = tmp_file.clone();
+        let label_main = label.clone();
+        // 窗口与 WebView 操作统一派发到主线程；这里用阻塞池线程等结果，避免占用 async 运行时线程。
+        let _ = app.run_on_main_thread(move || {
+            spawn_pdf_window(&handle, &label_main, url_main, tmp_main, tx)
+        });
+        let recv = rx.recv_timeout(std::time::Duration::from_secs(120));
+        // 收尾：按标签销毁隐藏窗口（防超时/失败时窗口堆积泄漏）+ 删临时文件。
+        // 平台实现不再自行 destroy —— Windows 的完成回调是 WebView2 自己调进来的，
+        // 在回调里销毁宿主窗口有 use-after-free 风险；macOS 已在回调里销毁时这里
+        // 按标签查不到窗口，是幂等空操作。
+        let h2 = app.clone();
+        let l2 = label.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(w) = h2.get_webview_window(&l2) {
+                let _ = w.destroy();
+            }
+        });
+        if let Some(p) = tmp_file {
+            let _ = std::fs::remove_file(p);
+        }
+        recv.map_err(|e| crypto::CryptoError::Io(format!("导出 PDF 超时或失败: {e}")))
+            .and_then(|r| r.map_err(crypto::CryptoError::Io))
+    })
+    .await?;
+    // 复用明文写盘（覆盖 iCloud dataless 文件的召回逻辑）
+    spawn_crypto(move || {
+        crypto::io::write(Path::new(&target), &bytes)
+            .map_err(|e| crypto::CryptoError::Io(e.to_string()))
+    })
+    .await
+}
+
+/// 准备渲染窗口的加载源，返回 `(URL, 需清理的临时文件)`。
+///
+/// - macOS：HTML → base64 `data:text/html` URL，全程不落盘（WKWebView 允许顶层 data: 导航）；
+/// - Windows：Chromium 系内核限制顶层 `data:` 导航，而导出 PDF 的 HTML 已把图片全部内联成
+///   base64（带图文档动辄数 MB），超长 data URL 会让 WebView2 `Navigate` 直接失败
+///   → 改写临时文件走 `file://` 加载（内容自包含，file:// 下没有相对路径/跨源问题）。
+///   明文临时文件在页面加载完成时即删，`export_pdf` 收尾再兜底删一次。
+fn pdf_render_source(
+    html: &str,
+    label: &str,
+) -> Result<(tauri::Url, Option<PathBuf>), crypto::CryptoError> {
+    #[cfg(target_os = "windows")]
+    {
+        // 文件名带窗口标签（含自增序号）：并发导出各写各的，互不覆盖
+        let path = std::env::temp_dir().join(format!("marklock-{label}.html"));
+        std::fs::write(&path, html)
+            .map_err(|e| crypto::CryptoError::Io(format!("写入导出临时文件失败: {e}")))?;
+        let url = tauri::Url::from_file_path(&path)
+            .map_err(|_| crypto::CryptoError::Io("导出临时文件路径非法".to_string()))?;
+        Ok((url, Some(path)))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use base64::Engine;
+        let _ = label;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(html.as_bytes());
+        let url = format!("data:text/html;base64,{b64}")
+            .parse::<tauri::Url>()
+            .map_err(|e| crypto::CryptoError::Io(format!("导出内容编码失败: {e}")))?;
+        Ok((url, None))
+    }
+}
+
+/// 主线程建隐藏渲染窗口并编排「加载完成 → 稳定期 → 截 PDF」。
+///
+/// 加载源单次加载即渲染完成，不依赖「about:blank 先导页再注入」的两段式——about:blank
+/// 的首次 didFinish 可能早于 on_page_load 注册而丢失，导致永远等不到第二次加载而挂起。
+/// `on_page_load` 是 `Fn`（可能多次调用）且要求闭包 `Send + Sync`：`Sender` 非 `Sync`，
+/// 故套 `Mutex<Option<_>>`（截取后取走发送）；Windows 的明文临时文件同理套 `Mutex<Option<_>>`
+/// （加载完成即删，把明文落盘的存活时间压到一次导航）；加载次数用原子计数区分（只认首次）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn spawn_pdf_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: tauri::Url,
+    tmp_file: Option<PathBuf>,
+    tx: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+) {
+    let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
+    let tx_load = tx.clone();
+    let done_load = std::sync::Arc::new(AtomicBool::new(false));
+    let done_load_cb = done_load.clone();
+    let tmp_load = std::sync::Mutex::new(tmp_file);
+
+    let built = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::External(url))
+    .title("MarkLock PDF")
+    // 与 A4 近似的逻辑尺寸（96dpi），让字体/图片按接近打印的分辨率布局
+    .inner_size(794.0, 1123.0)
+    .visible(false)
+    .skip_taskbar(true)
+    .on_page_load(move |win, payload| {
+        // 只认加载完成：Started 在导航提交时即派发，彼时内容尚未就绪
+        if payload.event() != tauri::webview::PageLoadEvent::Finished {
+            return;
+        }
+        if done_load_cb.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Windows：文档已进渲染进程，明文临时文件立即删（后续截图只用内存里的 DOM）
+        if let Some(p) = tmp_load.lock().ok().and_then(|mut g| g.take()) {
+            let _ = std::fs::remove_file(p);
+        }
+        // HTML 渲染完成 → 稍等图片/字体绘制稳定再截 PDF，结果经通道送回命令线程
+        let win_for_capture = win.clone();
+        let tx_capture = tx_load.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let win2 = win_for_capture.clone();
+            let _ = win_for_capture.run_on_main_thread(move || capture_pdf(&win2, tx_capture));
+        });
+    })
+    .build();
+    if let Err(e) = built {
+        fail_pdf(&tx, &format!("创建导出窗口失败: {e}"));
+    }
+}
+
+/// Linux / 其它平台：无静默截取 PDF 的 Webview API（WebKitGTK 既无 `createPDF` 也无 WebView2 打印接口），
+/// 不建隐藏窗口、直接经通道报错。命令本身保持注册（前端菜单项按平台隐藏，此处只兜底）。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn spawn_pdf_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    url: tauri::Url,
+    tmp_file: Option<PathBuf>,
+    tx: std::sync::mpsc::Sender<Result<Vec<u8>, String>>,
+) {
+    let _ = (app, label, url, tmp_file);
+    let _ = tx.send(Err("当前平台不支持导出 PDF".to_string()));
+}
+
+/// 取走通道发送端并向命令线程报错（发送端被包裹在 Mutex<Option> 中）。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn fail_pdf(
+    tx: &std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<Vec<u8>, String>>>>>,
+    msg: &str,
+) {
+    if let Ok(mut guard) = tx.lock() {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Err(msg.to_string()));
+        }
+    }
+}
+
+/// PDF 导出页面尺寸（A4，pt）：分页脚本按页高装容器，逐页截取按 rect y 偏移切片。
+/// 仅 macOS 用到（Windows 由 WebView2 自行按打印排版分页）。
+#[cfg(target_os = "macos")]
+const PDF_PAGE_W: f64 = 595.28;
+#[cfg(target_os = "macos")]
+const PDF_PAGE_H: f64 = 841.89;
+
+/// 分页脚本：把 `.md` 的直接子块逐个装入固定页高的容器（容器创建即入文档测量，
+/// 脱离文档的节点 scrollHeight 恒为 0），溢出则开新页，分页点落在块边界不切行；
+/// 容器继承 `.md` 原内边距使每页留白一致。返回页数。
+/// WKWebView createPDF 不分页（rect 高度仅是单页高度，超出截断），故先在排版层切页。
+#[cfg(target_os = "macos")]
+const PDF_PAGINATE_JS: &str = r#"(function(){
+  var PH = 841.89;
+  var md = document.querySelector('.md');
+  if (!md) { return 1; }
+  var cs = getComputedStyle(md);
+  var pad = cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft;
+  var blocks = Array.prototype.slice.call(md.children);
+  md.innerHTML = '';
+  md.style.padding = '0';
+  var n = 1;
+  var page = makePage();
+  blocks.forEach(function(b){
+    page.appendChild(b);
+    if (page.scrollHeight > PH + 0.5) {
+      page.removeChild(b);
+      page = makePage();
+      page.appendChild(b);
+      n += 1;
+    }
+  });
+  return n;
+  function makePage(){
+    var d = document.createElement('div');
+    d.style.cssText = 'height:' + PH + 'px;overflow:hidden;box-sizing:border-box;padding:' + pad + ';';
+    md.appendChild(d);
+    return d;
+  }
+})()"#;
+
+/// macOS：`createPDFWithConfiguration` 静默截取 PDF。createPDF 不分页，故先跑分页脚本把内容
+/// 装入固定页高容器，再按 rect y 偏移逐页截取（rect 为文档坐标截取区域，每页恰为一个容器），
+/// 最后用 PDFKit 把各单页 PDF 顺序合并为多页文档送回。页面尺寸 A4，留白由分页容器继承
+/// `.md` 内边距负责（`@page { margin: 0 }`），与 Windows 端打印分页语义对齐。
+#[cfg(target_os = "macos")]
+fn capture_pdf(
+    win: &tauri::WebviewWindow,
+    tx: std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<Vec<u8>, String>>>>>,
+) {
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::AnyThread;
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_foundation::{NSData, NSError, NSNumber, NSString};
+    use objc2_pdf_kit::PDFDocument;
+    use objc2_web_kit::{WKPDFConfiguration, WKWebView};
+
+    type PdfTx =
+        std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<Vec<u8>, String>>>>>;
+
+    /// 依次截取第 i 页（rect y = i×页高），截完用 PDFKit 合并并经通道送回、销毁窗口。
+    fn capture_slice(
+        wk: &Retained<WKWebView>,
+        i: usize,
+        n: usize,
+        pages: &std::sync::Arc<std::sync::Mutex<Vec<Retained<NSData>>>>,
+        tx: &PdfTx,
+        win: &tauri::WebviewWindow,
+    ) {
+        if i >= n {
+            // 各单页 PDF 顺序插入一个新文档，合成多页 A4
+            let merged = unsafe { PDFDocument::new() };
+            for data in pages.lock().expect("pages 锁中毒").iter() {
+                let Some(doc) =
+                    (unsafe { PDFDocument::initWithData(PDFDocument::alloc(), data) })
+                else {
+                    continue;
+                };
+                for p in 0..unsafe { doc.pageCount() } {
+                    if let Some(page) = unsafe { doc.pageAtIndex(p) } {
+                        unsafe { merged.insertPage_atIndex(&page, merged.pageCount()) };
+                    }
+                }
+            }
+            let bytes = unsafe { merged.dataRepresentation() }.map(|data| {
+                let len = data.length();
+                let mut buf = vec![0u8; len];
+                unsafe {
+                    data.getBytes_length(
+                        std::ptr::NonNull::new(buf.as_mut_ptr() as *mut std::ffi::c_void).unwrap(),
+                        len,
+                    );
+                }
+                buf
+            });
+            match bytes {
+                Some(buf) => {
+                    if let Ok(mut guard) = tx.lock() {
+                        if let Some(tx) = guard.take() {
+                            let _ = tx.send(Ok(buf));
+                        }
+                    }
+                }
+                None => fail_pdf(tx, "合并 PDF 失败"),
+            }
+            let _ = win.destroy();
+            return;
+        }
+        let mtm = objc2::MainThreadMarker::new().expect("capture_pdf 在主线程派发");
+        let config = unsafe { WKPDFConfiguration::init(mtm.alloc()) };
+        unsafe {
+            config.setRect(CGRect::new(
+                CGPoint::new(0.0, i as f64 * PDF_PAGE_H),
+                CGSize::new(PDF_PAGE_W, PDF_PAGE_H),
+            ));
+        }
+        let wk = wk.clone();
+        let pages = pages.clone();
+        let tx = tx.clone();
+        let win = win.clone();
+        let wk_block = wk.clone();
+        let block = RcBlock::new(move |data: *mut NSData, _error: *mut NSError| {
+            match unsafe { Retained::retain(data) } {
+                Some(d) => pages.lock().expect("pages 锁中毒").push(d),
+                None => eprintln!("[PDF-CAPTURE] 第 {i} 页截取失败"),
+            }
+            capture_slice(&wk_block, i + 1, n, &pages, &tx, &win);
+        });
+        unsafe { wk.createPDFWithConfiguration_completionHandler(Some(&config), &block) };
+    }
+
+    let win_js = win.clone();
+    let _ = win.with_webview(move |webview| {
+        let Some(wk) = (unsafe { Retained::retain(webview.inner() as *mut WKWebView) }) else {
+            fail_pdf(&tx, "获取 WebView 失败");
+            return;
+        };
+        let js = NSString::from_str(PDF_PAGINATE_JS);
+        let pages = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Retained<NSData>>::new()));
+        // 分页脚本返回页数（JS number → NSNumber）；为 0 视为执行异常
+        let wk_eval = wk.clone();
+        let block = RcBlock::new(move |val: *mut objc2::runtime::AnyObject, _err: *mut NSError| {
+            let n = unsafe { (val as *const NSNumber).as_ref() }.map_or(0, |v| v.integerValue())
+                as usize;
+            if n == 0 {
+                fail_pdf(&tx, "分页失败");
+                let _ = win_js.destroy();
+                return;
+            }
+            capture_slice(&wk, 0, n, &pages, &tx, &win_js);
+        });
+        unsafe { wk_eval.evaluateJavaScript_completionHandler(&js, Some(&block)) };
+    });
+}
+
+/// Windows：`PrintToPdfStream` 静默生成 PDF（A4 英寸尺寸、无边距、无页眉页脚、打背景色）。
+/// 分页由 WebView2 自己按打印排版完成（不像 macOS 需要预先跑分页脚本）。
+/// 完成回调不用 `wait_for_async_operation`：那会在主线程再套一层 `GetMessage` 消息泵，
+/// 而本函数本身就跑在主线程回调里，嵌套泵有重入风险；改用 `create` 注册后直接返回，
+/// 回调由 WebView2 正常派发到主线程，命令线程已在通道上等结果。
+/// 回调里也不销毁窗口（它是 WebView2 自己调进来的，销毁宿主有 use-after-free 风险），
+/// 统一由 `export_pdf` 收尾。老 WebView2 Runtime 缺接口（PrintToPdfStream 在
+/// ICoreWebView2_16，约 Edge 115+；CreatePrintSettings 在 ICoreWebView2Environment6，
+/// 约 Edge 105+）时直接报错。
+#[cfg(target_os = "windows")]
+fn capture_pdf(
+    win: &tauri::WebviewWindow,
+    tx: std::sync::Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<Result<Vec<u8>, String>>>>>,
+) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT, ICoreWebView2PrintSettings, ICoreWebView2_16,
+    };
+    use webview2_com::PrintToPdfStreamCompletedHandler;
+    // cast 由 Interface trait 提供，必须在作用域内
+    use windows::core::Interface;
+    let _ = win.with_webview(move |webview| {
+        let controller = webview.controller();
+        let Ok(core) = (unsafe { controller.CoreWebView2() }) else {
+            fail_pdf(&tx, "获取 WebView2 失败");
+            return;
+        };
+        // PrintToPdfStream 在 ICoreWebView2_16 上（较新的 WebView2 Runtime）；
+        // 转换失败意味着接口不存在（老 Runtime），静默导出不可用，报错让用户升级。
+        let Ok(core16) = core.cast::<ICoreWebView2_16>() else {
+            fail_pdf(&tx, "当前 WebView2 运行时版本过低，不支持导出 PDF");
+            return;
+        };
+        // 打印设置要经 Environment6 才能创建（见 make_print_settings 的接口链）
+        let settings: ICoreWebView2PrintSettings = match unsafe { make_print_settings(&core) } {
+            Ok(s) => s,
+            Err(e) => {
+                fail_pdf(&tx, &format!("创建打印设置失败: {e}"));
+                return;
+            }
+        };
+        unsafe {
+            let _ = settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT);
+            // A4 英寸尺寸；边距全 0（留白由前端 CSS 内边距负责，与 macOS 端一致）
+            let _ = settings.SetPageWidth(8.27);
+            let _ = settings.SetPageHeight(11.69);
+            let _ = settings.SetMarginTop(0.0);
+            let _ = settings.SetMarginBottom(0.0);
+            let _ = settings.SetMarginLeft(0.0);
+            let _ = settings.SetMarginRight(0.0);
+            let _ = settings.SetShouldPrintHeaderAndFooter(false);
+            // 代码块底色、表格斑马纹、引用块左边条都靠背景色呈现，默认不打背景会变成白底
+            let _ = settings.SetShouldPrintBackgrounds(true);
+        }
+        // 回调 move 走 tx；发起调用失败的分支用克隆报错
+        let tx_call = tx.clone();
+        // COM 对象克隆进回调并持有到它触发为止：异步打印期间 settings / core16 不会被提前释放
+        let keep_core = core16.clone();
+        let keep_settings = settings.clone();
+        let handler = PrintToPdfStreamCompletedHandler::create(Box::new(
+            move |hr: windows::core::Result<()>,
+                  stream: Option<IStream>|
+                  -> windows::core::Result<()> {
+                match (hr, stream) {
+                    (Ok(()), Some(stream)) => match unsafe { read_pdf_stream(&stream) } {
+                        Ok(bytes) => {
+                            if let Ok(mut guard) = tx.lock() {
+                                if let Some(tx) = guard.take() {
+                                    let _ = tx.send(Ok(bytes));
+                                }
+                            }
+                        }
+                        Err(e) => fail_pdf(&tx, &format!("读取 PDF 流失败: {e}")),
+                    },
+                    (Err(e), _) => fail_pdf(&tx, &format!("WebView2 生成 PDF 失败: {e}")),
+                    (Ok(()), None) => fail_pdf(&tx, "WebView2 未返回 PDF 数据"),
+                }
+                drop((keep_core, keep_settings));
+                Ok(())
+            },
+        ));
+        if let Err(e) = unsafe { core16.PrintToPdfStream(&settings, &handler) } {
+            fail_pdf(&tx_call, &format!("导出 PDF 失败: {e}"));
+        }
+    });
+}
+
+/// Windows：取打印设置对象（`ICoreWebView2Environment6::CreatePrintSettings`）。
+/// 接口链：`ICoreWebView2` →(cast)→ `_2::Environment` →(cast)→ `Environment6::CreatePrintSettings`，
+/// 任一环 cast 失败即老 Runtime / 缺接口，返回 Err 由调用方报错。
+#[cfg(target_os = "windows")]
+unsafe fn make_print_settings(
+    core: &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2,
+) -> windows::core::Result<webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2PrintSettings> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Environment6, ICoreWebView2_2,
+    };
+    use windows::core::Interface;
+    let env = core.cast::<ICoreWebView2_2>()?.Environment()?;
+    Ok(env.cast::<ICoreWebView2Environment6>()?.CreatePrintSettings()?)
+}
+
+/// Windows：从 IStream 读全部字节（Stat 取长度 → 回卷到 0 → 一次读满）。
+#[cfg(target_os = "windows")]
+unsafe fn read_pdf_stream(stream: &IStream) -> windows::core::Result<Vec<u8>> {
+    use windows::Win32::System::Com::{STATFLAG_DEFAULT, STATSTG, STREAM_SEEK_SET};
+    let mut stat: STATSTG = Default::default();
+    stream.Stat(&mut stat, STATFLAG_DEFAULT)?;
+    let size = stat.cbSize as usize;
+    // Seek(dlibmove, origin, plibnewposition)：新位置不需要，传 None
+    stream.Seek(0, STREAM_SEEK_SET, None)?;
+    let mut buf = vec![0u8; size.max(1)];
+    let mut read: u32 = 0;
+    stream
+        .Read(buf.as_mut_ptr() as *mut std::ffi::c_void, buf.len() as u32, Some(&mut read))
+        .ok()?;
+    buf.truncate(read as usize);
+    Ok(buf)
+}
+
 /// 加密写入一个附件（图片二进制）到容器同级 `.dat` 目录，返回逻辑名（供拼 markdown 链接）。
 ///
 /// 用于 `.mdl` / `.mdlb` 的粘贴截图：base64 → 用会话 KEK 加密 → 写 `name.mdat`（磁盘不含明文）。
@@ -2746,6 +3211,7 @@ pub fn run() {
             copy_file_to,
             write_asset_bytes,
             read_asset_data_url,
+            export_pdf,
             write_encrypted_asset,
             copy_encrypted_asset,
             materialize_vault_assets,
@@ -2897,7 +3363,7 @@ pub fn run() {
             // 其余 menu:* 项统一转发前端，由 EditorView.runMenuAction 按 id 分派到对应方法。
             if id.starts_with("menu:") {
                 if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
-                    let _ = win.emit("marklock://menu", id);
+                    let _ = win.emit("marklock://menu", id.clone());
                 }
             }
         })

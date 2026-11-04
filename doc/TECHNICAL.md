@@ -123,6 +123,7 @@ note.dat/              附件目录（与容器同级）
 - **失败次数限制**：连续错误密码后限制尝试。
 - **剪贴板**：复制的解密内容 60 秒后自动清除；锁定时可一次性清除剪贴板。
 - **休眠 / 锁屏锁定**（设置里的可开关项）：macOS 由 Rust 每秒轮询会话字典的 `CGSSessionScreenIsLocked`，在「未锁 → 已锁」时发 `marklock://screen-locked` 事件，是精确信号；mac 前端因此**不**采用「页面隐藏数秒即判定休眠」的启发式（切窗口、被遮挡、换 Space 都会让页面 `hidden`，会误锁），只保留阈值放宽到 30 秒的心跳兜底。Windows / Linux 无后端探测，维持 5 秒启发式。
+- **导出产物是明文**：HTML / 单文件 HTML / PDF 都按用户在保存对话框里选的落点明文写盘，不受库加密保护——这是「发给别人也能看」的题中之义，但成品离开应用后就再无保密性。Windows 渲染 PDF 还要先把自包含 HTML 写进系统临时文件（Chromium 内核不允许顶层 `data:` 导航，而内联图片后的 URL 动辄数 MB），页面加载完成立刻删、命令收尾再兜底删一次，明文在临时目录里只存活一次导航的时间；macOS 走 `data:text/html` URL，全程不落盘。
 - **附件明文只进应用缓存**：磁盘上的 `.dat` 一律是密文，解密出的明文只驻留 `<app_cache_dir>/mlk-assets`，随锁定 / 退出 / 自动锁定即时删除对应库的子目录；进程被强杀或崩溃来不及清，故启动时（此时必然还没有任何会话）整目录清空兜底。要说清边界：缓存目录不是加密区，能读该目录的环境（同用户下的其它进程）在解锁期间看得到明文图片——这是「预览需要文件路径」换来的代价，换来的是正文与磁盘永远只有密文。
 
 ## Rust 加密核心
@@ -192,7 +193,8 @@ note.dat/              附件目录（与容器同级）
 | `copy_file_to(src, dest)` | 覆盖式复制到指定路径（预览点二进制附件的「另存为」下载流） |
 | `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」）；只接受 `is_file` 的路径，与 `open_url` 的协议白名单是两套 |
 | `launch_local(path, args)` | 快速启动本地应用 / 路径，`args` 为已拆分的启动参数数组：macOS 经 `open --args` 透传且带参时固定加 `-n` 另起进程，Windows 追加到程序参数后，Linux 的 `xdg-open` 无透传语义故忽略 |
-| `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` / `saveAttachmentDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
+| `export_pdf(html, target)` | 把前端拼好的自包含 HTML 交隐藏 WebView 静默渲染成 PDF 写入 `target`：macOS 用 `WKWebView createPDFWithConfiguration`（不分页，故先跑 JS 按 A4 页高切页、逐页截取再用 PDFKit 合并），Windows 用 WebView2 `PrintToPdfStream`（引擎自己分页），Linux 无对应 API 直接返回「当前平台不支持导出 PDF」。字节经通道回命令线程，120 秒超时兜底并按标签销毁隐藏窗口，成功 / 报错 / 超时三条路径都不留窗口 |
+| `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` / `saveAttachmentDialog` / `saveHtmlDialog` / `savePdfDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
 
 ## 前端结构与状态
 
@@ -202,6 +204,7 @@ note.dat/              附件目录（与容器同级）
 - **外部修改监控**：`src/lib/filewatch.ts` 是模块级单例，默认 2 秒轮询磁盘 mtime / 大小，并在窗口重新获得焦点时立刻检查。库内文件按整个容器监控，只重读已打开的那几个文件。
 - **预览**：`src/lib/preview.ts` 是主编辑器与便携便签共用的 Markdown 渲染层，`src/components/MarkdownPreview.vue` 为对应组件。相对链接的基准目录由 `setAssetBaseDir` 写入，加密文件（`.mdl` / `.mdlb`）指向附件缓存根、其余指向磁盘上的锚点目录；该基准存 `globalThis` 而非模块作用域——marked 渲染器的闭包在模块初始化时就固化，dev 热重载会让新旧模块实例各持一份变量，旧闭包读到陈旧/空基准就表现为裂图 404。预览里点非文档类型的链接（zip、图片等）不按文本开页签，而是弹保存对话框走复制下载流。
 - **从系统打开文件**：macOS 走 `RunEvent::Opened`（访达双击、拖到 Dock、「打开方式」、`open -a MarkLock 文件` 都汇到这一条），Windows 冷启动读 argv、二次启动由单实例插件把参数转给已运行实例；Linux 没有接入口。路径一律先进 Rust 侧的 `PENDING_OPEN_PATHS` 缓冲，再发 `marklock://open-paths`，前端用 `take_pending_open_paths` 一次取干——事件不缓冲，冷启动时先于 `listen()` 触发就丢了，所以缓冲必须放后端，取干也保证不重复建页签。监听分两处：`EditorView` 在位时直接取；不在编辑器页（设置 / 解锁）时由常驻的 `App.vue` 置 `pendingOpenPathsNavigate` 并跳回 `/editor`，`EditorView` 在 `onMounted` 末尾消费——那时 `_sessionRestore` 已赋值，能与冷启动恢复串行。
+- **导出**：页签右键、侧边栏与工作目录的节点右键、「更多」菜单、macOS 主菜单里，「导出 HTML」/「导出 HTML（单文件）」/「导出 PDF」三项收进一个「导出」子菜单（自定义右键菜单的 `kind:'sub'` 项靠 CSS `:hover` 展开；子菜单宽 224px，靠近右边界时由 `subLeft` 翻到左侧）。三个入口共用 `exportRenderedDoc(f, { inlineAll, forPdf })`：正文走预览同一套 `renderMarkdown`（渲前临时把相对链接基准指向被导出的那个文件，非激活页签也能导对图），再去掉离线页里没用的代码块复制按钮、给任务复选框补 `disabled` 保持只读观感。常规 HTML 把本地资源复制进 `<导出名>.dat/` 并改写相对链接（单个复制失败时图片退回内联 data URL，其余原样保留）；单文件 HTML 与 PDF 一律全部内联成 data URL，非图片附件的链接补 `download` 属性保住原文件名——PDF 的隐藏 WebView 没有 base URL，不自包含就什么都渲染不出来。PDF 版式按平台给不同 px 使 pt 相等（mac 595/11.25、其余 793/15），`@page { margin: 0 }` 把留白交给 `.md` 内边距，图片 / 代码块 / 表格 `break-inside: avoid`。本页签或所属库锁定时没有明文可渲染，子菜单整体置灰；Linux 无静默渲染 API，四处菜单都不给「导出 PDF」这一项（`lib/platform.ts` 的 `isLinux`）。
 - **i18n**：`src/locales/{zh,en}.ts`，zh 为原文，en 结构一一对应；仅收录用户可见文案。
 
 ## 目录结构
@@ -248,7 +251,7 @@ MarkLock/
 - **内容源**：任意 `.md` 明文或 `.mdl` 加密文件；所在库锁定时便签内直接给密码框解锁。`.mdlb` 是多文件容器，暂不作为单个便签源。
 - **读取失败要说清是哪种失败**：读不到正文不能一律当作「库未解锁」——明文笔记根本没有库可解，误显示密码框等于把人卡在一个按了没反应的表单上。故按原因分流：库未解锁走解锁表单，其余（IO 失败、库文件被移动）显示后端给出的原因加重试按钮；判别依据是后端错误消息里的固定中文文案，后端措辞变了这里要跟着改。
 - **编辑预览一体**：编辑 / 分屏 / 预览三态复用主编辑器的 CodeMirror 与 `preview.ts`，保存走同一套 `write_file` / `write_file_vault` 命令，因此落盘一样是密文。相对链接的基准目录取便签文件**自己在磁盘上的目录**，不接主编辑器那套附件缓存，所以指向 `.mdl` 的便签里、以 `.mdat` 密文存储的图片当前不显示（明文库/普通文件的插图不受影响）。
-- **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。每项可另存「启动参数」原始串（空格分隔、引号段视为整体，`lib/launchArgs.ts` 拆分），`launch_local` 收到参数数组后 macOS 走 `open <路径> --args …`、Windows 追加到程序后；参数逐个传给 `Command` 不经 shell，无注入面。因 `open` 对已运行应用只激活、argv 不送达，macOS 带参时固定附 `open -n` 另起进程（无开关，对新实例行为用户无感）。
+- **快速启动**：便签底部可放本地应用快捷方式（仅图标 / 图标加文字），项前的把手可拖拽排序（与侧边栏分组/页签同一纯鼠标事件写法；指针落在目标行的上半/下半决定插到该行之前/之后，高亮线跟着画顶边/底边，落点与线一致。`store.reorderQuickLaunch(from, to)` 的 `to` 语义是「插到原第 `to` 行之前」，先摘出 `from` 会让它后面的行前移一格，故插入点随之减一；数组顺序即便签底部的展示顺序）。macOS 从本地应用信息解析名称与图标，Windows 侧由 `appinfo_win.rs` 处理 `.lnk` / UWP 别名，故有独立的 `modName` 命名（Win 上 Command 对应 Win 键）。每项可另存「启动参数」原始串（空格分隔、引号段视为整体，`lib/launchArgs.ts` 拆分），`launch_local` 收到参数数组后 macOS 走 `open <路径> --args …`、Windows 追加到程序后；参数逐个传给 `Command` 不经 shell，无注入面。因 `open` 对已运行应用只激活、argv 不送达，macOS 带参时固定附 `open -n` 另起进程（无开关，对新实例行为用户无感）。
 - **开机自启动**：写 macOS LaunchAgent / Windows 当前用户启动项 / Linux XDG autostart，可选手否静默后台启动；若托盘图标被关闭则强制显示窗口，避免应用不可达。
 
 ## 开发与调试
@@ -369,3 +372,4 @@ doc/ui-prototype/
 | 状态 | Pinia + localStorage | 只存元信息，密钥与明文不进 store |
 | 加密 | Rust：`aes-gcm` / `argon2` / `zeroize` | 密钥操作全部在 Rust 侧 |
 | macOS 系统集成 | `objc2` / `objc2-app-kit` / `objc2-foundation` | 便签与热角定位避开 Dock（`NSScreen.visibleFrame`）、iCloud「仅在线」文件主动召回（`NSFileManager`）；锁屏检测与光标/按键态走 CoreGraphics 外部声明，不引额外 crate。全部只在 macOS target 声明 |
+| 导出 PDF | macOS：`objc2-web-kit` / `objc2-pdf-kit` / `block2`；Windows：`webview2-com` / `windows` | 用系统 WebView 自带的打印接口在隐藏窗口里静默生成（WKWebView `createPDFWithConfiguration` 逐页截取后由 PDFKit 合并；WebView2 `PrintToPdfStream` 直接出流），不引第三方 PDF 引擎、也不需要 wkhtmltopdf；依赖分别只在对应 target 声明 |

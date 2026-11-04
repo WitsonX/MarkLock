@@ -556,6 +556,20 @@ export async function saveHtmlDialog(defaultName = `${t('common.untitled')}.html
   return typeof path === 'string' ? path : null
 }
 
+/** PDF 导出保存对话框（仅 .pdf）；取消返回 null。 */
+export async function savePdfDialog(defaultName = `${t('common.untitled')}.pdf`) {
+  const path = await save({
+    defaultPath: defaultName,
+    filters: [{ name: 'PDF', extensions: ['pdf'] }],
+  })
+  return typeof path === 'string' ? path : null
+}
+
+/** 把已内联全部本地资源的独立 HTML 交给隐藏 WebView 渲染，静默生成 PDF 明文写入 target。 */
+export async function exportPdf(html: string, target: string) {
+  return await invoke('export_pdf', { html, target })
+}
+
 /** 通用保存对话框（不限扩展名）：预览点非文档链接的「另存为」下载流；取消返回 null。 */
 export async function saveAttachmentDialog(defaultName: string) {
   const path = await save({ defaultPath: defaultName })

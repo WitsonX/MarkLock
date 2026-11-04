@@ -53,6 +53,10 @@ export default defineComponent({
       // 快速启动项的启动参数编辑弹窗：下标（-1 表示关闭）与草稿原始串
       launchArgsIdx: -1,
       launchArgsDraft: '',
+      // 快速启动项拖拽排序：拖起的行下标、当前悬停目标行，以及指针在该行下半（插到该行之后）
+      qlDragFrom: -1,
+      qlDragOver: -1,
+      qlDragAfter: false,
       // 自定义皮肤编辑器：草稿（null=关闭）、正在编辑的明暗档位、删除确认目标
       skinDraft: null as CustomSkin | null,
       skinDraftMode: 'light' as 'light' | 'dark',
@@ -475,6 +479,61 @@ greet('MarkLock');`
         }
       }
       this.launchArgsIdx = -1
+    },
+    /**
+     * 快速启动项拖拽排序：从把手按下、移动超阈值才进入拖动（与侧边栏分组/页签同一纯鼠标事件写法）。
+     * 指针落在悬停行的上半/下半决定插到该行之前/之后，高亮线跟着画在上/下边；
+     * 松手一写入 store、顺带持久化。
+     */
+    onQLGripMouseDown(i: number, e: MouseEvent) {
+      if (e.button !== 0) return
+      // 有行正在内联改名：先提交收尾。排序会让下标错位，不提交则拖完后可能把名字写到另一行上
+      if (this.editingLaunch >= 0) this.commitLaunchEdit(this.editingLaunch)
+      // 阻止默认行为：把手旁的名称/路径都是可选中文本，拖动时会起选一串字
+      e.preventDefault()
+      const startX = e.clientX
+      const startY = e.clientY
+      let started = false
+      const move = (ev: MouseEvent) => {
+        if (!started && Math.abs(ev.clientX - startX) + Math.abs(ev.clientY - startY) < 4) return
+        if (!started) {
+          started = true
+          this.qlDragFrom = i
+          this.qlDragOver = i
+        }
+        const sel = window.getSelection()
+        if (sel && sel.rangeCount > 0) sel.removeAllRanges()
+        const el = document.elementFromPoint(ev.clientX, ev.clientY)
+        const row = el && el.closest ? (el.closest('[data-ql-index]') as HTMLElement | null) : null
+        if (!row) return
+        const idx = Number(row.getAttribute('data-ql-index'))
+        if (!Number.isInteger(idx)) return
+        const r = row.getBoundingClientRect()
+        // 行中线分上下半：上半插到该行前，下半插到该行后（末行因此也能被直接拖到最末）
+        const after = ev.clientY > r.top + r.height / 2
+        if (idx !== this.qlDragOver || after !== this.qlDragAfter) {
+          this.qlDragOver = idx
+          this.qlDragAfter = after
+        }
+      }
+      const up = () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        const from = this.qlDragFrom
+        const to = this.qlDragOver + (this.qlDragAfter ? 1 : 0)
+        this.qlDragFrom = -1
+        this.qlDragOver = -1
+        this.qlDragAfter = false
+        if (started) this.store.reorderQuickLaunch(from, to)
+      }
+      window.addEventListener('mousemove', move)
+      window.addEventListener('mouseup', up)
+    },
+    /** 拖拽中的行态：源行半透明，目标位置按上下半画顶边/底边高亮线（视觉语言与侧边栏拖放对齐）。 */
+    qlRowClass(i: number): Record<string, boolean> {
+      if (this.qlDragFrom === i) return { dragging: true }
+      if (this.qlDragOver !== i) return {}
+      return this.qlDragAfter ? { 'dragover-after': true } : { 'dragover-before': true }
     },
     /** 「开机自启」开关：调用 Rust 写入 / 移除系统启动项；失败时 toast 提示并回退开关。
      *  与 store.settings.autoStart 双向绑定：先乐观更新 UI，后端拒绝时再回写。 */
@@ -1188,7 +1247,10 @@ greet('MarkLock');`
                 <span :class="{ on: store.settings.stickyLaunchDisplay === 'iconText' }" @click="store.updateSettings({ stickyLaunchDisplay: 'iconText' })">{{ $t('settings.sticky.launchDisplayIconText') }}</span>
               </div>
             </div>
-            <div v-for="(item, i) in store.settings.quickLaunch" :key="`${item.path}#${i}`" class="row">
+            <div v-for="(item, i) in store.settings.quickLaunch" :key="`${item.path}#${i}`" class="row ql-row" :class="qlRowClass(i)" :data-ql-index="i">
+              <span class="ql-grip" v-tip="$t('settings.sticky.dragSort')" @mousedown="onQLGripMouseDown(i, $event)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.7" /><circle cx="9" cy="12" r="1.7" /><circle cx="9" cy="18" r="1.7" /><circle cx="15" cy="6" r="1.7" /><circle cx="15" cy="12" r="1.7" /><circle cx="15" cy="18" r="1.7" /></svg>
+              </span>
               <img v-if="iconMap[item.path]" :src="iconMap[item.path]" class="ql-ico" alt="" />
               <div v-else class="ql-ico ql-ico-ph" aria-hidden="true"></div>
               <div class="info">
@@ -1468,6 +1530,13 @@ greet('MarkLock');`
   background: var(--panel); color: var(--text); outline: none;
 }
 .ql-rename:focus { border-color: var(--primary); }
+/* 拖拽把手：常驻显示以明示这些行可按住排序；阈值判定与落点计算见 onQLGripMouseDown */
+.ql-grip { display: flex; align-items: center; flex: none; color: var(--text-4); cursor: grab; }
+.ql-grip:hover { color: var(--primary); }
+.ql-grip:active { cursor: grabbing; }
+.ql-row.dragging { opacity: 0.45; }
+.ql-row.dragover-before { box-shadow: inset 0 2px 0 var(--primary); background: var(--primary-bg); }
+.ql-row.dragover-after { box-shadow: inset 0 -2px 0 var(--primary); background: var(--primary-bg); }
 /* 启动参数子行：字面值等宽展示，点击重新打开参数弹窗 */
 .ql-args { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; }
 .ql-args:hover { color: var(--primary); }

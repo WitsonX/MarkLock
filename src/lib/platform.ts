@@ -6,3 +6,6 @@ const ua = navigator.userAgent.toLowerCase()
 
 /** 是否运行在 macOS（Tauri 的 WKWebView UA 含 "Mac OS"；navigator.platform 作兜底） */
 export const isMac = ua.includes('mac os') || (navigator.platform || '').toLowerCase().includes('mac')
+
+/** 是否运行在 Linux（WebKitGTK 的 UA 含 "Linux"；本产品只出 mac/Win/Linux 三端，与 isMac 互斥即可） */
+export const isLinux = ua.includes('linux') || (navigator.platform || '').toLowerCase().includes('linux')
