@@ -194,17 +194,20 @@ note.dat/              附件目录（与容器同级）
 | `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」）；只接受 `is_file` 的路径，与 `open_url` 的协议白名单是两套 |
 | `launch_local(path, args)` | 快速启动本地应用 / 路径，`args` 为已拆分的启动参数数组：macOS 经 `open --args` 透传且带参时固定加 `-n` 另起进程，Windows 追加到程序参数后，Linux 的 `xdg-open` 无透传语义故忽略 |
 | `export_pdf(html, target)` | 把前端拼好的自包含 HTML 交隐藏 WebView 静默渲染成 PDF 写入 `target`：macOS 用 `WKWebView createPDFWithConfiguration`（不分页，故先跑 JS 按 A4 页高切页、逐页截取再用 PDFKit 合并），Windows 用 WebView2 `PrintToPdfStream`（引擎自己分页），Linux 无对应 API 直接返回「当前平台不支持导出 PDF」。字节经通道回命令线程，120 秒超时兜底并按标签销毁隐藏窗口，成功 / 报错 / 超时三条路径都不留窗口 |
+| `set_show_hide_shortcut(shortcut)` | 注册 / 更换 / 清除「显示 / 隐藏主界面」的系统级全局热键：参数是 Tauri accelerator 串（如 `CmdOrCtrl+Alt+H`），空串表示清除。先把 `SHOW_HIDE_ACCEL` 里记的旧值反注册再注册新值；注册失败（写法非法 / 已被系统占用）返回可读错误且**不改动后端已存值**，前端据此回滚。非桌面平台是 no-op 桩（`#[cfg(not(desktop))]`），命令保持注册以兼容 invoke 签名 |
 | `openFileDialog` / `openDirDialog` / `saveFileDialog` / `saveFileVaultDialog` / `saveAttachmentDialog` / `saveHtmlDialog` / `savePdfDialog` | 走 `tauri-plugin-dialog` 的文件对话框 |
 
 ## 前端结构与状态
 
-- **视图**：`src/views/` 四屏 + 便签窗口，路由 hash 模式（`#/unlock`、`#/editor`、`#/settings`、`#/dialogs`、`#/sticky`）。
+- **视图**：`src/views/` 四屏 + 便签窗口，路由 hash 模式（`#/unlock`、`#/editor`、`#/settings`、`#/dialogs`、`#/sticky`）。设置页各分区共用同一个 `.s-body` 滚动容器（`v-show` 切换），切换分区时把内容区滚回顶部，免得上一分区的滚动位置残留；搜索跳转的 `scrollIntoView` 在 `$nextTick` 里执行、晚于这个同步 watcher，不受影响。
 - **状态**：`src/stores/vault.ts`（Pinia）统一管理已登记库列表、打开的页签、当前激活文件、收藏、最近、设置项，持久化到 localStorage（`marklock.recent` / `marklock.settings`）。**密钥与明文一律不进 store**，只存路径 / 名称 / 锁定态等元信息。
 - **编辑器**：`src/components/CodeMirrorEditor.vue` 封装 CodeMirror 6，每个文件常驻实例以保留光标与滚动位置。
 - **外部修改监控**：`src/lib/filewatch.ts` 是模块级单例，默认 2 秒轮询磁盘 mtime / 大小，并在窗口重新获得焦点时立刻检查。库内文件按整个容器监控，只重读已打开的那几个文件。
 - **预览**：`src/lib/preview.ts` 是主编辑器与便携便签共用的 Markdown 渲染层，`src/components/MarkdownPreview.vue` 为对应组件。相对链接的基准目录由 `setAssetBaseDir` 写入，加密文件（`.mdl` / `.mdlb`）指向附件缓存根、其余指向磁盘上的锚点目录；该基准存 `globalThis` 而非模块作用域——marked 渲染器的闭包在模块初始化时就固化，dev 热重载会让新旧模块实例各持一份变量，旧闭包读到陈旧/空基准就表现为裂图 404。预览里点非文档类型的链接（zip、图片等）不按文本开页签，而是弹保存对话框走复制下载流。
 - **从系统打开文件**：macOS 走 `RunEvent::Opened`（访达双击、拖到 Dock、「打开方式」、`open -a MarkLock 文件` 都汇到这一条），Windows 冷启动读 argv、二次启动由单实例插件把参数转给已运行实例；Linux 没有接入口。路径一律先进 Rust 侧的 `PENDING_OPEN_PATHS` 缓冲，再发 `marklock://open-paths`，前端用 `take_pending_open_paths` 一次取干——事件不缓冲，冷启动时先于 `listen()` 触发就丢了，所以缓冲必须放后端，取干也保证不重复建页签。监听分两处：`EditorView` 在位时直接取；不在编辑器页（设置 / 解锁）时由常驻的 `App.vue` 置 `pendingOpenPathsNavigate` 并跳回 `/editor`，`EditorView` 在 `onMounted` 末尾消费——那时 `_sessionRestore` 已赋值，能与冷启动恢复串行。
 - **导出**：页签右键、侧边栏与工作目录的节点右键、「更多」菜单、macOS 主菜单里，「导出 HTML」/「导出 HTML（单文件）」/「导出 PDF」三项收进一个「导出」子菜单（自定义右键菜单的 `kind:'sub'` 项靠 CSS `:hover` 展开；子菜单宽 224px，靠近右边界时由 `subLeft` 翻到左侧）。三个入口共用 `exportRenderedDoc(f, { inlineAll, forPdf })`：正文走预览同一套 `renderMarkdown`（渲前临时把相对链接基准指向被导出的那个文件，非激活页签也能导对图），再去掉离线页里没用的代码块复制按钮、给任务复选框补 `disabled` 保持只读观感。常规 HTML 把本地资源复制进 `<导出名>.dat/` 并改写相对链接（单个复制失败时图片退回内联 data URL，其余原样保留）；单文件 HTML 与 PDF 一律全部内联成 data URL，非图片附件的链接补 `download` 属性保住原文件名——PDF 的隐藏 WebView 没有 base URL，不自包含就什么都渲染不出来。PDF 版式按平台给不同 px 使 pt 相等（mac 595/11.25、其余 793/15），`@page { margin: 0 }` 把留白交给 `.md` 内边距，图片 / 代码块 / 表格 `break-inside: avoid`。本页签或所属库锁定时没有明文可渲染，子菜单整体置灰；Linux 无静默渲染 API，四处菜单都不给「导出 PDF」这一项（`lib/platform.ts` 的 `isLinux`）。
+- **全局显示/隐藏快捷键**：设置页快捷键分区新增录制框（`SettingsView.vue` 的 `startRecordShortcut` / `onRecordKey` / `applyShortcut`），按下组合后按 `KeyboardEvent.code`（不是 `key`，避免大小写与输入法干扰）拼成 Tauri accelerator 串（`CmdOrCtrl`/`Alt`/`Shift` + 键名，F1–F24 允许无修饰键，其余必须有修饰键），存进 `settings.showHideWindowShortcut` 并调用 `set_show_hide_shortcut` 注册；注册失败（已被系统占用等）**回滚到旧值再重新注册旧值**，避免界面显示一个没生效的快捷键。启动时 `App.vue` 在非便签窗分支同步一次；用户改值只由设置页下发，两处不重复注册。录制用 window 捕获阶段的 `keydown`（早于编辑器与页面自身处理），组件卸载时反注册监听。
+- **同名页签的目录副标题**：`EditorView.vue` 的计算属性 `tabSubtitles` 由 `listSubtitles` 按 `fileDisplayName` 分组，只给**撞名**的页签生成副标题，逐级向上取最近的目录段直到在该组内唯一，仍不唯一则退到完整相对目录。目录基准 `tabRelDir` 按库类型分流：单文件库取 `#` 后的库内相对路径、目录库相对 `vaultId`、工作目录内明文相对 `workdirRoot`、其余取绝对路径的 dirname；新建草稿与已锁定库文件返回空串（不泄露真实路径，与页签 tooltip 的锁定态口径一致）。渲染为顶栏 `.tab-sub` 与侧栏 `.dir-sub` 两处小字。
 - **i18n**：`src/locales/{zh,en}.ts`，zh 为原文，en 结构一一对应；仅收录用户可见文案。
 
 ## 目录结构
@@ -246,7 +249,7 @@ MarkLock/
 - **窗口单例**：首次唤出时创建、之后复用（create-once），隐藏而非销毁，避免每次弹出都重建 WebView 带来的延迟与内存抖动。
 - **圆角外观**：无边框 + 窗口透明（Rust `transparent(true)`，macOS 需 Cargo feature `macos-private-api` 与配置里的 `app.macOSPrivateApi` 同时开启）+ `.sticky` 自绘 12px 圆角和 1px 边框，`overflow: hidden` 把标题栏与正文一并裁成圆角；前端按 `main.ts` 写入的 `html[data-window="sticky"]` 标记把 `html/body/#app` 与启动屏底色透出，否则四角仍是方角。
 - **拖边缩放**：右下角一块 16px 不可见热区，用 pointer capture + 每帧一次的 `setSize` 自行跟手（CSS 像素 × `scaleFactor` 换算成物理像素，下限与 Rust `min_inner_size` 的 300×220 对齐）。不走系统原生缩放：Windows 的原生 sizing 循环会在开始瞬间切一次焦点、触发 WebView `blur`，和「失焦即收起」冲突。相应地，收起前先问 `sticky_is_active`（Windows 直接比对前台窗口句柄），窗口还在前台就忽略这次 blur；macOS 不显示热区，无边框窗的边缘本就能拖。
-- **唤出路径**：托盘 / 菜单栏图标的左、右键动作各自可在设置里指定（弹出菜单 / 显示主界面 / 弹出便签；默认 macOS 左键弹便签、其余平台左键显示主界面、右键弹菜单）——非「弹出菜单」的键由 Rust 关掉系统自动弹菜单并改收 Click 事件（Down），故 macOS 左键同样可用；两键都不绑菜单时设置页会给提醒，以及**屏幕热角**——Rust 侧轮询鼠标坐标，在指定角落连续停留超过设定时长后触发弹出；可选"必须按住修饰键"作为二次确认，避免路过角落误触。便签从触发的那个角落弹出；热角唤出不夺焦，靠「未交互即隐藏」兜底——弹出后鼠标不再移动、就在原地一点（点桌面 / 菜单栏 / 别的窗口），便签立即收起让路，因为这一击说明用户要的是光标下的东西而不是便签；光标落在便签内不算（那一击点在便签上，交给前端的 pointerdown 认领）。坐标或便签边界取不到时按「不算让路点击」处理——宁可这次不收，也不把点在便签上的一击误判成外面。
+- **唤出路径**：托盘 / 菜单栏图标的左、右键动作各自可在设置里指定（弹出菜单 / 显示主界面 / 弹出便签；默认 macOS 左键弹便签、其余平台左键显示主界面、右键弹菜单）——非「弹出菜单」的键由 Rust 关掉系统自动弹菜单并改收 Click 事件（Down），故 macOS 左键同样可用；绑「弹出便签」的键是**开关**——便签窗当前可见（只判 `is_visible()`）时再点改为收起：先 `emit` 一条 `marklock://sticky-hide`（前端监听里做静默落盘），随即 `hide()`，与托盘菜单里隐藏便签那条同语义；不可见时才走原来的就近摆到图标旁。两键都不绑菜单时设置页会给提醒，以及**屏幕热角**——Rust 侧轮询鼠标坐标，在指定角落连续停留超过设定时长后触发弹出；可选"必须按住修饰键"作为二次确认，避免路过角落误触。便签从触发的那个角落弹出；热角唤出不夺焦，靠「未交互即隐藏」兜底——弹出后鼠标不再移动、就在原地一点（点桌面 / 菜单栏 / 别的窗口），便签立即收起让路，因为这一击说明用户要的是光标下的东西而不是便签；光标落在便签内不算（那一击点在便签上，交给前端的 pointerdown 认领）。坐标或便签边界取不到时按「不算让路点击」处理——宁可这次不收，也不把点在便签上的一击误判成外面。
 - **托盘菜单文案按平台分叉**：macOS 沿用系统惯例（「打开 MarkLock」「偏好设置」「退出 MarkLock」，两段分隔线）；Windows / Linux 的托盘菜单由系统绘制，字号、行高、左侧留白、通栏分隔线都改不动，能控的只有项数与字长，因此取短标签（「显示主界面」「设置」「退出」）且只在退出前留一条分隔线，避免菜单被拉得松散。文案随界面语言在 `build_tray_menu` 里按 `MENU_LANG` 生成，切换语言时重建。
 - **内容源**：任意 `.md` 明文或 `.mdl` 加密文件；所在库锁定时便签内直接给密码框解锁。`.mdlb` 是多文件容器，暂不作为单个便签源。
 - **读取失败要说清是哪种失败**：读不到正文不能一律当作「库未解锁」——明文笔记根本没有库可解，误显示密码框等于把人卡在一个按了没反应的表单上。故按原因分流：库未解锁走解锁表单，其余（IO 失败、库文件被移动）显示后端给出的原因加重试按钮；判别依据是后端错误消息里的固定中文文案，后端措辞变了这里要跟着改。
@@ -359,6 +362,7 @@ doc/ui-prototype/
 - 提交前在 `src-tauri/` 跑 `cargo test --lib`，确认加密核心无回归。
 - 一批文件里「逐个换密钥再写盘」的变换一律**先算完所有新字节、再统一落盘**（`rewrap_assets` / `rewrite_dir_deks`）：边解析边写会在中途报错时留下半新半旧的库，那比直接失败严重得多。
 - 可能长时间阻塞的磁盘读写命令走 `spawn_crypto`（阻塞线程池），不放在主线程同步执行——等待期间 WebView 会冻住，前端的 loading 提示来不及渲染。
+- 快捷键芯片（`.kbd`）与设置页的录制框用系统 UI 字体（`-apple-system` / `Segoe UI` 栈），不用 `--mono`：等宽字体会把 ⇧、⌥ 这类修饰键符号画得又小又靠下，看着像缺字。
 - 较大改动先开 Issue 对齐方向。
 
 ## 技术栈一览
@@ -373,3 +377,4 @@ doc/ui-prototype/
 | 加密 | Rust：`aes-gcm` / `argon2` / `zeroize` | 密钥操作全部在 Rust 侧 |
 | macOS 系统集成 | `objc2` / `objc2-app-kit` / `objc2-foundation` | 便签与热角定位避开 Dock（`NSScreen.visibleFrame`）、iCloud「仅在线」文件主动召回（`NSFileManager`）；锁屏检测与光标/按键态走 CoreGraphics 外部声明，不引额外 crate。全部只在 macOS target 声明 |
 | 导出 PDF | macOS：`objc2-web-kit` / `objc2-pdf-kit` / `block2`；Windows：`webview2-com` / `windows` | 用系统 WebView 自带的打印接口在隐藏窗口里静默生成（WKWebView `createPDFWithConfiguration` 逐页截取后由 PDFKit 合并；WebView2 `PrintToPdfStream` 直接出流），不引第三方 PDF 引擎、也不需要 wkhtmltopdf；依赖分别只在对应 target 声明 |
+| 全局快捷键 | `tauri-plugin-global-shortcut` 2（底层 `global-hotkey`） | 「显示 / 隐藏主界面」要在主窗隐藏或失焦时也能唤起，应用内快捷键做不到，只能挂系统级钩子。macOS 走 Carbon `RegisterEventHotKey`，Windows 走 `RegisterHotKey`，Linux 走 x11rb（仅 X11 会话）；accelerator 由前端按设置动态注册 / 反注册，不预占任何组合 |

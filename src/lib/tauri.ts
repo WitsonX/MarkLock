@@ -228,6 +228,12 @@ export function showMainWindow() {
   return invoke<void>('show_main_window')
 }
 
+/** 设置 / 更新「显示 / 隐藏主界面」的全局快捷键；`shortcut` 为 Tauri accelerator 字符串，
+ *  空串表示清除。注册失败（解析错误 / 已被系统占用）时后端返回可读错误供前端提示并回滚。 */
+export function setShowHideShortcut(shortcut: string) {
+  return invoke<void>('set_show_hide_shortcut', { shortcut })
+}
+
 /** 用户已点进便签：解除「移开即隐藏」，此后由 blur/Esc/关闭按钮收起。 */
 export function stickyEngage() {
   return invoke<void>('sticky_engage')

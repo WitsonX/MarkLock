@@ -680,6 +680,12 @@ static STICKY_MODIFIER: AtomicU8 = AtomicU8::new(3);
 /// 应用已运行时的二次打开则靠信号事件触发同一拉取逻辑（drain 保证不重复）。
 static PENDING_OPEN_PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// 当前已注册的「显示 / 隐藏主界面」全局快捷键字符串（如 `CmdOrCtrl+Alt+H`）。
+/// 存字符串而非 Shortcut：重新设置时需先反注册旧值，且插件回调只比对按下的是否为当前值。
+/// None 表示未注册（默认为空，用户可在设置页录制）。
+#[cfg(desktop)]
+static SHOW_HIDE_ACCEL: Mutex<Option<String>> = Mutex::new(None);
+
 // ==================== Tauri 命令（前端 invoke 的入口） ====================
 
 /// 把 CPU 密集的加密操作（Argon2id 派生约 1s）放到阻塞线程池执行。
@@ -1133,6 +1139,26 @@ fn reveal_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 切换主窗口显隐（供「显示 / 隐藏主界面」全局快捷键回调）：
+/// 仅当窗口「可见 + 未最小化 + 已取得焦点（在最前）」时按快捷键才隐藏；
+/// 其余情形（隐藏 / 最小化 / 虽可见但被其它 App 挡在后面）一律提到最前：取消最小化 + 显示 + 聚焦。
+/// 「可见但失焦」走提到最前而非隐藏，避免热键在窗口被别的 App 遮住时反而把它收掉、够不着。
+#[cfg(desktop)]
+fn toggle_main_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window(MAIN_WINDOW) {
+        let visible = win.is_visible().unwrap_or(false);
+        let minimized = win.is_minimized().unwrap_or(false);
+        let frontmost = win.is_focused().unwrap_or(false);
+        if visible && !minimized && frontmost {
+            let _ = win.hide();
+        } else {
+            let _ = win.unminimize();
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+}
+
 /// 创建系统托盘（全平台）：显示主窗口 / 全部锁定 / 退出。菜单文案随 MENU_LANG 取中/英，
 /// 语言切换时由 set_native_menu_lang 按 TRAY_ID 取回托盘重建。图标用默认窗口图标。
 /// 托盘菜单事件由本托盘的 on_menu_event 就地处理（区别于 macOS 原生菜单的全局 handler）。
@@ -1184,22 +1210,35 @@ fn install_tray(handle: &tauri::AppHandle) -> tauri::Result<()> {
                     // 显示主界面：与菜单「打开 MarkLock」同语义（唤回隐藏/最小化态并聚焦）。
                     TRAY_ACT_MAIN => reveal_main_window(app),
                     TRAY_ACT_STICKY => {
-                        // 就近摆在图标旁：rect 有效则用图标矩形（转物理像素；OS 上报的托盘 rect 实际为物理，
-                        // scale 仅对 Logical 回退有意义），退化（尺寸 0）时回退到光标位置。
-                        let scale = app
-                            .primary_monitor()
-                            .ok()
-                            .flatten()
-                            .map(|m| m.scale_factor())
-                            .unwrap_or(1.0);
-                        let rp: tauri::PhysicalPosition<i32> = rect.position.to_physical(scale);
-                        let rs: tauri::PhysicalSize<u32> = rect.size.to_physical(scale);
-                        let anchor = if rs.width > 0 && rs.height > 0 {
-                            TrayAnchor { x: rp.x as f64, y: rp.y as f64, w: rs.width as f64, h: rs.height as f64 }
+                        // 切换语义：便签已显示 → 再点收起（与菜单键隐藏同语义：先 emit sticky-hide 让前端
+                        // 静默落盘未保存内容，再 hide）；否则就近弹出到图标旁。
+                        let sticky_shown = app
+                            .get_webview_window(STICKY_WINDOW)
+                            .map(|w| w.is_visible().unwrap_or(false))
+                            .unwrap_or(false);
+                        if sticky_shown {
+                            if let Some(win) = app.get_webview_window(STICKY_WINDOW) {
+                                let _ = win.emit("marklock://sticky-hide", ());
+                                let _ = win.hide();
+                            }
                         } else {
-                            TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
-                        };
-                        let _ = show_sticky_at(app, Some(anchor), true, false);
+                            // 就近摆在图标旁：rect 有效则用图标矩形（转物理像素；OS 上报的托盘 rect 实际为物理，
+                            // scale 仅对 Logical 回退有意义），退化（尺寸 0）时回退到光标位置。
+                            let scale = app
+                                .primary_monitor()
+                                .ok()
+                                .flatten()
+                                .map(|m| m.scale_factor())
+                                .unwrap_or(1.0);
+                            let rp: tauri::PhysicalPosition<i32> = rect.position.to_physical(scale);
+                            let rs: tauri::PhysicalSize<u32> = rect.size.to_physical(scale);
+                            let anchor = if rs.width > 0 && rs.height > 0 {
+                                TrayAnchor { x: rp.x as f64, y: rp.y as f64, w: rs.width as f64, h: rs.height as f64 }
+                            } else {
+                                TrayAnchor { x: position.x, y: position.y, w: 0.0, h: 0.0 }
+                            };
+                            let _ = show_sticky_at(app, Some(anchor), true, false);
+                        }
                     }
                     // 菜单键：系统即将弹菜单；若便签正显示，先立即隐藏
                     // 避免叠在菜单上（菜单在托盘图标处弹出，与便签锚点重合），
@@ -1604,6 +1643,36 @@ fn show_main_window(app: tauri::AppHandle) {
         let _ = win.show();
         let _ = win.set_focus();
     }
+}
+
+/// 设置 / 更新「显示 / 隐藏主界面」的全局快捷键。`shortcut` 为 Tauri accelerator 字符串
+/// （如 `CmdOrCtrl+Alt+H`）；空串表示清除（反注册旧值）。先反注册上一个再注册新值，
+/// 注册失败（解析错误或已被系统占用）时返回可读错误，且不改动已存记录，便于前端回滚提示。
+#[cfg(desktop)]
+#[tauri::command]
+fn set_show_hide_shortcut(app: tauri::AppHandle, shortcut: String) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let accel = shortcut.trim().to_string();
+    let gs = app.global_shortcut();
+    // 先取旧值并释放锁，避免注册失败时回滚路径里重复加锁死锁
+    let prev = SHOW_HIDE_ACCEL.lock().map_err(|e| e.to_string())?.clone();
+    if let Some(p) = prev.as_deref() {
+        let _ = gs.unregister(p);
+    }
+    if accel.is_empty() {
+        *SHOW_HIDE_ACCEL.lock().map_err(|e| e.to_string())? = None;
+        return Ok(());
+    }
+    gs.register(accel.as_str()).map_err(|e| e.to_string())?;
+    *SHOW_HIDE_ACCEL.lock().map_err(|e| e.to_string())? = Some(accel);
+    Ok(())
+}
+
+/// 非桌面平台（本应用不发布移动端）：保留命令注册以兼容 invoke 签名，但不实际注册。
+#[cfg(not(desktop))]
+#[tauri::command]
+fn set_show_hide_shortcut(_app: tauri::AppHandle, _shortcut: String) -> Result<(), String> {
+    Ok(())
 }
 
 /// 便签「设置」按钮：唤回主窗口（隐藏到托盘 / 最小化后）并通知其跳转设置页。
@@ -3124,6 +3193,22 @@ pub fn run() {
             Some(vec!["--autostarted"]),
         ))
         .plugin(tauri_plugin_dialog::init())
+        // 全局快捷键：为「显示 / 隐藏主界面」提供系统级钩子（主窗隐藏 / 失焦时仍可唤起）。
+        // 具体 accelerator 由前端按设置调用 set_show_hide_shortcut 动态注册；本处只装回调。
+        // 目前仅注册该一个快捷键，故 Pressed 直接切换主窗（参数下划线命名以免非桌面目标未用告警）。
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|_app, _shortcut, _event| {
+                    #[cfg(desktop)]
+                    {
+                        use tauri_plugin_global_shortcut::ShortcutState;
+                        if _event.state() == ShortcutState::Pressed {
+                            toggle_main_window(_app);
+                        }
+                    }
+                })
+                .build(),
+        )
         // 记住窗口上次关闭时的大小（主窗另记位置），下次启动恢复。
         // 仅取 POSITION|SIZE：不纳入 VISIBLE，以免与「开机自启隐藏主窗」逻辑相互打架。
         // 便签窗仍纳入跟踪以记住「大小」，但 skip_initial_state 关掉插件的自动恢复
@@ -3170,6 +3255,7 @@ pub fn run() {
             sticky_is_active,
             open_settings,
             show_main_window,
+            set_show_hide_shortcut,
             sticky_engage,
             set_sticky_corner,
             set_hot_corner,

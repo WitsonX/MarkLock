@@ -106,6 +106,8 @@ export default defineComponent({
       tauri.setStickyCorner(settings.value.hotCorner.corner).catch(() => {})
       // 同步热角开关、停留时长与修饰键门控到后端轮询线程；启动时先同步一次。
       syncHotCorner()
+      // 同步「显示 / 隐藏主界面」全局快捷键到后端（注册 / 反注册）；启动时先同步一次（默认空即不注册）。
+      tauri.setShowHideShortcut(settings.value.showHideWindowShortcut).catch(() => {})
 
       // 便签窗「设置」按钮：Rust 已唤回主窗，这里跳转设置页并定位到「便携便签」分区
       // （tab=sticky 由 SettingsView 读取；便签是独立 webview，改不了主窗路由）。
@@ -246,6 +248,8 @@ export default defineComponent({
     'settings.hotCorner.modifier'() {
       this.syncHotCorner()
     },
+    // 注：「显示 / 隐藏主界面」快捷键的用户变更不在这里下发，而由设置页就地调用 + 失败回滚（需即时反馈）；
+    // 本文件仅负责启动时同步一次（见上方 setShowHideShortcut），避免两处重复注册同一热键。
   },
 })
 </script>

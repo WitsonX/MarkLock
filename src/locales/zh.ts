@@ -670,6 +670,11 @@ export default {
     },
     keys: {
       h2: '快捷键', desc: '全局与编辑器快捷键（macOS 用 ⌘，Windows/Linux 用 Ctrl）',
+      gGlobal: '全局',
+      showHide: '显示 / 隐藏主界面',
+      showHideD: '系统级全局热键，主窗隐藏或失焦时也能唤起；默认未设置，点击录制框按下组合键',
+      shortcutRecord: '点击录制', shortcutRecording: '按下快捷键（Esc 取消）',
+      shortcutClear: '清除', shortcutNeedMod: '请至少搭配一个修饰键（⌘/Ctrl/Alt/Shift），或直接使用 F1–F12',
       gFile: '文件与页签',
       save: '保存文件', new: '新建文件', open: '打开文件', closeTab: '关闭当前页签', reopenTab: '重新打开已关闭页签',
       reopenTabD: '{mod} + ⇧ + T（仅本次启动期间，最多撤销 20 个）',

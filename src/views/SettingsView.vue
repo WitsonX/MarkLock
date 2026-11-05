@@ -63,6 +63,8 @@ export default defineComponent({
       skinDeleteId: '',
       // 色板分组（静态清单，直接引用 lib/skins 的定义）
       skinGroups: SKIN_TOKEN_GROUPS,
+      // 「显示 / 隐藏主界面」全局快捷键是否处于录制态（录制时挂 window keydown 捕获）
+      recordingShortcut: false,
     }
   },
   computed: {
@@ -254,6 +256,8 @@ greet('MarkLock');`
     ;(this as any)._searchIndex = null
     // 编辑到一半直接离开设置页：撤掉预览样式，避免 data-skin 停在 __preview__ 上
     if (this.skinDraft) previewCustomSkin(null, this.store.settings.skin)
+    // 录制中离开：摘掉全局 keydown 捕获，避免残留监听影响其它页面
+    this.stopRecordShortcut()
   },
   watch: {
     // 草稿任何改动（令牌、名称、高级 CSS）即时预览，所见即所得
@@ -273,6 +277,11 @@ greet('MarkLock');`
     active() {
       // 切换分类时重新应用高亮与「无结果」提示
       this.applySearch()
+      // 各 pane 共用同一 .s-body 滚动容器（v-show 切换），切分区时把内容区滚回顶部，
+      // 避免上一分区（如通用）的滚动位置残留到下一分区（如外观）。
+      // 搜索跳转的 scrollIntoView 在 $nextTick 中执行、晚于本同步 watcher，不受影响。
+      const el = this.$refs.bodyEl as HTMLElement | undefined
+      if (el) el.scrollTop = 0
     },
     currentLang() {
       // 语言切换后标题/描述变化，重新采集搜索索引
@@ -291,6 +300,93 @@ greet('MarkLock');`
     /** 设置托盘某个鼠标键的动作（左/右键各一项，另一键保持不变）。 */
     setTrayAction(key: 'trayLeftAction' | 'trayRightAction', action: 'menu' | 'main' | 'sticky') {
       this.store.updateSettings({ [key]: action } as Pick<Settings, 'trayLeftAction' | 'trayRightAction'>)
+    },
+
+    // ---------- 「显示 / 隐藏主界面」全局快捷键录制 ----------
+    /** 把存储的 Tauri accelerator（如 `CmdOrCtrl+Alt+H`）转成展示符号（macOS 用 ⌘//⇧，其它用 Ctrl/Alt/Shift）。 */
+    accelDisplay(accel: string): string {
+      if (!accel) return ''
+      const mac = isMac
+      const keyMap: Record<string, string> = {
+        Space: '␣', Enter: '↵', Tab: '⇥', Backspace: '⌫', Delete: 'Del',
+        ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
+        Minus: '−', Equal: '=', Comma: ',', Period: '.', Slash: '/', Semicolon: ';',
+      }
+      const parts = accel.split('+').map((tok) => {
+        switch (tok) {
+          case 'CmdOrCtrl': return this.modKey
+          case 'Command': case 'Cmd': return '⌘'
+          case 'Super': case 'Win': return mac ? '⌘' : 'Win'
+          case 'Control': case 'Ctrl': return mac ? '⌃' : 'Ctrl'
+          case 'Alt': case 'Option': return this.altKey
+          case 'Shift': return mac ? '⇧' : 'Shift'
+          default: return keyMap[tok] || (tok.length === 1 ? tok.toUpperCase() : tok)
+        }
+      })
+      return parts.join(mac ? ' ' : ' + ')
+    },
+    /** 把 KeyboardEvent.code 映射为 Tauri accelerator 的键名（非字母数字 / 非白名单返回空串表示忽略）。 */
+    codeToAccelKey(code: string): string {
+      const letter = /^Key([A-Z])$/.exec(code)
+      if (letter) return letter[1]
+      const digit = /^Digit([0-9])$/.exec(code)
+      if (digit) return digit[1]
+      if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code
+      const allow = ['Space', 'Enter', 'Tab', 'Backspace', 'Delete', 'Insert', 'Home', 'End',
+        'PageUp', 'PageDown', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+        'Minus', 'Equal', 'Comma', 'Period', 'Slash', 'Semicolon', 'Quote', 'Backquote',
+        'BracketLeft', 'BracketRight', 'Backslash']
+      return allow.includes(code) ? code : ''
+    },
+    /** 开始录制：挂 window 捕获阶段 keydown（先于编辑器等处理，避免录入到正文）。 */
+    startRecordShortcut() {
+      if (this.recordingShortcut) return
+      this.recordingShortcut = true
+      ;(this as any)._onRecordKey = (e: KeyboardEvent) => this.onRecordKey(e)
+      window.addEventListener('keydown', (this as any)._onRecordKey, true)
+    },
+    /** 结束录制并摘掉监听（幂等）。 */
+    stopRecordShortcut() {
+      this.recordingShortcut = false
+      if ((this as any)._onRecordKey) {
+        window.removeEventListener('keydown', (this as any)._onRecordKey, true)
+        ;(this as any)._onRecordKey = null
+      }
+    },
+    /** 录制中的一次按键：Esc 取消、Backspace 清除、组合修饰键+合法键生成 accelerator 并应用。 */
+    onRecordKey(e: KeyboardEvent) {
+      e.preventDefault()
+      e.stopPropagation()
+      if (e.key === 'Escape') { this.stopRecordShortcut(); return }
+      if (e.key === 'Backspace' || e.key === 'Delete') { this.applyShortcut(''); this.stopRecordShortcut(); return }
+      const mods: string[] = []
+      // 主修饰键：macOS 以 ⌘(meta)、其它以 Ctrl 归一为 CmdOrCtrl；另收 Alt / Shift
+      if (e.metaKey || e.ctrlKey) mods.push('CmdOrCtrl')
+      if (e.altKey) mods.push('Alt')
+      if (e.shiftKey) mods.push('Shift')
+      const key = this.codeToAccelKey(e.code)
+      if (!key) return // 纯修饰键按下或非法键：继续等待
+      const isFunc = /^F([1-9]|1[0-9]|2[0-4])$/.test(e.code)
+      if (mods.length === 0 && !isFunc) {
+        message.warning(this.$t('settings.keys.shortcutNeedMod'))
+        return
+      }
+      this.applyShortcut([...mods, key].join('+'))
+      this.stopRecordShortcut()
+    },
+    /** 应用快捷键：乐观写入设置 + 调后端注册；失败回滚旧值并提示（旧值重新注册以保持一致）。 */
+    async applyShortcut(accel: string) {
+      const prev = this.store.settings.showHideWindowShortcut
+      if (prev === accel) return
+      this.store.updateSettings({ showHideWindowShortcut: accel })
+      try {
+        await tauri.setShowHideShortcut(accel)
+      } catch (err) {
+        // 回滚：恢复旧值并重新下发（旧值若原本有效则重新注册）
+        this.store.updateSettings({ showHideWindowShortcut: prev })
+        tauri.setShowHideShortcut(prev).catch(() => {})
+        message.error(String(err))
+      }
     },
 
     // ---------- 界面元素勾选清单 ----------
@@ -733,7 +829,7 @@ greet('MarkLock');`
       </nav>
 
       <!-- 内容区 -->
-      <div class="s-body">
+      <div class="s-body" ref="bodyEl">
         <!-- 通用 -->
         <div v-show="active === 'general'" class="s-pane" data-pane="general">
           <h2>{{ $t('settings.general.h2') }}</h2>
@@ -1105,6 +1201,24 @@ greet('MarkLock');`
         <div v-show="active === 'keys'" class="s-pane" data-pane="keys">
           <h2>{{ $t('settings.keys.h2') }}</h2>
           <div class="desc">{{ $t('settings.keys.desc') }}</div>
+          <div class="group">
+            <div class="group-head">{{ $t('settings.keys.gGlobal') }}</div>
+            <div class="row" data-key="kb-showhide" data-keywords="显示 隐藏 主界面 全局 快捷键 window show hide 唤起">
+              <div class="info"><div class="t">{{ $t('settings.keys.showHide') }}</div><div class="d">{{ $t('settings.keys.showHideD') }}</div></div>
+              <div
+                class="kbd-record"
+                :class="{ recording: recordingShortcut, filled: !!store.settings.showHideWindowShortcut }"
+                @click="recordingShortcut ? stopRecordShortcut() : startRecordShortcut()"
+              >
+                <template v-if="recordingShortcut">{{ $t('settings.keys.shortcutRecording') }}</template>
+                <template v-else-if="store.settings.showHideWindowShortcut">
+                  <span class="kbd-val">{{ accelDisplay(store.settings.showHideWindowShortcut) }}</span>
+                  <span class="kbd-clear" :title="$t('settings.keys.shortcutClear')" @click.stop="applyShortcut('')">✕</span>
+                </template>
+                <template v-else>{{ $t('settings.keys.shortcutRecord') }}</template>
+              </div>
+            </div>
+          </div>
           <div class="group">
             <div class="group-head">{{ $t('settings.keys.gFile') }}</div>
             <div class="row" data-key="kb-save" data-keywords="保存 save 文件">
@@ -1565,6 +1679,23 @@ greet('MarkLock');`
 
 .danger-zone { border-color: #ffccc7; }
 .danger-zone .group-head { background: var(--red-bg); color: #cf1322; }
+
+/* 全局快捷键录制框：空态提示、录制态高亮、已设值显示 + 清除叉 */
+.kbd-record {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-width: 108px; justify-content: center;
+  padding: 4px 12px; cursor: pointer;
+  /* 修饰键符号（⌘⌥⌃⇧）用系统 UI 字体渲染更饱满：等宽字体（SF Mono/Menlo）会把 ⇧ 画得又小又靠下 */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: 14px; color: var(--text-2);
+  background: var(--hover); border: 1px solid var(--border);
+  border-bottom-width: 2px; border-radius: 6px;
+  user-select: none;
+}
+.kbd-record:hover { border-color: var(--primary); }
+.kbd-record.recording { border-color: var(--primary); color: var(--primary); background: var(--primary-bg); }
+.kbd-record .kbd-clear { color: var(--text-4); font-size: 12px; padding: 0 2px; border-radius: 3px; }
+.kbd-record .kbd-clear:hover { color: #cf1322; background: var(--border); }
 
 /* 关于页内容已抽至 src/components/AboutCard.vue（与 App.vue 弹出的独立「关于」对话框共用） */
 

@@ -669,6 +669,11 @@ export default {
     },
     keys: {
       h2: 'Shortcuts', desc: 'Global and editor shortcuts (⌘ on macOS, Ctrl on Windows/Linux)',
+      gGlobal: 'Global',
+      showHide: 'Show / hide main window',
+      showHideD: 'A system-wide hotkey that works even when the main window is hidden or unfocused; unset by default — click the box and press a combination',
+      shortcutRecord: 'Click to record', shortcutRecording: 'Press a shortcut (Esc to cancel)',
+      shortcutClear: 'Clear', shortcutNeedMod: 'Add at least one modifier (⌘/Ctrl/Alt/Shift), or use a standalone F1–F12',
       gFile: 'Files & Tabs',
       save: 'Save file', new: 'New file', open: 'Open file', closeTab: 'Close current tab', reopenTab: 'Reopen closed tab',
       reopenTabD: '{mod} + ⇧ + T (this session only, up to 20 undos)',

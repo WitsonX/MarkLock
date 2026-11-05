@@ -222,8 +222,9 @@ html[data-platform='macos'] .titlebar {
 .kbd {
   display: inline-block;
   padding: 1px 6px;
-  font-family: var(--mono);
-  font-size: 12px;
+  /* 修饰键符号（⌘⌥⇧）用系统 UI 字体渲染更饱满，与设置页快捷键录制框一致；等宽字体会把 ⇧ 画得又小又靠下 */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
+  font-size: 13px;
   color: var(--text-2);
   background: var(--hover);
   border: 1px solid var(--border);

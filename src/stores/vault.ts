@@ -245,6 +245,9 @@ export interface Settings {
   quickLaunch: QuickLaunchItem[]
   /** 便签快速启动项的显示模式：仅图标 / 图标加文字 */
   stickyLaunchDisplay: 'icon' | 'iconText'
+  /** 「显示 / 隐藏主界面」全局快捷键（Tauri accelerator 字符串，如 `CmdOrCtrl+Alt+H`）；
+   *  空串表示未设置（默认）。主窗隐藏 / 失焦时也能唤起，故为系统级全局热键。 */
+  showHideWindowShortcut: string
 }
 
 // 导出供 UI 标注「默认」档位（如状态栏字号 / 自动锁定菜单），避免各处硬编码默认值
@@ -310,6 +313,8 @@ export const DEFAULT_SETTINGS: Settings = {
   quickLaunch: [],
   // 快速启动项默认「图标 + 文字」，语义最清晰；纯图标更紧凑可另行选择
   stickyLaunchDisplay: 'iconText',
+  // 「显示 / 隐藏主界面」全局快捷键默认空：需用户在设置页显式录制，避免抢占系统 / 其它应用热键
+  showHideWindowShortcut: '',
 }
 
 function loadRecent(): VaultInfo[] {

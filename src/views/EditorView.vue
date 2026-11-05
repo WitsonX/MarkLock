@@ -314,6 +314,10 @@ export default defineComponent({
     openFiles() {
       return this.store.openFiles
     },
+    /** 同名页签的目录子标题（path → 文案）：仅在显示名冲突时生成，见 listSubtitles。 */
+    tabSubtitles(): Record<string, string> {
+      return this.listSubtitles(this.openFiles)
+    },
     activePath() {
       return this.store.activePath
     },
@@ -5889,9 +5893,54 @@ ${bodyHtml}
       if (ext === 'modified') return this.$t('editor.extModifiedTip')
       return ''
     },
-    /** 页签 tooltip 文案：锁定文件同样不暴露真实路径，未锁定显示完整路径。 */
+    /** 页签 tooltip 文案：锁定文件同样不暴露真实路径，未保存草稿/锁定库文件不生成子标题。 */
     tabTip(f: { path: string; name: string; vaultId: string; encrypted: boolean }) {
       return this.fileTip(f)
+    },
+    /** 页签/条目的「相对所属根目录」路径（不含文件名）：单文件库=库内相对路径、目录库=相对库根、
+     *  工作目录内明文=相对工作目录根、其余明文=绝对路径。锁定库文件与未保存草稿返回空串。 */
+    tabRelDir(f: { path: string; vaultId: string; encrypted: boolean; relPath?: string; isNew?: boolean }): string {
+      if ((f as any).isNew || this.isVaultFileLocked(f)) return ''
+      const dirname = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
+      if (f.encrypted && f.vaultId) {
+        const hash = f.path.indexOf('#')
+        if (hash >= 0) return dirname(f.relPath || f.path.slice(hash + 1))
+        const root = this.normPath(f.vaultId)
+        const p = this.normPath(f.path)
+        return root && p.startsWith(root + '/') ? p.slice(root.length + 1) : dirname(p)
+      }
+      const root = this.normPath(this.workdirRoot)
+      const p = this.normPath(f.path)
+      if (root && p.startsWith(root + '/')) return dirname(p.slice(root.length + 1))
+      return dirname(p)
+    },
+    /** 给一组条目生成「同名才有的目录子标题」：按显示名分组，冲突组内从所属目录名开始，
+     *  逐级向上追加父目录（`a / b`），直到该项的尾部在组内唯一；相对目录用尽仍不唯一
+     *  （如路径互为前缀）时退到完整相对目录。 */
+    listSubtitles(list: { path: string; name: string; vaultId: string; encrypted: boolean }[]): Record<string, string> {
+      const out: Record<string, string> = {}
+      const groups = new Map<string, typeof list>()
+      for (const f of list) {
+        const key = this.fileDisplayName(f)
+        const g = groups.get(key)
+        if (g) g.push(f)
+        else groups.set(key, [f])
+      }
+      for (const g of groups.values()) {
+        if (g.length < 2) continue
+        const partsList = g.map((f) => this.tabRelDir(f).split('/').filter(Boolean))
+        g.forEach((f, i) => {
+          const parts = partsList[i]
+          let label = parts.join(' / ')
+          for (let n = 1; n <= parts.length; n++) {
+            const tail = parts.slice(parts.length - n).join(' / ')
+            const unique = partsList.every((o, j) => j === i || o.slice(o.length - n).join(' / ') !== tail)
+            if (unique) { label = tail; break }
+          }
+          if (label) out[f.path] = label
+        })
+      }
+      return out
     },
     timeAgo(ts: number) {
       if (!ts) return ''
@@ -6071,6 +6120,7 @@ ${bodyHtml}
                 <EncIcon v-if="f.encrypted" class="lead" type="file" :color="fileIconColor(f)" :size="14" />
                 <EncIcon v-else class="lead" type="plain" :color="fileIconColor(f)" :size="14" />
                 <span class="fname">{{ fileDisplayName(f) }}</span>
+                <span v-if="tabSubtitles[f.path]" class="dir-sub">{{ tabSubtitles[f.path] }}</span>
                 <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
                 <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
                 <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" :title="$t('menu.fav')" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
@@ -6299,6 +6349,7 @@ ${bodyHtml}
           <EncIcon v-if="f.encrypted" type="file" :color="fileIconColor(f)" :size="13" />
           <EncIcon v-else type="plain" :color="fileIconColor(f)" :size="13" />
           <span class="tab-name" v-tip="{ text: tabTip(f), place: 'bottom' }">{{ fileDisplayName(f) }}</span>
+          <span v-if="tabSubtitles[f.path]" class="tab-sub" v-tip="{ text: tabTip(f), place: 'bottom' }">{{ tabSubtitles[f.path] }}</span>
           <span class="vt">{{ vaultName(f.vaultId) }}</span>
           <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
           <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
@@ -7220,6 +7271,8 @@ ${bodyHtml}
 }
 .tab .ext.missing, .t-item .ext.missing { border-color: #cf1322; }
 .tab .tab-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 同名页签的目录子标题：小字弱化，空间不足时优先被压缩省略 */
+.tab .tab-sub { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--text-4); font-weight: 400; margin-left: -3px; }
 .tab .vt { font-size: 10px; padding: 0 5px; border-radius: 3px; background: var(--hover); color: #722ed1; flex: 0 0 auto; 
   display: none;
 }
@@ -7368,6 +7421,8 @@ ${bodyHtml}
 .t-item.dragging { opacity: 0.4; }
 .t-item.dragover { box-shadow: inset 0 2px 0 var(--primary); background: var(--primary-bg); }
 .t-item .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 同名条目的目录子标题：紧跟文件名，小字弱化，过长省略 */
+.t-item .dir-sub { flex: 0 1 auto; max-width: 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--text-4); margin-left: -8px; }
 .t-item svg.lead { flex: 0 0 auto; }
 .chev-i { transition: transform 0.15s; }
 .t-item .meta { font-size: 11px; color: var(--text-4); flex: 0 0 auto; }

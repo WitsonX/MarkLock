@@ -88,12 +88,13 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Clicking an attachment in the preview opens document types as a tab, while binaries (zip, images, pdf) raise a save dialog and copy out instead of failing text decoding
 - On macOS, files iCloud has kept "online only" are recalled and downloaded on read with a progress toast, so a few seconds of waiting no longer looks like "failed to read the file"
 - VSCode-style sidebar — open files, open vaults, starred, recent, working directory; groups are reorderable and individually toggleable; switch documents by tabs or by list
+- Open several files with the **same name** and each tab / sidebar entry grows a small directory suffix — only the colliding ones get it, and it lengthens from the nearest folder upward until they are distinguishable
 - Browse the local filesystem tree in the working-directory view, with vaults shown as atomic nodes
 - External-change watching reloads a file when another program rewrites it; if you have unsaved edits it only raises an amber badge instead of clobbering your work
 
 ### Sticky Notes
 
-- Pin any `.md` / `.mdl` file as a sticky note, summoned by clicking the tray (menu-bar) icon
+- Pin any `.md` / `.mdl` file as a sticky note, summoned by clicking the tray (menu-bar) icon — the same click again hides it instead of re-opening it, and any unsaved text is flushed to disk silently on the way out
 - Or use a **hot corner**: hold the pointer in a chosen screen corner for a moment; optionally require a modifier key so brushing past the corner never triggers it
 - Edit / split / preview in one small window, saved straight to ciphertext; if the vault is locked you can type the password right in the note
 - A row of local app shortcuts at the bottom doubles it as a launcher (icon-only or icon + label); each item can carry its own launch arguments (space-separated, quote anything containing a space); in Settings a grip at the head of each item drags to reorder, and that is exactly the order the note shows them in
@@ -105,6 +106,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Skin system: on top of light / dark / follow-system there are six color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox), switchable from the status bar; a skin covers the UI, the source editor, the Markdown preview and exported HTML, and advanced users can build their own (per-token palette plus free-form CSS)
 - English / Chinese UI, adjustable editor font size plus preview font and spacing
 - Full keyboard shortcut set: save, tab navigation (`⌘1…8` jumps to the Nth tab), in-editor find & replace, global search, view-mode switching, formatting, lock-everything
+- **Show / hide the main window** can be bound to a system-wide hotkey (Settings → Shortcuts → Global), so you can call it back even when it is hidden in the tray or fully covered by another app. Nothing is claimed by default — you record the combination yourself, and rebinding immediately releases the old one
 - One click to make MarkLock the default handler for `.md` / `.mdl` / `.mdlb`
 - Optional launch-at-login (can start silently in the background), close-to-tray
 - Restore the previous session on start; silent update checks with a one-click link to the release page
