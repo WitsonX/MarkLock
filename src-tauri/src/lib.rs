@@ -1798,7 +1798,7 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
 
     // 编辑：保留系统剪贴板预定义项（⌘C/⌘V 等），否则覆盖默认菜单后这些快捷键失效。
     // 用 *_with_text 显式给出中文标题，避免预定义项按系统语言显示英文。
-    let find = MenuItemBuilder::with_id("menu:find", ml("编辑器内搜索", "Find in Editor")).accelerator("Cmd+F").build(handle)?;
+    let find = MenuItemBuilder::with_id("menu:find", ml("查找", "Find")).accelerator("Cmd+F").build(handle)?;
     let find_global = MenuItemBuilder::with_id("menu:find-global", ml("全局搜索", "Search Everywhere")).accelerator("Cmd+Shift+F").build(handle)?;
     let edit_submenu = SubmenuBuilder::new(handle, ml("编辑", "Edit"))
         .undo_with_text(ml("撤销", "Undo"))

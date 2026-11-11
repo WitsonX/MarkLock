@@ -99,6 +99,20 @@ function isChrome(el: HTMLElement): boolean {
   return el.classList.contains('code-copy-btn') || el.classList.contains('cc-txt') || el.classList.contains('cc-ico')
 }
 
+/** 原始 HTML 整块保留前先剥掉应用注入的临时搜索高亮（预览内搜索 pv-search / 全局搜索命中定位 pv-hit），
+ *  否则就地编辑回写会把 <mark> 写进源码。行内序列化对 MARK 本就透明穿过（见 inlineNode），
+ *  只有 outerHTML 这条路会把高亮标签原样带出去；用户手写的 <mark>（不带这两个类）不受影响。 */
+function rawHtml(el: HTMLElement): string {
+  if (!el.querySelector('mark.pv-search, mark.pv-hit')) return el.outerHTML
+  const clone = el.cloneNode(true) as HTMLElement
+  for (const m of Array.from(clone.querySelectorAll('mark.pv-search, mark.pv-hit'))) {
+    const parent = m.parentNode
+    if (parent) parent.replaceChild(document.createTextNode(m.textContent ?? ''), m)
+    else m.remove()
+  }
+  return clone.outerHTML
+}
+
 /** 取图片的原始 src：marked 渲染时相对路径被 resolveImgSrc 换成了 asset:// 地址，
  *  反解析必须读 preview.ts 写在 data-src 上的原值，否则回写会把 `a.png` 变成一长串协议地址。
  *  data-src 缺失（老缓存渲染的 DOM、外链）时退回 src。 */
@@ -175,7 +189,7 @@ function inlineNode(node: Node): string {
     }
     default:
       // 其余未知行内元素（<u>、<sub>、<kbd> 等）Markdown 没有对应语法，按原始 HTML 保留
-      return el.outerHTML
+      return rawHtml(el)
   }
 }
 
@@ -241,7 +255,7 @@ function listMd(el: HTMLElement): string {
 /** 表格：对齐信息在 marked 输出的 th/td 的 align 属性上，据此生成定界行。 */
 function tableMd(el: HTMLElement): string {
   const headRow = el.querySelector('thead tr') ?? el.querySelector('tr')
-  if (!headRow) return el.outerHTML
+  if (!headRow) return rawHtml(el)
   const aligns = Array.from(headRow.children).map((c) => (c.getAttribute('align') || '').toLowerCase())
   const rowMd = (tr: Element) =>
     `| ${Array.from(tr.children).map((td) => escapeCell(inlineChildren(td as HTMLElement))).join(' | ')} |`
@@ -328,9 +342,9 @@ function blockMd(el: HTMLElement): string {
       // EditorView 把每个顶层块包进 .mb（data-l 只服务滚动同步，不是正文），拆包继续走块序列化；
       // 其它 div 是用户手写的原始 HTML，整块保留
       if (el.classList.contains('mb')) return blocksMd(el)
-      return el.outerHTML
+      return rawHtml(el)
     default:
-      if (RAW_BLOCK_TAGS.has(t)) return el.outerHTML
+      if (RAW_BLOCK_TAGS.has(t)) return rawHtml(el)
       // 顶层的行内元素（例如以图片单独成段时 marked 仍会给 <p>，这里兜住 <img> 裸挂的情况）
       return trimEnd(escapeLineHead(inlineChildren(el)))
   }

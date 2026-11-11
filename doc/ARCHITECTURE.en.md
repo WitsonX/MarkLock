@@ -127,6 +127,8 @@ src/
 │   ├── filewatch.ts         # External-modification watcher (file-stamp poller)
 │   ├── tooltip.ts           # Global v-tip directive (singleton bubble, never clipped by scrolling)
 │   ├── preview.ts           # Shared marked render layer (code highlight/copy/task lists/image assets)
+│   ├── wysiwyg.ts           # In-place preview editing: DOM→Markdown serializer + execCommand layer
+│   ├── previewSearch.ts     # In-preview find: haystack over the rendered DOM, <mark> hits, navigation
 │   ├── fonts.ts             # Built-in preview font catalog (cross-platform fallback stacks)
 │   ├── skins.ts             # Skin registry: built-in list, token groups, custom-skin CSS generation/injection/live preview
 │   ├── locales/             # zh/en language packs + switching
@@ -278,6 +280,7 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - Scope: unlocked vaults (encrypted content matched after in-memory decryption) + plaintext files in the working directory + open tabs (in-memory content).
 - Matching: character-level, case-insensitive substring; at most 3 hit snippets per file, 100 overall cap.
 - Interaction: 300ms debounce, keyboard up/down selection (wrapping), Enter to open, Esc to close, keyword highlighting, deduplicated results.
+- ⌘F in Preview mode is not part of this: it does not switch views, it searches the rendered DOM — see §6.13.
 
 ### 6.5 Auto-lock
 
@@ -351,6 +354,16 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **The recording side**: while recording, a `keydown` listener is attached to `window` in the **capture phase** (ahead of the editor, so the combination is not typed into the document). Key names come only from `KeyboardEvent.code` mapped through a whitelist (letters / digits / F1–F24 / a set of common control keys), and modifiers are normalized to `CmdOrCtrl` + `Alt` + `Shift`. Anything other than an F key must carry at least one modifier, otherwise the box only warns and keeps waiting; Esc cancels, Backspace / Delete clears, and the listener is removed on unmount.
 - **The plugin callback does not discriminate**: `.with_handler` calls `toggle_main_window` on `Pressed` for *any* registered shortcut. That holds only because exactly one shortcut is ever registered; a second global shortcut requires dispatching by accelerator first.
 - **Platform gaps**: the Linux backend is x11rb and only speaks X11. With no X connection (a Wayland session) its event thread exits immediately, `register` then posts to a dead thread and **returns success** — the hotkey appears set but never fires, with no error anywhere. On macOS F1–F4 are brightness / keyboard-light keys unless "use F1, F2 as standard function keys" is turned on, so a bare F key needs that setting. Recording performs no conflict check either: the hook is system-wide, so binding `CmdOrCtrl+S` steals Save from **every** application and turns it into a window toggle.
+
+### 6.13 In-preview find
+
+- **It searches the rendered result, not the source**: global search searches "every file's source", CodeMirror's panel searches "this document's source", this one searches "the DOM this document rendered into" — only the last can point at the sentence the user actually sees while looking at the preview. The three pipelines differ, so `src/lib/previewSearch.ts` is its own module rather than a reuse of either.
+- **One haystack, `\n` padded at block boundaries**: concatenating the body text nodes of `.md` in document order and running one regex over it is fast, but the tail of one paragraph plus the head of the next would form a hit that exists nowhere on screen. Every block-level element is therefore padded front and back with a `\n` that **maps to no text node**, and a match that cannot be mapped back in full is dropped whole. Inline tags (`strong` / `em` / `a` / `code`) get no padding, so a hit split by inline syntax is still found — it just becomes several `<mark class="pv-search">` in the same group, and navigation lights the whole group. Since the padding is a newline, the `m` flag makes `^` / `$` land on block boundaries, matching the editor's per-line semantics.
+- **Subtrees that are not searched**: controls the app injects itself (the code-block copy button), form controls, scripts and styles, embedded media, and `SVG` — `<mark>` is not a valid SVG child element, so wrapping one would break the graphic.
+- **The highlight is transient chrome, and both exits have to clean it**: re-injecting `v-html` (switching tabs, an external reload, an attachment-cache refresh) discards the marks with the old DOM, so the `renderedPreview` watcher and `commitPreview` re-run the search against the new DOM, and `pvSearchNav` first checks that the current mark is still `isConnected` (in-place editing may have deleted the matched text) before deciding whether to scroll or re-search. The other exit is the dangerous one: typing a single character triggers serialization, so `rawHtml()` in `wysiwyg.ts` strips `mark.pv-search` / `mark.pv-hit` by class name before reading `outerHTML` — otherwise "search, then edit a word" would write a `<mark>` into the source, and the same tag would end up in HTML / PDF exports. The inline path was already transparent to `MARK`, and a `<mark>` the user wrote themselves (without those two classes) is untouched.
+- **The bar does not squeeze the layout**: the outer `.pv-search-row` is a zero-height row with `position:sticky; top:10px; height:0; pointer-events:none`, and the `.pv-search-bar` that actually takes clicks hangs inside it — it floats above the body without costing it a line of height or blocking clicks below. The initial item is the first hit below the top of the viewport (browser-find behaviour), wrapping to the first when everything has scrolled past; the active item is aligned to the top third of the viewport, and a hit inside a horizontally scrollable code block scrolls that block too.
+- **The entry point branches on the mode**: `findAction` opens this bar in Preview mode, while Edit / Split still focus the editor and open CodeMirror's panel (with replace). The native `menu:find` item and ⌘G / ⇧⌘G (intercepted only while the bar is open) use the same test. The bar only requires `pvCanEdit` (pure preview + plaintext available), independent of `settings.previewInlineEdit`, so a read-only preview can still search. The macOS main-menu entry was renamed from "Find in Editor" to plain "Find" accordingly.
+- **The note has none of this**: the sticky note window reuses `wysiwyg.ts` but not `previewSearch.ts`.
 
 ---
 
@@ -437,6 +450,11 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **The plugin callback is written on the assumption that one shortcut exists**: any registered global shortcut's `Pressed` toggles the main window. Adding a second one (say "lock everything now") must come with accelerator dispatch, otherwise the new feature silently hijacks window toggling.
 - **`toggle_main_window` uses `is_focused()` as "frontmost"**: with the main window visible but covered by another app, one press brings it forward instead of hiding it. That matches "make it reachable first", but it is not exactly what the word "toggle" promises — and no focus API distinguishes "visible and frontmost".
 - **Recording accepts F1–F24, the warning text says F1–F12**: the `codeToAccelKey` whitelist and the `shortcutNeedMod` message disagree (beyond F12 there is no physical key on most Macs, yet the code allows F24).
+- **In-preview find rescans everything on every keystroke, with no debounce**: each `input` rebuilds the haystack, re-runs the regex and re-wraps every `<mark>`. Unnoticeable on ordinary documents; a few hundred thousand characters or a code-heavy page will stutter while typing. Adding a debounce first requires deciding whether the stale highlights and hit count "lag behind" the input.
+- **The regex mode takes user input directly and can wedge the webview**: catastrophic backtracking (`(a+)+$` and friends) has no timeout escape in main-thread JavaScript — the only way out is killing the window. Either cap haystack length / matching steps, or drop the regex mode.
+- **"The highlight never reaches the source" rests on a class-name convention**: `rawHtml()` in `wysiwyg.ts` strips exactly two classes, `mark.pv-search` / `mark.pv-hit`. Any future globally injected marker (jump highlight, annotations, revisions) must be added to that selector too; miss one and `<mark>` tags land in the user's document.
+- **⌘F on a locked tab in Preview mode does nothing**: `openPvSearch` is gated on `pvCanEdit` (plaintext required) and simply returns when that fails, without explaining why.
+- **The sticky note has no find**: a small window arguably needs "find in this note" most, yet today you can only switch to Edit and scroll.
 
 ---
 
@@ -458,6 +476,8 @@ Rust side, `cargo test --lib`, covering:
 > PDF export has no automated test: it depends on a real WebView rendering and the OS print interface, which `cargo test --lib` cannot reach. After touching it, verify by hand on all three platforms, covering at least a text-only document, a document with images, and a very long code block (the last is what exposes page clipping).
 
 > The global "show / hide main window" hotkey cannot be tested either — it needs a key event from outside the process. On real hardware, cover three states: the main window hidden in the tray, the main window fully covered by another app, the main window frontmost — one press each, confirming the first two call it back and the third hides it. Then rebind once and confirm the **old key stops working immediately** (if it still fires, the unregister step never ran).
+
+> In-preview find is manual too: it reads the DOM the browser rendered, which `cargo test --lib` cannot reach. Cover at least five cases — ① a phrase formed by the end of one paragraph plus the start of the next must **not** hit; ② a hit split by `**bold**` or inline code lights the whole group and counts as one for ⌘G; ③ with in-place editing on, search then change a word and save — no `<mark>` may appear in the source, nor in an exported HTML; ④ highlights are still there after an external-change reload (re-injection re-runs the search); ⑤ Esc works from both focus positions — inside the input (it calls `stopPropagation`, so it does not also close another layer) and back in the body (the window-level fallback) — closing the bar and restoring the text each time.
 
 ---
 
@@ -491,3 +511,4 @@ Rust side, `cargo test --lib`, covering:
 | A global hotkey was set but pressing it does nothing | The combination is already owned by another app and the registration failed during the startup sync (swallowed by `.catch`); or the session is Wayland, where x11rb has no X connection and registration "succeeds" | Re-record an unused combination in Settings → Shortcuts → Global (a failure now reports itself and rolls back); pick a letter with a modifier; on Wayland, switch to an X11 / XWayland session |
 | One press brings the window forward instead of hiding it | Only "visible + not minimized + focused" hides; when another app covers the main window `is_focused()` is false | By design (reachability first) — press again and it hides; see §6.12 |
 | Clicking the same tray button twice makes the note disappear | The button bound to "open the sticky note" is now a toggle: while the note is visible the next click hides it (flushing unsaved text first) | Not broken — click it again to reopen (see §6.6) |
+| ⌘F in Preview misses a phrase that is clearly on screen | Find runs over the rendered DOM: a "match" spanning blocks (paragraph tail + next paragraph head) is dropped, `SVG` and app-injected controls are not searched, and a locked tab has no plaintext to search | Search a fragment that stays inside one paragraph, or switch to Edit / Split and use the editor's panel (which has replace); see §6.13 |

@@ -21,6 +21,7 @@ import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
 import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, type PreviewFmt } from '../lib/wysiwyg'
+import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
 // 已抽到 src/lib/preview.ts，主编辑器与便携便签共用；本文件仅保留逐块渲染的滚动同步逻辑。
@@ -142,6 +143,17 @@ export default defineComponent({
       pvLinkUrl: '',
       // 弹窗会抢走焦点与选区，打开前存住、确认后放回去
       pvRange: null as Range | null,
+
+      // 预览内搜索（预览模式 ⌘F）：不再切分屏，直接在渲染出的 DOM 里查找。
+      // 查询词与选项在面板关闭后保留，⌘F 重开接着上次搜；命中组是注入的 <mark>，每次搜索重新收集
+      pvSearchOpen: false,
+      pvSearchQuery: '',
+      pvSearchCase: false,
+      pvSearchRegex: false,
+      pvSearchCount: 0,
+      pvSearchIndex: 0,
+      pvSearchBadRe: false,
+      _pvSearchMarks: [] as HTMLElement[][],
 
       // 工作目录根（用户选择的系统目录）
       workdirRoot: '' as string,
@@ -497,6 +509,13 @@ export default defineComponent({
     pvFloatShow(): boolean {
       return this.pvCanEdit && !this.store.settings.showToolbar
     },
+    /** 预览内搜索计数文案：空查询不显示；无效正则 / 无结果各自提示；否则「当前/总数」 */
+    pvSearchCountText(): string {
+      if (!this.pvSearchQuery) return ''
+      if (this.pvSearchBadRe) return this.$t('editor.pvSearchBadRe')
+      if (!this.pvSearchCount) return this.$t('editor.pvSearchNone')
+      return `${this.pvSearchIndex + 1}/${this.pvSearchCount}`
+    },
     /** 预览字体族：将设置映射为 CSS font-family 值。'default' 跟随界面（inherit）；
         其余为显式字体栈。供 .md 内联变量与导出 HTML 共用（导出场景 'default' 回退无衬线栈）。 */
     previewFontStack(): string {
@@ -632,6 +651,8 @@ export default defineComponent({
         this.previewFrozen = false
         this.previewDirty = false
         this.previewHtml = v
+        // 重新注入会重建 DOM，搜索高亮随之消失：面板开着就在新 DOM 上重跑一次
+        if (this.pvSearchOpen) this.$nextTick(() => this.runPvSearch())
       },
     },
     // 离开编辑态（切出预览视图 / 页签被锁 / 关掉设置项）时把 DOM 序列化回源码；
@@ -644,6 +665,10 @@ export default defineComponent({
         return
       }
       if (!v && old) this.commitPreview()
+    },
+    // 预览内搜索只在「预览模式 + 未锁定明文」下有意义：页签被锁 / 切走模式时收起面板
+    pvCanEdit(v: boolean) {
+      if (!v) this.closePvSearch()
     },
     // 切换/打开加密文件页签时，确保其附件已解密到缓存（幂等；已就绪则跳过）
     activeFile: {
@@ -673,7 +698,8 @@ export default defineComponent({
     // 两个锁定页签之间互切时上面的状态不变，靠 activePath 补一次聚焦；
     // 切到未锁定的页签则聚焦编辑器（实例常驻，撤销历史保留）
     'store.activePath'() {
-      // 页签切换前先把上一个文件的就地编辑落回源码：DOM 即将被新文件的渲染结果替换
+      // 切页签先收掉预览内搜索（高亮属于旧文件的 DOM），再把上一个文件的就地编辑落回源码
+      this.closePvSearch()
       this.flushPreviewDom()
       this.focusPwdIfLocked()
       const f = this.activeFile
@@ -957,6 +983,11 @@ export default defineComponent({
         this.closeContextMenu()
         return
       }
+      // Esc 关闭预览内搜索栏（焦点可能已点进预览正文，输入框自己的 keydown 兼顾不到）
+      if (e.key === 'Escape' && this.pvSearchOpen) {
+        this.closePvSearch()
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'w' || e.key === 'W')) {
         // 有打开页签才拦截，否则放行（允许系统关闭窗口）
         if (this.store.openFiles.length > 0) {
@@ -994,17 +1025,12 @@ export default defineComponent({
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
         e.preventDefault()
-        // 切换到编辑或分屏模式，确保编辑器可见
-        if (this.currentMode === 'preview') this.setMode('split')
-        // 等 DOM 更新后再聚焦并打开搜索
-        nextTick(() => {
-          const cm = this.activeEditor()
-          if (cm) {
-            const el = cm.editorRef as HTMLElement | undefined
-            el?.focus()
-            cm.openSearch()
-          }
-        })
+        this.findAction()
+      }
+      // Cmd/Ctrl+G（⇧ 反向）：预览内搜索面板开着时循环命中，与 CodeMirror 搜索面板同语义
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'g' || e.key === 'G') && this.pvSearchOpen) {
+        e.preventDefault()
+        this.pvSearchNav(e.shiftKey ? -1 : 1)
       }
       // Cmd+Shift+F：打开侧边栏并聚焦全局搜索
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
@@ -1296,19 +1322,7 @@ export default defineComponent({
         case 'menu:export-html': this.exportHtml(); break
         case 'menu:export-html-single': this.exportHtmlSingle(); break
         case 'menu:export-pdf': this.exportPdf(); break
-        case 'menu:find': {
-          // 预览模式下无编辑器实例，先切回分屏再定位搜索面板。
-          if (this.currentMode === 'preview') this.setMode('split')
-          nextTick(() => {
-            const cm = this.activeEditor()
-            if (cm) {
-              const el = cm.editorRef as HTMLElement | undefined
-              el?.focus()
-              cm.openSearch()
-            }
-          })
-          break
-        }
+        case 'menu:find': this.findAction(); break
         case 'menu:find-global': {
           if (!this.store.settings.showSidebar) this.store.updateSettings({ showSidebar: true })
           nextTick(() => {
@@ -1372,6 +1386,8 @@ export default defineComponent({
       return !!el.closest('.cm-editor') || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
     },
     setMode(mode: 'edit' | 'split' | 'preview') {
+      // 离开预览先收掉预览内搜索并还原高亮（编辑 / 分屏下 ⌘F 走编辑器搜索面板）
+      if (mode !== 'preview') this.closePvSearch()
       this.currentMode = mode
       this.store.updateSettings({ editorMode: mode })
     },
@@ -1421,6 +1437,8 @@ export default defineComponent({
       this.previewFrozen = false
       this.previewSelfContent = null
       this.previewHtml = this.renderedPreview
+      // 重新注入同样会抹掉搜索高亮：面板开着就重跑
+      if (this.pvSearchOpen) this.$nextTick(() => this.runPvSearch())
     },
     onPreviewCompositionStart() {
       this.previewComposing = true
@@ -1453,6 +1471,93 @@ export default defineComponent({
       const root = this.$refs.previewMd as HTMLElement | undefined
       if (root && enterInTaskItem(e, root)) this.onPreviewEditInput()
     },
+
+    // ---------- 预览内搜索（预览模式 ⌘F，不再跳分屏） ----------
+    /** ⌘F / 原生菜单「查找」的统一入口：预览模式直接在预览里搜；
+     *  编辑 / 分屏仍聚焦编辑器并打开 CodeMirror 搜索面板（带替换）。 */
+    findAction() {
+      if (this.currentMode === 'preview') {
+        this.openPvSearch()
+        return
+      }
+      // 等 DOM 更新后再聚焦并打开搜索
+      nextTick(() => {
+        const cm = this.activeEditor()
+        if (cm) {
+          const el = cm.editorRef as HTMLElement | undefined
+          el?.focus()
+          cm.openSearch()
+        }
+      })
+    },
+    /** 打开预览内搜索栏：重开时恢复上次查询并全选，便于直接改词 */
+    openPvSearch() {
+      if (!this.pvCanEdit) return
+      this.pvSearchOpen = true
+      this.$nextTick(() => {
+        const input = this.$refs.pvSearchInput as HTMLInputElement | undefined
+        if (input) {
+          input.focus()
+          input.select()
+        }
+        if (this.pvSearchQuery) this.runPvSearch()
+      })
+    },
+    /** 关闭面板并还原 DOM（unwrap 高亮）；查询词与选项保留供下次 ⌘F 接着搜 */
+    closePvSearch() {
+      if (!this.pvSearchOpen) return
+      this.pvSearchOpen = false
+      clearPreviewSearch(this.$refs.previewMd as HTMLElement | undefined)
+      this._pvSearchMarks = []
+      this.pvSearchCount = 0
+      this.pvSearchIndex = 0
+      this.pvSearchBadRe = false
+    },
+    /** 跑一次搜索：还原旧高亮后重新包裹命中，起始项取视口顶以下第一个命中 */
+    runPvSearch() {
+      if (!this.pvSearchOpen) return
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      const pane = this.$refs.previewPane as HTMLElement | undefined
+      if (!root || !pane) return
+      const r = runPreviewSearch(root, pane, this.pvSearchQuery, { caseSensitive: this.pvSearchCase, regex: this.pvSearchRegex })
+      this._pvSearchMarks = r.groups
+      this.pvSearchCount = r.groups.length
+      this.pvSearchIndex = r.index
+      this.pvSearchBadRe = r.badRegex
+    },
+    /** 循环定位命中（⏎ / ⇧⏎ / ⌘G / ⇧⌘G / 面板按钮），首尾相接 */
+    pvSearchNav(dir: 1 | -1) {
+      if (!this.pvSearchCount) return
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      const pane = this.$refs.previewPane as HTMLElement | undefined
+      if (!root || !pane) return
+      // 就地编辑可能已把高亮文本删掉（mark 脱离 DOM）：重跑一次搜索再定位，避免对着空坐标滚动
+      if (!this._pvSearchMarks[this.pvSearchIndex]?.[0]?.isConnected) {
+        this.runPvSearch()
+        return
+      }
+      this.pvSearchIndex = (this.pvSearchIndex + dir + this.pvSearchCount) % this.pvSearchCount
+      setActivePreviewSearch(root, pane, this._pvSearchMarks, this.pvSearchIndex)
+    },
+    onPvSearchKeydown(e: KeyboardEvent) {
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        this.pvSearchNav(e.shiftKey ? -1 : 1)
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        this.closePvSearch()
+      }
+    },
+    togglePvSearchCase() {
+      this.pvSearchCase = !this.pvSearchCase
+      this.runPvSearch()
+    },
+    togglePvSearchRegex() {
+      this.pvSearchRegex = !this.pvSearchRegex
+      this.runPvSearch()
+    },
+
     onEditorScroll(line: number) {
       if (this.syncingScroll) return
       this.syncingScroll = true
@@ -6744,9 +6849,39 @@ ${bodyHtml}
 
             <!-- 预览 -->
             <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
+              <!-- 预览内搜索（预览模式 ⌘F）：sticky 零高度行贴在滚动容器顶部，与 pv-float-row 同形状；
+                   整行不吃点击，只有搜索栏吃，不挡正文框选 -->
+              <div v-if="pvSearchOpen" class="pv-search-row">
+                <div class="pv-search-bar" @click.stop @dblclick.stop>
+                  <svg class="pv-search-ico" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.8-3.8" /></svg>
+                  <input
+                    ref="pvSearchInput"
+                    v-model="pvSearchQuery"
+                    class="pv-search-input"
+                    type="text"
+                    :placeholder="$t('editor.pvSearchPh')"
+                    spellcheck="false"
+                    @input="runPvSearch"
+                    @keydown="onPvSearchKeydown"
+                  />
+                  <button type="button" class="pv-search-opt" :class="{ on: pvSearchCase }" v-tip="{ text: $t('editor.pvSearchCase'), place: 'bottom' }" @click="togglePvSearchCase">Aa</button>
+                  <button type="button" class="pv-search-opt" :class="{ on: pvSearchRegex }" v-tip="{ text: $t('editor.pvSearchRegex'), place: 'bottom' }" @click="togglePvSearchRegex">.*</button>
+                  <span class="pv-search-count" :class="{ none: !!pvSearchQuery && !pvSearchCount }">{{ pvSearchCountText }}</span>
+                  <button type="button" class="pv-search-nav" :disabled="!pvSearchCount" v-tip="{ text: $t('editor.pvSearchPrev'), place: 'bottom' }" @click="pvSearchNav(-1)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6" /></svg>
+                  </button>
+                  <button type="button" class="pv-search-nav" :disabled="!pvSearchCount" v-tip="{ text: $t('editor.pvSearchNext'), place: 'bottom' }" @click="pvSearchNav(1)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 10l6 6 6-6" /></svg>
+                  </button>
+                  <span class="pv-search-sep"></span>
+                  <button type="button" class="pv-search-nav" v-tip="{ text: $t('editor.pvSearchClose'), place: 'bottom' }" @click="closePvSearch">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></svg>
+                  </button>
+                </div>
+              </div>
               <!-- 工具栏隐藏时唯一的只读 ⇄ 编辑入口：贴在滚动容器顶部（sticky + 零高度，不占正文位置），
-                   平时不可见、鼠标进入预览区才半透明显形；整行不吃点击，只有按钮吃 -->
-              <div v-if="pvFloatShow" class="pv-float-row">
+                   平时不可见、鼠标进入预览区才半透明显形；整行不吃点击，只有按钮吃；搜索栏开着时让位避免重叠 -->
+              <div v-if="pvFloatShow && !pvSearchOpen" class="pv-float-row">
                 <button type="button" class="pv-float" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'left' }" @click="togglePvEdit">
                   <svg v-if="previewEditable" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
                   <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
@@ -7863,6 +7998,62 @@ label.radio input[type="radio"] { margin: 0; }
 .pv-float:hover { opacity: 1; color: var(--text); background: var(--hover); }
 .pv-float.on { color: var(--primary-active); }
 
+/* 预览内搜索栏：与 pv-float-row 同形状的 sticky 零高度行，滚动时始终贴在预览区顶部；
+   栏体自己吃点击，行容器 pointer-events: none 不挡正文框选 */
+.pv-search-row {
+  position: sticky; top: 10px; z-index: 7;
+  height: 0; overflow: visible;
+  text-align: right; padding-right: 18px;
+  pointer-events: none;
+}
+.pv-search-bar {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; gap: 2px;
+  height: 34px; padding: 0 6px 0 10px;
+  border: 1px solid var(--border-pop); border-radius: 8px;
+  background: var(--panel); color: var(--text-2);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, .14);
+  animation: pv-search-in .14s ease-out;
+}
+@keyframes pv-search-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.pv-search-ico { flex: 0 0 auto; color: var(--text-4); margin-right: 4px; }
+.pv-search-input {
+  width: 180px; height: 26px; padding: 0 4px;
+  border: none; outline: none; background: transparent;
+  color: var(--text); font-size: 13px;
+}
+.pv-search-input::placeholder { color: var(--text-4); }
+/* 选项开关（Aa 大小写 / .* 正则）：选中态与工具栏 icon-btn.on 同口径 */
+.pv-search-opt {
+  flex: 0 0 auto; width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 5px;
+  background: transparent; color: var(--text-3);
+  font-size: 11px; font-weight: 600; font-family: var(--font-mono, ui-monospace, monospace);
+  cursor: pointer; transition: all .15s;
+}
+.pv-search-opt:hover { background: var(--hover); color: var(--text); }
+.pv-search-opt.on { background: var(--primary-bg); color: var(--primary-active); }
+.pv-search-count {
+  min-width: 46px; padding: 0 4px; text-align: center;
+  font-size: 12px; color: var(--text-3); white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.pv-search-count.none { color: var(--red); }
+.pv-search-nav {
+  flex: 0 0 auto; width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; border-radius: 5px;
+  background: transparent; color: var(--text-2);
+  cursor: pointer; transition: all .15s;
+}
+.pv-search-nav:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.pv-search-nav:disabled { opacity: .35; cursor: default; }
+.pv-search-sep { width: 1px; height: 16px; background: var(--border); margin: 0 4px; }
+
 .panes { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 .pane { flex: 1 1 0%; min-width: 0; overflow-y: auto; }
 .pane-editor { border-right: 1px solid var(--border-2); display: flex; }
@@ -7948,6 +8139,26 @@ html[data-theme='dark'] .pane-preview .md :deep(mark.pv-hit) {
 @keyframes pv-hit-in {
   from { background: rgba(250, 173, 20, 0.72); }
   to { background: rgba(250, 173, 20, 0.3); }
+}
+/* 预览内搜索命中（previewSearch.ts 注入）：与 pv-hit 同族琥珀色，当前项加深为橙；
+   不加内边距，避免包裹高亮时正文排版发生位移 */
+.pane-preview .md :deep(mark.pv-search) {
+  background: rgba(250, 173, 20, 0.3);
+  color: inherit;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(250, 173, 20, 0.4);
+}
+.pane-preview .md :deep(mark.pv-search.pv-search-on) {
+  background: rgba(250, 140, 22, 0.62);
+  box-shadow: 0 0 0 1px rgba(250, 140, 22, 0.85);
+}
+html[data-theme='dark'] .pane-preview .md :deep(mark.pv-search) {
+  background: rgba(250, 173, 20, 0.24);
+  box-shadow: 0 0 0 1px rgba(250, 173, 20, 0.36);
+}
+html[data-theme='dark'] .pane-preview .md :deep(mark.pv-search.pv-search-on) {
+  background: rgba(250, 140, 22, 0.5);
+  box-shadow: 0 0 0 1px rgba(250, 140, 22, 0.7);
 }
 .split-resize {
   flex: 0 0 4px;
