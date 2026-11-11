@@ -292,6 +292,9 @@ src/
 - **圆角**：便签是无边框窗，圆角靠「窗口透明 + `.sticky` 自绘 12px 圆角 + 1px 边框 + `overflow: hidden`」。透明底色需要三层同时透出：Rust `transparent(true)`、前端 `html[data-window="sticky"]` 下 `html/body/#app` 背景置透明（`main.ts` 按 `isStickyWindow()` 打标记），以及 `index.html` 内联启动屏 `#splash` 同步圆角，否则首帧闪过方角底色。
 - **缩放**：右下角不可见热区（16px，斜向双箭头光标）自行跟手，不用系统原生缩放（`startResizeDragging`）。原因：Windows 的原生 sizing 循环开始瞬间会切一次焦点，WebView2 随之触发 `blur`，与「失焦即收起」冲突，表现为按住手柄一动便签就消失。实现用 pointer capture（拖出窗口仍继续收 `pointermove`）+ `requestAnimationFrame` 节流 `setSize`，`screenX/Y` 是 CSS 像素、窗口尺寸是物理像素，需乘 `scaleFactor`；下限 300×220 与 Rust `min_inner_size` 对齐。macOS 不显示手柄：无边框窗的 `styleMask` 仍含 `Resizable`，边缘本就能直接拖拽缩放（且 tao 在 mac 的 `drag_resize_window` 返回 `NotSupported`，代码也触发不了），再放一块热区只是噪声。
 - **失焦收起**：`blur` 不等于窗口失去激活，非 mac 平台收起前先问 `sticky_is_active`（Windows 直接比对 `GetForegroundWindow()` 与本窗 hwnd，绕开 WebView 内部焦点）；仍在前台就忽略这次 blur。打开系统文件选择框同理由 `picking` 标志挡住。
+- **「在主界面中打开」是纯前端跨窗事件**：便签与主窗同一进程、两套 webview，路由属于主窗，所以便签只能把目标递过去而不能替它跳转。链是 `save(true)` 静默落盘 → `showMainWindow()` → `emitTo('main', 'marklock://sticky-open-note', target)`，主窗按 §6.10 的「两处监听」形状接（编辑器在位直接开，否则常驻 `App.vue` 存意图再 `router.push('/editor')`）。开页分派照抄会话恢复的口径，`kind='mdl'` 还要再按 `vaultId === path` 分单文件 .mdl 与目录库内文件——两者读的命令不同，一律当 .mdl 开只会得到一个永远解不开的占位页签。不新增 Rust 命令：`core:default` 里的 `core:event:default` 已含 `allow-emit-to`。
+- **便签的预览就地编辑复用序列化器，不复用视图代码**：改渲染结果 → 反解析这一条链的唯一真源是 `src/lib/wysiwyg.ts`，主编辑器与便签各自持有冻结/防抖状态；两边预览 DOM 的形状不同（主编辑器按块包 `.mb` 并带 `data-l` 行锚点供分屏同步，便签走 `preview.ts` 整篇渲染、裸块级子元素），所以序列化器必须两种形状都吃得下——对齐办法不是猜，而是同一批用例在两种形状上各跑一遍，比对幂等结果与格式化命令产出的源码是否逐字一致（实测一致）。只读 ⇄ 编辑那颗开关刻意做成便签本地状态：两个 webview 各有一份 Pinia 实例却共用同一个 localStorage 键，写全局项等于隔窗互相覆盖，与便签 `wordWrap` 只存本地是同一条理由。
+- **便签顶部不摆格式化工具栏，只留一颗只读 ⇄ 编辑**：`.sticky-float` 一行靠右，装「编辑 / 分屏 / 预览」段和它左边那颗眼睛 / 铅笔，容器 `pointer-events:none`、两颗控件各自恢复吃点击；整层平时 `.35`，`:hover` 沿 DOM 祖先链匹配到子控件时转 1（容器不吃事件不影响父层拿 hover）。撤掉工具栏的理由是宽度与价值：15 个按钮 + 3 根分隔线约 437px，便签缺省只有 400 逻辑点，而窗内改格式最快的路径本就是切到编辑态写标记。摆法试过三种——同一行左右挤（英文切换段实测 150px > 预留的 136px，直接压住按钮）、上下两行（工具栏自己折成两行）、只留一颗（实测行宽 164px 中文 / 182px 英文，连 300px 最小窗宽都放得下，`overlap:-6`）。
 - **托盘键是开关**：绑「弹出便签」的左 / 右键再点一次不是重复弹出，而是收起——先 `emit` 一条 `marklock://sticky-hide`（前端监听里静默落盘未保存内容），随即 `hide()`，与托盘菜单里隐藏便签走的是同一条链；判定只看窗口 `is_visible()`，窗口从未创建过自然算「未显示」。同一次点击既能开也能关，不需要第二个入口。
 
 ### 6.7 图片与附件（密文落盘 + 解密缓存）
@@ -324,6 +327,7 @@ src/
 - **入口按平台分叉**：macOS 全靠 `RunEvent::Opened`（访达双击、拖到 Dock、「打开方式」、`open -a MarkLock 文件`），Windows 冷启动读 argv、二次启动由单实例插件把参数转给已运行实例，Linux 没做接入口。
 - **为什么必须缓冲**：Tauri 事件不排队，冷启动时 `Opened` 往往早于前端 `listen()` 注册，直接发就永久丢失。所以路径先进 Rust 侧 `PENDING_OPEN_PATHS`，事件只当「去取」的信号，`take_pending_open_paths` 一次取干——顺带保证不会重复建页签。
 - **两处监听按路由分工**：`EditorView` 在位时自己的监听直接 drain；不在编辑器页（设置 / 解锁 / 对话框）时由常驻的 `App.vue` 接手，置 `pendingOpenPathsNavigate` 再跳回 `/editor`，`EditorView` 在 `onMounted` **末尾**消费——此时 `_sessionRestore` 已赋值，拉取能与冷启动恢复串行；若上面的启动 drain 已抢先取走路径，再 drain 只拿到空数组，无害。
+- **便签送来的目标共用这套形状**：`marklock://sticky-open-note`（见 §6.6）走同样的「两处监听 + store 暂存 + onMounted 末尾消费」，区别只在载荷——系统入口送的是路径且必须经 Rust 缓冲，便签送的是现成的 `StickyNoteTarget`，主窗一直活着（隐藏而非销毁），事件不存在冷启动丢失，所以不必加缓冲。
 
 ### 6.11 导出 PDF（隐藏 WebView 静默渲染）
 

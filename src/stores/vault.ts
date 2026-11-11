@@ -223,6 +223,8 @@ export interface Settings {
   showStatusbar: boolean
   /** 双击预览区域时是否在分屏/预览之间切换 */
   previewDblClickToggle: boolean
+  /** 预览视图是否允许就地编辑（所见即所得：改渲染结果，防抖反解析回源码） */
+  previewInlineEdit: boolean
   /** 编辑器模式：编辑 / 分屏 / 预览 */
   editorMode: 'edit' | 'split' | 'preview'
   /** 首次使用时是否已询问过「设为 .mdl/.mdlb 默认打开程序」（避免重复弹窗） */
@@ -299,6 +301,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showStatusbar: true,
   // 双击预览区切换视图默认关闭：需用户在显示设置里显式开启，避免无意双击导致视图切换
   previewDblClickToggle: false,
+  // 预览就地编辑默认开启：这是预览视图唯一能改内容的途径，关掉就等于预览只能看
+  previewInlineEdit: true,
   editorMode: 'split',
   assocPromptAsked: false,
   watchExternalChanges: true,
@@ -494,6 +498,9 @@ export const useVaultStore = defineStore('vault', {
     /** 待打开文件意图：非编辑器页（如设置页）收到系统「打开文件」时由 App 置位并跳回编辑器，
      *  EditorView 挂载后 watch/末尾消费，复用冷启动 drain 拉取 Rust 缓存的路径 */
     pendingOpenPathsNavigate: false,
+    /** 便签「在主界面中打开」送来的目标：非编辑器页收到事件时由 App 暂存并跳回编辑器，
+     *  EditorView 挂载后消费；编辑器在位时事件直接由 EditorView 处理，不走这里（会话内有效） */
+    pendingStickyNote: null as StickyNoteTarget | null,
     /** 收藏的库（自持对象快照） */
     favorites: loadFavorites() as VaultInfo[],
     /** 最近打开的文件列表 */

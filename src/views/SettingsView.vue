@@ -1041,6 +1041,10 @@ greet('MarkLock');`
                 </label>
               </div>
             </div>
+            <div class="row" data-key="previewInlineEdit" data-keywords="预览 就地编辑 所见即所得 编辑预览 直接在预览里改 工具栏 只读 只读切换 浮标 悬浮按钮 inline wysiwyg edit preview 可编辑 toolbar read-only floating">
+              <div class="info"><div class="t">{{ $t('settings.appear.inlineEdit') }}</div><div class="d">{{ $t('settings.appear.inlineEditD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.previewInlineEdit }" @click="store.updateSettings({ previewInlineEdit: !store.settings.previewInlineEdit })"></div>
+            </div>
             <div class="row" data-key="previewDblClickToggle" data-keywords="双击 预览 分屏 切换 视图 double click preview split toggle">
               <div class="info"><div class="t">{{ $t('settings.appear.dblToggle') }}</div><div class="d">{{ $t('settings.appear.dblToggleD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.previewDblClickToggle }" @click="store.updateSettings({ previewDblClickToggle: !store.settings.previewDblClickToggle })"></div>

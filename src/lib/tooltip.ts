@@ -65,7 +65,12 @@ function show(target: HTMLElement, text: string, place: 'right' | 'bottom' | 'to
   ar.style.opacity = '1'
 
   const r = target.getBoundingClientRect()
-  // 先按指定方位定位
+  // 尺寸必须先量出来再定位：'left' 方位的落点是「气泡右缘」= 目标左缘 - 10，
+  // 少了 tw 就会把气泡的左缘贴在目标左侧、整块盖在被提示的控件上
+  const tw = tip.offsetWidth
+  const th = tip.offsetHeight
+  const vw = window.innerWidth
+  // 先按指定方位定位（x/y 为气泡的左上角 x 与垂直中心 y，top/bottom 方位的 x 是中心）
   let x: number
   let y: number
   let side: 'right' | 'left' | 'top' | 'bottom' = place
@@ -74,7 +79,7 @@ function show(target: HTMLElement, text: string, place: 'right' | 'bottom' | 'to
     x = r.right + 10
     y = r.top + r.height / 2
   } else if (place === 'left') {
-    x = r.left - 10
+    x = r.left - tw - 10
     y = r.top + r.height / 2
   } else if (place === 'top') {
     x = r.left + r.width / 2
@@ -85,11 +90,7 @@ function show(target: HTMLElement, text: string, place: 'right' | 'bottom' | 'to
     y = r.bottom + 8
   }
 
-  // 测量气泡尺寸后做翻转判断
-  const tw = tip.offsetWidth
-  const th = tip.offsetHeight
-  const vw = window.innerWidth
-
+  // 翻转判断
   if (side === 'right' && x + tw > vw - 8) {
     side = 'left'
     x = r.left - tw - 10
@@ -108,7 +109,9 @@ function show(target: HTMLElement, text: string, place: 'right' | 'bottom' | 'to
     tip.style.left = x + 'px'
     tip.style.top = (y - th / 2) + 'px'
     ar.style.borderColor = 'transparent rgba(31,35,41,0.96) transparent transparent'
-    ar.style.left = (r.left - 6) + 'px'
+    // 三角盒 12px、尖在盒中心：锚在 r.left - 12 才让尖停在 r.left - 6，
+    // 锚成 r.left - 6 会让一半压在图标上
+    ar.style.left = (r.left - 12) + 'px'
     ar.style.top = (y - 6) + 'px'
   } else if (side === 'top') {
     tip.style.left = (x - tw / 2) + 'px'

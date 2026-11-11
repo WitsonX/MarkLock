@@ -351,6 +351,23 @@ html[data-theme='dark'] .md input[type="checkbox"]:checked {
 .md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
 .md hr { border: none; border-top: 1px solid var(--md-hr); margin: 2em 0; }
 
+/* ---------- 预览就地编辑（.wysiwyg-on = 预览视图且设置开启） ----------
+   不给外框、不给背景：预览页本身就是编辑面，加边框会让人以为切到了另一个面板。
+   可感知的差别只有光标形状与插入符颜色。 */
+.md.wysiwyg-on { caret-color: var(--primary); cursor: text; }
+/* 编辑态的 .md 就是 contenteditable 编辑面，聚焦时 WebKit 会给它画一圈系统蓝焦点环：预览满宽时
+   左右两条被滚动容器裁掉、顶条在视口外，只剩正文底部那条横线，看着像文档末尾多了一条蓝线。去掉。 */
+.md.wysiwyg-on:focus { outline: none; }
+/* 空的编辑容器（回车刚分出的新段）本身没有行盒，插入符会看不见，用 min-height 顶出一行 */
+.md.wysiwyg-on p, .md.wysiwyg-on li { min-height: 1em; }
+/* 编辑态点链接不跳转，手型光标会误导「可以点」 */
+.md.wysiwyg-on a { cursor: text; }
+/* contenteditable=false 的应用控件（复制按钮、任务复选框）不参与文本拖拽与选中 */
+.md.wysiwyg-on [contenteditable="false"] { cursor: default; }
+/* 但两枚控件本身仍然可点，不能跟着上面的规则失去手型 */
+.md.wysiwyg-on .code-copy-btn, .md.wysiwyg-on input.task-cb { cursor: pointer; }
+.md.wysiwyg-on img { -webkit-user-drag: none; }
+
 /* ---------- highlight.js token 颜色（随主题切换，替代官方主题包） ---------- */
 .hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
 .hljs-keyword, .hljs-selector-tag, .hljs-tag, .hljs-template-tag { color: var(--hl-keyword); }

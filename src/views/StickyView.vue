@@ -1,13 +1,16 @@
 <script lang="ts">
 import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
-import { listen } from '@tauri-apps/api/event'
+import { emitTo, listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { PhysicalSize } from '@tauri-apps/api/dpi'
 import { useVaultStore } from '../stores/vault'
 import type { QuickLaunchItem, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
+import { renderMarkdown, setAssetBaseDir } from '../lib/preview'
+import { domToMarkdown, preserveTrailing, enterInTaskItem } from '../lib/wysiwyg'
+import { lang } from '../locales'
 import { isMac } from '../lib/platform'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
 import { splitLaunchArgs } from '../lib/launchArgs'
@@ -38,6 +41,21 @@ export default defineComponent({
       // 便签窗是否获得焦点 + 鼠标是否在正文（编辑器/预览）区内：两者共同决定模式切换段是否浮现
       focused: false,
       overBody: false,
+      // 自动换行（与主编辑器同名同义）：便签窗窄，恒开，不再给开关
+      wordWrap: true,
+      // ---------- 预览就地编辑（与主编辑器同一套语义，见 EditorView 的同名成员） ----------
+      // 注入预览的 HTML：编辑期间冻结，任何一次赋值都会重建 DOM、清掉光标
+      previewHtml: '',
+      // DOM 由用户持有、尚未序列化回源码
+      previewDirty: false,
+      previewFrozen: false,
+      // 自己回写后的源码快照：用于区分「改动来自就地编辑」与「磁盘/外部写入」
+      previewSelfContent: null as string | null,
+      previewComposing: false,
+      _previewFlushTimer: 0 as any,
+      // 便签自己的只读 ⇄ 编辑开关：不写回全局设置项（两窗各持一份 store，互相覆盖会打架），
+      // 与 wordWrap 一样是会话内状态
+      pvEdit: true,
       // 主应用图标（与关于对话框同源）：标题栏「打开 MarkLock」按钮用
       appIcon,
       // 预览模式勾选任务清单的确认弹窗（与主编辑器同语义）：pendingTaskSrc 为改好勾选的源码，
@@ -95,8 +113,46 @@ export default defineComponent({
       const t = this.target
       return !!t && t.kind !== 'plain' && !this.needUnlock && !this.loading
     },
+    /** 渲染结果：基准目录取便签文件自己在磁盘上的目录（与主编辑器同规则，不接附件缓存）。 */
+    renderedPreview(): string {
+      void lang.value
+      setAssetBaseDir(this.baseDir)
+      return renderMarkdown(this.content)
+    },
+    /** 能不能就地编辑：纯预览态 + 正文已读到（解锁表单 / 读取失败态没有正文可改）。
+     *  分屏不开——与主编辑器同口径，两栏同屏时改渲染区会让光标在栏间跳。 */
+    pvCanEdit(): boolean {
+      return this.mode === 'preview' && !!this.target && !this.needUnlock && !this.loadErr && !this.loading
+    },
+    /** 预览区当前是否真的可打字 = 能开 且 这颗开关开着（便签自己的会话内状态） */
+    previewEditable(): boolean {
+      return this.pvCanEdit && this.pvEdit
+    },
   },
   watch: {
+    // 渲染结果注入预览：编辑期间 DOM 才是真源，除了自己回写源码触发的那一次重渲染，
+    // 其它来源（弹出时重新读盘、外部改动、任务清单确认写回）都必须解冻重注入，
+    // 否则用户对着旧 DOM 打字会把刚落盘的改动盖掉。
+    renderedPreview: {
+      immediate: true,
+      handler(v: string) {
+        if (this.previewFrozen && this.content === this.previewSelfContent) return
+        this.previewFrozen = false
+        this.previewDirty = false
+        this.previewHtml = v
+      },
+    },
+    // 离开编辑态（切出预览 / 收起便签前关开关）时把 DOM 序列化回源码；
+    // 进入编辑态只需告诉浏览器回车要分段成 <p>（WebKit 默认插 <div>，会被当成原始 HTML 整块保留）
+    previewEditable(v: boolean, old: boolean) {
+      if (v && !old) {
+        try {
+          document.execCommand('defaultParagraphSeparator', false, 'p')
+        } catch {}
+        return
+      }
+      if (!v && old) this.commitPreview()
+    },
     // 快速启动列表变化（含弹出时 reloadSettings 拉到主窗口新增项）时预取图标；已缓存的路径会自行跳过。
     // immediate：首帧就拉一次，不等列表变化（图标到位前不显示图占位）。
     quickLaunch: {
@@ -210,6 +266,84 @@ export default defineComponent({
       this.content = v
       this.dirty = true
     },
+
+    // ---------- 预览就地编辑（与主编辑器同一套语义） ----------
+    /** contenteditable 的那块 `.md` 是 MarkdownPreview 的根元素（单根组件，直接取 $el）。 */
+    previewMdEl(): HTMLElement | null {
+      const el = (this.$refs.previewMd as unknown as { $el?: Element } | null)?.$el
+      return el instanceof HTMLElement ? el : null
+    },
+    /** 编辑期每次输入后防抖回写：只更新正文（记脏、供保存），不动 DOM，光标不受影响。 */
+    onPreviewEditInput() {
+      if (!this.previewEditable || this.previewComposing) return
+      this.previewFrozen = true
+      this.previewDirty = true
+      if (this._previewFlushTimer) clearTimeout(this._previewFlushTimer)
+      this._previewFlushTimer = setTimeout(() => {
+        this._previewFlushTimer = 0
+        this.flushPreviewDom()
+      }, 220)
+    },
+    /** 把 DOM 序列化回源码，保持冻结（DOM 仍是真源）：保存、收起、锁定、重新读盘前调用。 */
+    flushPreviewDom() {
+      if (this._previewFlushTimer) {
+        clearTimeout(this._previewFlushTimer)
+        this._previewFlushTimer = 0
+      }
+      if (!this.previewDirty) return
+      this.previewDirty = false
+      const el = this.previewMdEl()
+      if (!el) return
+      const md = preserveTrailing(this.content, domToMarkdown(el))
+      if (md === this.content) return
+      this.previewSelfContent = md
+      this.content = md
+      this.dirty = true
+    },
+    /** 结束编辑态：先回写，再解冻并注入渲染结果（未回写的改动会被源码覆盖，与「源码为准」一致）。 */
+    commitPreview() {
+      this.flushPreviewDom()
+      this.previewFrozen = false
+      this.previewSelfContent = null
+      this.previewHtml = this.renderedPreview
+    },
+    onPreviewCompositionStart() {
+      this.previewComposing = true
+    },
+    /** 中文输入法上屏后才回写：合成过程中 DOM 里是未确定的拼音串，写进源码就是脏数据。 */
+    onPreviewCompositionEnd() {
+      this.previewComposing = false
+      this.onPreviewEditInput()
+    },
+    /** 粘贴一律降级为纯文本：富文本会带进 HTML 标签，反解析只能原样保留，源码会被污染。 */
+    onPreviewEditPaste(e: ClipboardEvent) {
+      if (!this.previewEditable) return
+      e.preventDefault()
+      const text = e.clipboardData?.getData('text/plain') ?? ''
+      if (!text) return
+      document.execCommand('insertText', false, text)
+      this.onPreviewEditInput()
+    },
+    /** 代码块内 Enter 必须插入裸换行：浏览器在 `<pre>` 里插 `<div>`，`textContent` 会丢掉换行，
+     *  回写后两行代码被并成一行。其余块交给原生 insertParagraph 分段。 */
+    onPreviewEditKeydown(e: KeyboardEvent) {
+      if (!this.previewEditable) return
+      // 便签是整篇渲染、没有主编辑器那套 ⌘S 之外的键位冲突：Ctrl/Cmd+S 仍交给窗口级 onKey 落盘
+      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
+      const node = window.getSelection()?.anchorNode?.parentElement ?? null
+      if (node?.closest('pre')) {
+        e.preventDefault()
+        document.execCommand('insertText', false, '\n')
+        this.onPreviewEditInput()
+        return
+      }
+      const root = this.previewMdEl()
+      if (root && enterInTaskItem(e, root)) this.onPreviewEditInput()
+    },
+    /** 只读 ⇄ 编辑开关（便签自己的会话内状态，不写全局设置项）。 */
+    togglePvEdit() {
+      this.pvEdit = !this.pvEdit
+    },
     onTaskToggle(payload: { next: string; text: string; checked: boolean }) {
       // 预览模式：弹确认（与主编辑器一致），确认后才写回并保存
       if (this.mode === 'preview') {
@@ -234,6 +368,8 @@ export default defineComponent({
     },
     async save(silent = false) {
       const t = this.target
+      // 预览里未防抖回写的就地编辑先落到正文：否则写盘的是旧源码，DOM 里刚打的字丢失
+      this.flushPreviewDom()
       // saving 互斥：⌘S 会同时命中窗口级 keydown 与 CodeMirror 内部 Mod-s keymap，
       // 两者并发调用本方法时 dirty 尚未在 await 后置位，会各弹一次提示；用 in-flight 标志只放行一次。
       if (!t || !this.dirty || this.needUnlock || this.saving) return
@@ -275,8 +411,10 @@ export default defineComponent({
       }
     },
     /** 双击预览区在分屏 / 预览间切换（受设置项 previewDblClickToggle 控制，与主编辑器一致）：
-     *  落在代码块复制按钮 / 任务清单复选框上时跳过，避免误切视图。 */
+     *  落在代码块复制按钮 / 任务清单复选框上时跳过，避免误切视图。
+     *  就地编辑开启时让位给浏览器的双击选词——预览已是编辑面，双击应当选中单词而不是换视图。 */
     onPreviewDblClick(e: MouseEvent) {
+      if (this.previewEditable) return
       if (!this.store.settings.previewDblClickToggle) return
       const t = e.target as HTMLElement | null
       if (t?.closest('.code-copy-btn')) return
@@ -418,6 +556,19 @@ export default defineComponent({
     openMain() {
       tauri.showMainWindow().catch(() => {})
     },
+    /** 在主界面中打开这篇便签：先静默落盘（否则主窗从磁盘读到的是旧内容，两边还会互相覆盖），
+     *  再由 Rust 唤回主窗，最后把目标原样发给主窗——便签是独立 webview，改不了主窗路由，只能靠事件递。 */
+    async openNoteInMain() {
+      const t = this.target
+      if (!t) return
+      await this.save(true)
+      tauri.showMainWindow().catch(() => {})
+      try {
+        await emitTo('main', 'marklock://sticky-open-note', t)
+      } catch {
+        // 主窗不存在时事件发不出去：窗已经唤回了，用户自己点开即可，不额外报错
+      }
+    },
     /** 快速启动：把参数原始串按引号感知拆分后交给 Rust（macOS 经 open --args 透传，带参时后端自动 open -n 另起进程）。 */
     launch(item: QuickLaunchItem) {
       tauri.launchLocal(item.path, splitLaunchArgs(item.args)).catch((e) => message.error(String(e)))
@@ -438,6 +589,7 @@ export default defineComponent({
       <span v-if="dirty" class="dot" :title="$t('sticky.unsaved')"></span>
       <button class="x lock-btn" v-if="canLock" v-tip="{ text: $t('sticky.lock'), place: 'bottom' }" @click="lockNote"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2" /><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" /></svg></button>
       <button class="x main-btn" v-tip="{ text: $t('sticky.main'), place: 'bottom' }" @click="openMain"><img :src="appIcon" alt="" /><span>{{ $t('sticky.mainBtn') }}</span></button>
+      <button class="x to-main" v-tip="{ text: $t('sticky.openInMain'), place: 'bottom' }" @click="openNoteInMain"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6" /><path d="M20 4l-8.5 8.5" /><path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" /></svg></button>
       <button class="x" v-tip="{ text: $t('sticky.settings'), place: 'bottom' }" @click="openSettings">⚙</button>
       <button class="x" v-tip="{ text: $t('sticky.close'), place: 'bottom' }" @click="hide">×</button>
     </div>
@@ -472,18 +624,40 @@ export default defineComponent({
       <!-- 正常三态：面板常驻布局流 + flex-basis 滑动过渡（对齐主编辑器 .panes 切换动画；不用 v-show，
            因 WKWebView 下 display 切换会中断 flex-basis 过渡） -->
       <template v-else>
-        <!-- 模式切换：仅当便签获得焦点且鼠标在正文区内时浮现（平时隐藏），浮现后半透明、悬停段本身转不透明 -->
-        <div class="seg modes modes-float" v-show="focused && overBody">
-          <span :class="{ on: mode === 'edit' }" @click="mode = 'edit'">{{ $t('sticky.edit') }}</span>
-          <span :class="{ on: mode === 'split' }" @click="mode = 'split'">{{ $t('sticky.split') }}</span>
-          <span :class="{ on: mode === 'preview' }" @click="mode = 'preview'">{{ $t('sticky.preview') }}</span>
+        <!-- 顶部浮层只留两样东西（同一行、靠右）：只读 ⇄ 编辑那颗 + 模式切换段。
+             整条格式化工具栏在 400 逻辑点的便签里放不下，而且它改的是源码 / 渲染 DOM 这类主界面才需要的操作，
+             便签里要改格式直接进编辑态打字即可，故不再摆一排水印按钮。
+             浮现规则不变：获得焦点且鼠标在正文内才出现，平时半透明、悬停转不透明；容器不吃鼠标。 -->
+        <div class="sticky-float" v-show="focused && overBody">
+          <button v-if="pvCanEdit" type="button" class="pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+            <svg v-if="previewEditable" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
+            <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
+          </button>
+          <div class="seg modes">
+            <span :class="{ on: mode === 'edit' }" @click="mode = 'edit'">{{ $t('sticky.edit') }}</span>
+            <span :class="{ on: mode === 'split' }" @click="mode = 'split'">{{ $t('sticky.split') }}</span>
+            <span :class="{ on: mode === 'preview' }" @click="mode = 'preview'">{{ $t('sticky.preview') }}</span>
+          </div>
         </div>
         <div class="panes" :class="`mode-${mode}`">
           <div class="pane pane-editor" :class="{ collapsed: mode === 'preview' }">
-            <CodeMirrorEditor ref="editorCm" :model-value="content" @update:model-value="onInput" :on-save="save" :on-scroll="onEditorScroll" />
+            <CodeMirrorEditor ref="editorCm" :model-value="content" :word-wrap="wordWrap" @update:model-value="onInput" :on-save="save" :on-scroll="onEditorScroll" />
           </div>
           <div ref="previewPane" class="pane pane-preview" :class="{ collapsed: mode === 'edit' }" @dblclick="onPreviewDblClick" @scroll="onPreviewScroll">
-            <MarkdownPreview :source="content" :asset-base-dir="baseDir" @task-toggle="onTaskToggle" />
+            <!-- html 绑的是被冻结的 previewHtml（编辑期间不再重设 innerHTML，光标才保得住），
+                 source 仍传当前正文，供只读态的任务清单回改按序号定位源码标记 -->
+            <MarkdownPreview
+              ref="previewMd"
+              :html="previewHtml"
+              :source="content"
+              :editable="previewEditable"
+              @task-toggle="onTaskToggle"
+              @edit-input="onPreviewEditInput"
+              @edit-keydown="onPreviewEditKeydown"
+              @edit-paste="onPreviewEditPaste"
+              @edit-compositionstart="onPreviewCompositionStart"
+              @edit-compositionend="onPreviewCompositionEnd"
+            />
           </div>
         </div>
       </template>
@@ -575,6 +749,9 @@ export default defineComponent({
 /* 锁定按钮：内联 SVG 挂锁图标需 flex 居中（.x 默认按行高排布文本，SVG 会偏上） */
 .lock-btn { display: inline-flex; align-items: center; }
 .lock-btn svg { display: block; }
+/* 「在主界面中打开」：与锁定按钮同规格（同样是内联 SVG，需要 flex 居中） */
+.to-main { display: inline-flex; align-items: center; }
+.to-main svg { display: block; }
 /* 「打开 MarkLock」主图标按钮：常驻浅底 + 描边 + 短文字标签，图标与文字水平居中；PNG 自带留白取 18px */
 .main-btn {
   display: inline-flex;
@@ -588,18 +765,51 @@ export default defineComponent({
 }
 .main-btn img { display: block; width: 18px; height: 18px; }
 .main-btn:hover { background: var(--hover); border-color: var(--border-pop); }
-/* 模式切换分段控件：样式对齐主编辑器工具栏的 .seg（见 EditorView.vue）；
-   浮于正文区右上角，平时半透明、悬停转不透明，避免常驻标题栏挤占空间 */
-.modes-float {
+/* 顶部浮层：一颗只读 ⇄ 编辑 + 「编辑 / 分屏 / 预览」切换段，同一行靠右。
+   整条格式化工具栏撤掉了——400 逻辑点放不下，而便签要改格式直接进编辑态打字即可。
+   容器不吃鼠标事件，两颗控件自己恢复吃点击；整层平时半透明，指针压到任一控件转不透明
+   （:hover 沿 DOM 祖先链匹配，pointer-events:none 不影响父层拿到子级的 hover）。 */
+.sticky-float {
   position: absolute;
   top: 8px;
   right: 10px;
   z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  pointer-events: none;
   opacity: 0.35;
   transition: opacity 0.18s ease;
 }
-.modes-float:hover {
+.sticky-float:hover {
   opacity: 1;
+}
+/* 模式切换分段控件：样式对齐主编辑器工具栏的 .seg（见 EditorView.vue） */
+.seg.modes {
+  pointer-events: auto;
+}
+/* 只读 ⇄ 编辑：与切换段同高的一颗小按钮，只在纯预览态出现（pvCanEdit） */
+.pv-toggle {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 25px;
+  padding: 0;
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-2);
+  cursor: pointer;
+}
+.pv-toggle:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.pv-toggle.on {
+  color: var(--primary-active);
 }
 .seg {
   display: inline-flex;

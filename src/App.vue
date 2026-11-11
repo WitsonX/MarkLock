@@ -154,6 +154,14 @@ export default defineComponent({
         router.push('/editor')
       }).catch(() => {})
 
+      // 便签「在主界面中打开」：与上面的 open-paths 同模式——编辑器在位时由 EditorView 自己的监听处理，
+      // 停在设置 / 解锁页时先把目标暂存再跳回编辑器，挂载后消费（便签是独立 webview，改不了主窗路由）。
+      listen('marklock://sticky-open-note', (e) => {
+        if (router.currentRoute.value.name === 'editor') return
+        store.pendingStickyNote = e.payload as typeof store.pendingStickyNote
+        router.push('/editor')
+      }).catch(() => {})
+
       // 原生菜单「关于 MarkLock」：直接弹应用内独立对话框（常驻于本组件模板），
       // 不再路由到设置页；卡片内容与设置页「关于」页签共用 AboutCard。
       listen<string>('marklock://menu', (e) => {

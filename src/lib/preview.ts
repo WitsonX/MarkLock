@@ -25,8 +25,10 @@ function highlightCode(text: string, lang: string): string {
 }
 
 /** 预览代码块右上角复制按钮：图标内联 SVG（双矩形「复制」+ 对勾「已复制」），
- *  文字/状态切换由 CSS 与 .copied 类驱动；绝对定位不参与 pre 文本流，textContent 复制不受影响。 */
-const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = translate('editor.copyCodeAria')) => `<button type="button" class="code-copy-btn" aria-label="${aria}" title="${txt}"><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">${txt}</span></button>`
+ *  文字/状态切换由 CSS 与 .copied 类驱动；绝对定位不参与 pre 文本流，textContent 复制不受影响。
+ *  contenteditable=false 是就地编辑（预览模式所见即所得）的要求：按钮属于界面控件而不是正文，
+ *  既不能被光标插进去打字，也要在拖拽选区时不被当成正文删掉；序列化侧按类名整体跳过。 */
+const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = translate('editor.copyCodeAria')) => `<button type="button" contenteditable="false" class="code-copy-btn" aria-label="${aria}" title="${txt}"><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">${txt}</span></button>`
 
 /** 行内代码复制按钮：复用 .code-copy-btn 状态类（.cc-txt 由 CSS 隐藏只留图标），
  *  与 code 同为 .codespan-wrap 的兄弟节点，选中 code 文本时不会带入按钮文字。 */
@@ -104,14 +106,17 @@ marked.use({
       return `<span class="codespan-wrap"><code>${escapeCode(text)}</code>${INLINE_COPY_BTN()}</span>`
     },
     // 本地图片：相对/绝对磁盘路径经 asset 协议在应用内加载（http/data 原样交给 WKWebView）
+    // data-src 留原始链接值：src 被换成 asset:// 地址后再也还原不回去，就地编辑的反向序列化
+    // （src/lib/wysiwyg.ts）靠它把图片路径写回原样，否则正文里的 `a.png` 会变成一长串协议地址。
     image({ href, title, text }: { href: string; title?: string | null; text: string }) {
       const t = title ? ` title="${escAttr(title)}"` : ''
-      return `<img src="${escAttr(resolveImgSrc(href))}" alt="${escAttr(text || '')}"${t}>`
+      return `<img src="${escAttr(resolveImgSrc(href))}" data-src="${escAttr(href)}" alt="${escAttr(text || '')}"${t}>`
     },
     // 任务清单复选框：去掉 marked 默认的 disabled，预览里可点击回改源码标记（见 toggleTaskMarker）；
     // 勾选态完全由源码渲染驱动，导出 HTML 时再补回 disabled（离线页面无回写能力）。
+    // contenteditable=false 同复制按钮：编辑态下复选框是控件不是正文。
     checkbox({ checked }: { checked: boolean }) {
-      return `<input type="checkbox" class="task-cb"${checked ? ' checked=""' : ''}>`
+      return `<input type="checkbox" contenteditable="false" class="task-cb"${checked ? ' checked=""' : ''}>`
     },
   },
 })

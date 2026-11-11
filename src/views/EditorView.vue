@@ -20,6 +20,7 @@ import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
 import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
+import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, type PreviewFmt } from '../lib/wysiwyg'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
 // 已抽到 src/lib/preview.ts，主编辑器与便携便签共用；本文件仅保留逐块渲染的滚动同步逻辑。
@@ -122,6 +123,26 @@ export default defineComponent({
       splitRatio: 0.5,
       _splitDragging: false,
 
+      // 预览就地编辑（所见即所得）：previewHtml 是注入 v-html 的字符串，编辑期间冻结不更新，
+      // 任何一次赋值都会重建 DOM、清掉光标，所以只有「非编辑态」才允许跟随渲染结果。
+      previewHtml: '',
+      // DOM 由用户持有且尚未序列化回源码
+      previewDirty: false,
+      previewFrozen: false,
+      // 编辑归属的页签路径：切页签时 DOM 还是旧文件的，必须按这个路径回写而不是 activePath
+      previewEditPath: '',
+      // 自己回写后的源码快照：用于区分「内容变化来自就地编辑」与「磁盘/外部写入」
+      previewSelfContent: null as string | null,
+      previewComposing: false,
+      _previewFlushTimer: 0 as any,
+      // 编辑态没有 `[文字](url)` 这样的源码可以插，链接/图片只能弹窗收地址
+      pvLinkOpen: false,
+      pvLinkImage: false,
+      pvLinkText: '',
+      pvLinkUrl: '',
+      // 弹窗会抢走焦点与选区，打开前存住、确认后放回去
+      pvRange: null as Range | null,
+
       // 工作目录根（用户选择的系统目录）
       workdirRoot: '' as string,
       // 工作目录树（一层，懒加载子目录）
@@ -176,6 +197,7 @@ export default defineComponent({
       // 拖放/系统打开事件监听器清理句柄
       _unlistenDrag: null as UnlistenFn | null,
       _unlistenOpen: null as UnlistenFn | null,
+      _unlistenStickyNote: null as UnlistenFn | null,
       /** 冷启动「恢复上次页签」的进行中 Promise，供外部打开（双击/Dock 拖入）串行等它跑完 */
       _sessionRestore: null as Promise<number> | null,
       // 退出（关窗）请求事件监听清理句柄
@@ -455,6 +477,26 @@ export default defineComponent({
       void this.assetVersion
       return this.renderMarkdown(this.activeFile?.content ?? '')
     },
+    /** 就地编辑能不能开：纯预览视图 + 当前页签有明文（锁定的库/文件没有明文可改）。
+     *  分屏不开——两栏同屏时改渲染区会让光标与焦点在栏间跳，反而更难用。 */
+    pvCanEdit(): boolean {
+      const f = this.activeFile
+      return (
+        this.currentMode === 'preview' &&
+        !!f &&
+        !f.locked &&
+        !this.isActiveFileLocked &&
+        !this.isActiveLocked
+      )
+    },
+    /** 预览区是否处于可编辑态（所见即所得）= 能开 且 设置开启 */
+    previewEditable(): boolean {
+      return this.pvCanEdit && this.store.settings.previewInlineEdit !== false
+    },
+    /** 工具栏隐藏时，只读 ⇄ 编辑的切换没有落点，改为预览区右上角的浮动按钮（鼠标进预览区才现形） */
+    pvFloatShow(): boolean {
+      return this.pvCanEdit && !this.store.settings.showToolbar
+    },
     /** 预览字体族：将设置映射为 CSS font-family 值。'default' 跟随界面（inherit）；
         其余为显式字体栈。供 .md 内联变量与导出 HTML 共用（导出场景 'default' 回退无衬线栈）。 */
     previewFontStack(): string {
@@ -580,6 +622,29 @@ export default defineComponent({
     },
   },
   watch: {
+    // 渲染结果注入预览：编辑期间 DOM 才是真源，除了自己回写源码触发的那一次重渲染，
+    // 其它来源（磁盘重载、外部改动、附件缓存刷新）都必须解冻并重新注入，
+    // 否则用户看到的是旧 DOM、下一次回写会把外部修改覆盖掉。
+    renderedPreview: {
+      immediate: true,
+      handler(v: string) {
+        if (this.previewFrozen && this.activeFile?.content === this.previewSelfContent) return
+        this.previewFrozen = false
+        this.previewDirty = false
+        this.previewHtml = v
+      },
+    },
+    // 离开编辑态（切出预览视图 / 页签被锁 / 关掉设置项）时把 DOM 序列化回源码；
+    // 进入编辑态只需告诉浏览器回车要分段成 <p>（默认是 <div>，会被当成原始 HTML 整块保留）
+    previewEditable(v: boolean, old: boolean) {
+      if (v && !old) {
+        try {
+          document.execCommand('defaultParagraphSeparator', false, 'p')
+        } catch {}
+        return
+      }
+      if (!v && old) this.commitPreview()
+    },
     // 切换/打开加密文件页签时，确保其附件已解密到缓存（幂等；已就绪则跳过）
     activeFile: {
       immediate: true,
@@ -608,6 +673,8 @@ export default defineComponent({
     // 两个锁定页签之间互切时上面的状态不变，靠 activePath 补一次聚焦；
     // 切到未锁定的页签则聚焦编辑器（实例常驻，撤销历史保留）
     'store.activePath'() {
+      // 页签切换前先把上一个文件的就地编辑落回源码：DOM 即将被新文件的渲染结果替换
+      this.flushPreviewDom()
       this.focusPwdIfLocked()
       const f = this.activeFile
       if (f && !f.locked && !this.isActiveLocked && !this.isEditingFocused()) {
@@ -816,6 +883,12 @@ export default defineComponent({
     })
     // 冷启动：拉取后端在监听器就绪前已缓存的待打开路径（双击打开的场景）。
     this.drainPendingOpenPaths()
+    // 便签「在主界面中打开」：payload 就是便签目标（三种 kind），编辑器在位时直接开页签。
+    listen<StickyNoteTarget>('marklock://sticky-open-note', (e) => {
+      this.openStickyNote(e.payload)
+    }).then((un) => {
+      this._unlistenStickyNote = un
+    })
     // 退出（点红叉 / Cmd+Q）：后端已 prevent_close 并发此事件，由前端判断未保存并确认后退出
     listen('marklock://close-requested', () => {
       this.handleAppClose()
@@ -1028,13 +1101,22 @@ export default defineComponent({
       this.store.pendingOpenPathsNavigate = false
       this.drainPendingOpenPaths()
     }
+    // 便签「在主界面中打开」在非编辑器页收到的目标：同样等冷启动恢复跑完再开，避免重复建页签
+    if (this.store.pendingStickyNote) {
+      const t = this.store.pendingStickyNote
+      this.store.pendingStickyNote = null
+      this.openStickyNote(t)
+    }
   },
   unmounted() {
+    // 离开编辑器路由前把未回写的就地编辑落回源码（切到设置页/便签时 DOM 即将销毁）
+    this.flushPreviewDom()
     if (this._unlistenDrag) this._unlistenDrag()
     // 只摘处理器：定时器与戳记基线跨路由保持，回到编辑器时第一轮比对能补上离开期间的改动
     externalChanges.detach()
     workdirChanges.detach()
     if (this._unlistenOpen) this._unlistenOpen()
+    if (this._unlistenStickyNote) this._unlistenStickyNote()
     if (this._unlistenClose) this._unlistenClose()
     if (this._unlistenScreenLock) this._unlistenScreenLock()
     if (this._unlistenMenu) this._unlistenMenu()
@@ -1123,26 +1205,77 @@ export default defineComponent({
       f.content = val
       this.store.markDirty(f.path)
     },
+    /** 预览就地编辑下的格式化落点：命令作用在渲染出的 DOM 上（全部通过 execCommand，保留原生撤销），
+     *  成功后按既有的防抖回写源码。源码模式与分屏仍走 CodeMirror，两边共用同一批工具栏入口。 */
+    applyPvw(fmt: PreviewFmt) {
+      const el = this.$refs.previewMd as HTMLElement | undefined
+      if (!el || !applyPreviewFormat(el, fmt)) return
+      this.onPreviewEditInput()
+    },
     fmtHeading(level: number) {
+      if (this.previewEditable) return this.applyPvw({ op: 'heading', level })
       this.activeEditor()?.setHeading(level)
     },
     fmtWrap(before: string, after: string, placeholder: string) {
+      if (this.previewEditable) return this.applyPvw({ op: 'wrap', before, placeholder })
       this.activeEditor()?.wrapSelection(before, after, placeholder)
     },
     fmtCodeBlock() {
+      if (this.previewEditable) return this.applyPvw({ op: 'codeblock' })
       this.activeEditor()?.insertCodeBlock()
     },
     fmtPrefix(prefix: string) {
+      if (this.previewEditable) return this.applyPvw({ op: 'prefix', prefix })
       this.activeEditor()?.toggleLinePrefix(prefix)
     },
     fmtTable() {
+      if (this.previewEditable) return this.applyPvw({ op: 'insertMd', md: this.$t('editor.tableMarkdown') })
       this.activeEditor()?.insertBlock(this.$t('editor.tableMarkdown'))
     },
     fmtHr() {
+      if (this.previewEditable) return this.applyPvw({ op: 'insertMd', md: '---' })
       this.activeEditor()?.insertBlock('---')
     },
     fmtLink(image: boolean) {
+      if (this.previewEditable) return this.openPvLinkDialog(image)
       this.activeEditor()?.insertLink(image)
+    },
+    /** 编辑态的链接/图片入口：先把当前选区存住再开弹窗，否则确认时不知道该把链接放到哪。 */
+    openPvLinkDialog(image: boolean) {
+      const s = document.getSelection()
+      this.pvRange = s && s.rangeCount ? s.getRangeAt(0).cloneRange() : null
+      this.pvLinkImage = image
+      // 与 CodeMirror 的 insertLink 同一套默认值：有选区用选区文字，图片留 'alt'，链接用占位词
+      this.pvLinkText = image ? (s?.toString() || 'alt') : (s?.toString() || '')
+      this.pvLinkUrl = ''
+      this.pvLinkOpen = true
+    },
+    closePvLinkDialog() {
+      this.pvLinkOpen = false
+      this.pvRange = null
+      ;(this.$refs.previewMd as HTMLElement | undefined)?.focus({ preventScroll: true })
+    },
+    submitPvLink() {
+      const url = this.pvLinkUrl.trim()
+      const { pvLinkImage: isImage, pvLinkText: text } = this
+      this.pvLinkOpen = false
+      const range = this.pvRange
+      this.pvRange = null
+      if (!url) return
+      this.$nextTick(() => {
+        const s = document.getSelection()
+        if (s && range) {
+          s.removeAllRanges()
+          s.addRange(range)
+        }
+        this.applyPvw(isImage ? { op: 'image', alt: text, url } : { op: 'link', text, url, placeholder: this.$t('editor.phLinkText') })
+      })
+    },
+    /** 工具栏的只读 ⇄ 编辑开关：翻的是设置里那一个值，不做第二份状态。
+     *  走 updateSettings 而非直接改内存再 persistSettings：便签窗共用同一份 localStorage，
+     *  整体回写本窗旧快照会把它刚写的字段（便签目标 / 快速启动顺序）一并覆盖掉。 */
+    togglePvEdit() {
+      this.store.updateSettings({ previewInlineEdit: !this.store.settings.previewInlineEdit })
     },
     /** 主菜单/侧边栏菜单中「关于」的入口：唤起 App.vue 常驻的独立对话框。 */
     openAbout() {
@@ -1242,13 +1375,83 @@ export default defineComponent({
       this.currentMode = mode
       this.store.updateSettings({ editorMode: mode })
     },
-    /** 预览区双击切换 split/preview（可在设置中关闭）：落在代码块复制按钮上时跳过，避免误切视图。 */
+    /** 预览区双击切换 split/preview（可在设置中关闭）：落在代码块复制按钮上时跳过，避免误切视图。
+     *  就地编辑开启时让位给浏览器的双击选词——预览已经是编辑面，双击应当选中单词而不是换视图。 */
     onPreviewDblClick(e: MouseEvent) {
+      if (this.previewEditable) return
       if (!this.store.settings.previewDblClickToggle) return
       if ((e.target as HTMLElement | null)?.closest('.code-copy-btn')) return
       // 连点复选框是连续勾选/取消，不应误触视图切换
       if ((e.target as HTMLElement | null)?.closest('input.task-cb')) return
       this.setMode(this.currentMode === 'split' ? 'preview' : 'split')
+    },
+
+    // ---------- 预览就地编辑（所见即所得） ----------
+    /** 编辑期每次输入后防抖回写：只更新页签正文（记脏、供保存与导出），不动 DOM，光标不受影响。 */
+    onPreviewEditInput() {
+      if (!this.previewEditable || this.previewComposing) return
+      this.previewFrozen = true
+      this.previewDirty = true
+      this.previewEditPath = this.activePath
+      if (this._previewFlushTimer) clearTimeout(this._previewFlushTimer)
+      this._previewFlushTimer = setTimeout(() => {
+        this._previewFlushTimer = 0
+        this.flushPreviewDom()
+      }, 220)
+    },
+    /** 把 DOM 序列化回源码，保持冻结（DOM 仍是真源）：保存、导出、关页签前调用。 */
+    flushPreviewDom() {
+      if (this._previewFlushTimer) {
+        clearTimeout(this._previewFlushTimer)
+        this._previewFlushTimer = 0
+      }
+      if (!this.previewDirty) return
+      this.previewDirty = false
+      const el = this.$refs.previewMd as HTMLElement | null
+      const f = this.openFiles.find((x) => x.path === this.previewEditPath) ?? this.activeFile
+      if (!el || !f || f.locked) return
+      const md = preserveTrailing(f.content, domToMarkdown(el))
+      if (md === f.content) return
+      this.previewSelfContent = md
+      this.setContentFor(f.path, md)
+    },
+    /** 结束编辑态：先回写，再解冻并注入渲染结果（未回写的改动会被源码覆盖，与「源码为准」一致）。 */
+    commitPreview() {
+      this.flushPreviewDom()
+      this.previewFrozen = false
+      this.previewSelfContent = null
+      this.previewHtml = this.renderedPreview
+    },
+    onPreviewCompositionStart() {
+      this.previewComposing = true
+    },
+    /** 中文输入法上屏后才回写：合成过程中 DOM 里是未确定的拼音串，写进源码就是脏数据。 */
+    onPreviewCompositionEnd() {
+      this.previewComposing = false
+      this.onPreviewEditInput()
+    },
+    /** 粘贴一律降级为纯文本：富文本会带进 HTML 标签，反解析只能原样保留，源码会被污染。 */
+    onPreviewEditPaste(e: ClipboardEvent) {
+      if (!this.previewEditable) return
+      e.preventDefault()
+      const text = e.clipboardData?.getData('text/plain') ?? ''
+      if (!text) return
+      document.execCommand('insertText', false, text)
+      this.onPreviewEditInput()
+    },
+    /** 代码块内 Enter 必须插入裸换行：浏览器在 `<pre>` 里插 `<div>`，`textContent` 会丢掉换行，
+     *  回写后两行代码被并成一行。其余块交给原生 insertParagraph 分段。 */
+    onPreviewEditKeydown(e: KeyboardEvent) {
+      if (!this.previewEditable || e.key !== 'Enter' || e.shiftKey || e.isComposing) return
+      const node = window.getSelection()?.anchorNode?.parentElement ?? null
+      if (node?.closest('pre')) {
+        e.preventDefault()
+        document.execCommand('insertText', false, '\n')
+        this.onPreviewEditInput()
+        return
+      }
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      if (root && enterInTaskItem(e, root)) this.onPreviewEditInput()
     },
     onEditorScroll(line: number) {
       if (this.syncingScroll) return
@@ -1310,6 +1513,14 @@ export default defineComponent({
         e.preventDefault()
         e.stopPropagation()
         this.copyCodeBlock(copyBtn)
+        return
+      }
+      // 就地编辑中：勾选态以 DOM 为准（序列化时读 input.checked），交给浏览器翻转即可；
+      // 链接点击不能让页面跳转或开新页签，那会连光标一起弄丢，只保留 # 锚点的页内滚动。
+      if (this.previewEditable) {
+        if (target.closest('input.task-cb')) return
+        const box = target.closest('a') as HTMLAnchorElement | null
+        if (box && !(box.getAttribute('href') || '').startsWith('#')) e.preventDefault()
         return
       }
       // 任务清单复选框：回改源码对应标记（分屏直接改，预览模式先确认）
@@ -1875,6 +2086,7 @@ export default defineComponent({
     },
     /** 关闭单个页签：存在未保存修改则先确认。 */
     closeFile(path: string) {
+      this.flushPreviewDom()
       const f = this.openFiles.find((x) => x.path === path)
       if (!f || !this.needsClose(f)) {
         this.store.closeFile(path)
@@ -3709,6 +3921,7 @@ export default defineComponent({
 
     // ---------- 保存 ----------
     async saveActive() {
+      this.flushPreviewDom()
       const f = this.activeFile
       if (!f) return
       if (f.isNew) {
@@ -3743,6 +3956,7 @@ export default defineComponent({
      * 单个失败不阻断其余，仅当前页签报错提醒。
      */
     async autoSaveTick() {
+      this.flushPreviewDom()
       const targets = this.openFiles.filter((f) => {
         if (!f.dirty || f.isNew || f.locked) return false
         if (f.external === 'modified' || f.external === 'missing') return false
@@ -5008,6 +5222,41 @@ export default defineComponent({
         // 忽略：无缓存或命令不可用
       }
     },
+    /** 便签「在主界面中打开」：把那张便签的目标开成主窗页签。分派照抄 restoreSession 的口径
+     *  （单文件 .mdl / 目录库内加密文件 / .mdlb 库内文件 / 明文），否则目录库里的文件会被当成
+     *  独立 .mdl 开成锁定占位页签。库还没解锁时把库路径交给 openDroppedPaths，由它登记库并跳
+     *  解锁页——比自建一套「解锁后续开」的暂存链路更省。 */
+    async openStickyNote(t: StickyNoteTarget | null) {
+      if (!t) return
+      // 与冷启动恢复串行：并发开同一文件会建出两个同 path 的页签（同 drainPendingOpenPaths 的理由）
+      try {
+        await this._sessionRestore
+      } catch {
+        // 恢复失败不阻塞便签送来的打开
+      }
+      const name = this.fileName(t.rel || t.path)
+      const vault = t.vaultId ? this.store.recent.find((x) => x.id === t.vaultId) : undefined
+      try {
+        if (t.kind === 'plain') {
+          await this.store.openPlainFile(t.path, name)
+          return
+        }
+        // 单文件 .mdl 的 vaultId 就是它自己：开成占位页签，内容区显示密码框，不需要库上下文
+        if (t.kind === 'mdl' && (!t.vaultId || t.vaultId === t.path)) {
+          this.store.openEncryptedFile(t.path, name)
+          return
+        }
+        if (vault?.unlocked) {
+          if (t.kind === 'mdlb') await this.store.openFileVaultFile(vault.id, t.rel || '', name)
+          else await this.store.openFile(vault.id, t.path, name)
+          return
+        }
+        await this.openDroppedPaths([t.vaultId || t.path])
+      } catch (e) {
+        message.error(String(e))
+      }
+    },
+
     /**
      * 处理拖入或系统打开的一组路径（可以来自工作目录以外的任何位置）：
      * 普通文件→明文直接打开；目录→挂载为工作目录；
@@ -5494,6 +5743,8 @@ export default defineComponent({
       f: OpenFile,
       opts: { inlineAll: boolean; forPdf: boolean },
     ): Promise<string | null> {
+      // 预览里可能有尚未防抖回写的就地编辑，导出一律先落源码，避免导出内容与用户所见不一致
+      this.flushPreviewDom()
       // 取展示名的扩展名替换为 .html/.pdf（草稿名无扩展名时直接追加）
       const base = f.name.replace(/\.[^.]+$/, '') || f.name || this.$t('common.untitled')
       const target = opts.forPdf
@@ -6363,7 +6614,9 @@ ${bodyHtml}
       <!-- 工作台 -->
       <section class="workbench">
         <!-- 格式化工具栏 -->
-        <div v-show="store.settings.showToolbar && currentMode !== 'preview' && activeFile" class="toolbar">
+        <!-- 格式化工具栏：预览模式同样显示（就地编辑开启时命令作用在渲染出的 DOM 上，见 lib/wysiwyg 命令层）。
+             mousedown 一律 preventDefault：否则点按钮会把焦点从 contenteditable 上抢走、选区随之丢失。 -->
+        <div v-show="store.settings.showToolbar && activeFile" class="toolbar" :class="{ 'fmt-off': currentMode === 'preview' && !previewEditable }" @mousedown.prevent>
           <span class="icon-btn" v-tip="{ text: $t('editor.h1'), place: 'bottom' }" @click="fmtHeading(1)"><b style="font-size:13px;">H1</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h2'), place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h3'), place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
@@ -6383,8 +6636,13 @@ ${bodyHtml}
           <span class="icon-btn" v-tip="{ text: $t('editor.image'), place: 'bottom' }" @click="fmtLink(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.hr'), place: 'bottom' }" @click="fmtHr"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /></svg></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? $t('editor.wrapOff') : $t('editor.wrapOn'), place: 'bottom' }" @click="wordWrap = !wordWrap">
+          <span v-if="currentMode !== 'preview'" class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? $t('editor.wrapOff') : $t('editor.wrapOn'), place: 'bottom' }" @click="wordWrap = !wordWrap">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-9" /><path d="M12 18l-3-3 3-3" /></svg>
+          </span>
+          <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，这里只是就近的入口 -->
+          <span v-else class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+            <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
+            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
           </span>
           <span class="tb-spacer"></span>
           <span class="tag tag-gray" style="flex:0 0 auto;">Markdown</span>
@@ -6486,7 +6744,17 @@ ${bodyHtml}
 
             <!-- 预览 -->
             <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
-              <div class="md" :key="assetVersion" :class="`hljs-theme-${store.settings.codeTheme}`" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="renderedPreview"></div>
+              <!-- 工具栏隐藏时唯一的只读 ⇄ 编辑入口：贴在滚动容器顶部（sticky + 零高度，不占正文位置），
+                   平时不可见、鼠标进入预览区才半透明显形；整行不吃点击，只有按钮吃 -->
+              <div v-if="pvFloatShow" class="pv-float-row">
+                <button type="button" class="pv-float" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'left' }" @click="togglePvEdit">
+                  <svg v-if="previewEditable" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
+                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
+                </button>
+              </div>
+              <!-- 预览即编辑面（设置项 previewInlineEdit）：v-html 绑的是 previewHtml 而不是 renderedPreview，
+                   编辑期间该字符串被冻结——任何一次重新注入都会重建 DOM、清掉光标并丢掉未回写的改动 -->
+              <div class="md" ref="previewMd" :key="assetVersion" spellcheck="false" :class="[`hljs-theme-${store.settings.codeTheme}`, { 'wysiwyg-on': previewEditable }]" :contenteditable="previewEditable ? 'true' : 'false'" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="previewHtml" @input="onPreviewEditInput" @keydown="onPreviewEditKeydown" @paste="onPreviewEditPaste" @compositionstart="onPreviewCompositionStart" @compositionend="onPreviewCompositionEnd"></div>
             </div>
           </template>
         </div>
@@ -6998,6 +7266,24 @@ ${bodyHtml}
       <div class="modal-foot">
         <button class="btn" @click="showTaskConfirm = false">{{ $t('common.cancel') }}</button>
         <button class="btn btn-primary" @click="submitTaskConfirm">{{ $t('common.confirm') }}</button>
+      </div>
+    </a-modal>
+
+    <!-- 预览就地编辑：链接 / 图片地址弹窗 -->
+    <a-modal v-model:open="pvLinkOpen" :title="pvLinkImage ? $t('editor.image') : $t('editor.pvLink')" :width="440" :footer="null">
+      <div class="saveas">
+        <div class="saveas-field">
+          <label>{{ pvLinkImage ? $t('editor.pvImageAlt') : $t('editor.pvLinkText') }}</label>
+          <input class="input" v-model="pvLinkText" @keyup.enter="submitPvLink" />
+        </div>
+        <div class="saveas-field">
+          <label>{{ $t('editor.pvLinkUrl') }}</label>
+          <input class="input" v-model="pvLinkUrl" :placeholder="$t('editor.phLinkUrl')" @keyup.enter="submitPvLink" />
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" @click="closePvLinkDialog">{{ $t('common.cancel') }}</button>
+        <button class="btn btn-primary" :disabled="!pvLinkUrl.trim()" @click="submitPvLink">{{ $t('common.confirm') }}</button>
       </div>
     </a-modal>
 
@@ -7554,6 +7840,28 @@ label.radio input[type="radio"] { margin: 0; }
 .toolbar .icon-btn.on { background: var(--primary-bg); color: var(--primary-active); }
 .tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 6px; flex: 0 0 auto; }
 .tb-spacer { flex: 1; }
+/* 预览只读态：格式化按钮整排置灰且不吃点击，只留右侧的只读 ⇄ 编辑开关可用 */
+.toolbar.fmt-off .icon-btn:not(.pv-toggle) { opacity: .38; pointer-events: none; }
+.pv-toggle { border: 1px solid var(--border-2); border-radius: 5px; height: 24px; padding: 0 5px; }
+/* 工具栏隐藏时预览区右上角的浮动切换：sticky 贴在滚动容器顶部、零高度所以不挤正文 */
+.pv-float-row {
+  position: sticky; top: 10px; z-index: 6;
+  height: 0; overflow: visible;
+  text-align: right; padding-right: 18px;
+  pointer-events: none;
+}
+.pv-float {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; padding: 0;
+  border: 1px solid var(--border-2); border-radius: 6px;
+  background: var(--panel); color: var(--text-2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .12);
+  opacity: 0; transition: opacity .16s ease, color .16s ease;
+}
+.pane-preview:hover .pv-float { opacity: .55; }
+.pv-float:hover { opacity: 1; color: var(--text); background: var(--hover); }
+.pv-float.on { color: var(--primary-active); }
 
 .panes { flex: 1; display: flex; min-height: 0; overflow: hidden; }
 .pane { flex: 1 1 0%; min-width: 0; overflow-y: auto; }
