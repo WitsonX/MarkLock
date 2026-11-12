@@ -717,6 +717,23 @@ export const useVaultStore = defineStore('vault', {
     },
 
     /**
+     * 库被移出登记（关闭库 / 清空最近）后重建登记：优先用收藏快照，
+     * 库本身未被收藏时按库根路径推导（目录库=目录路径，单文件库=.mdlb 路径），
+     * 保证解锁页 / 就地解锁等后续流程能找到该库。已登记时直接返回现有对象。
+     */
+    ensureVaultRegistered(id: string): VaultInfo | undefined {
+      const existing = this.recent.find((v) => v.id === id)
+      if (existing) return existing
+      if (!id) return undefined
+      const fav = this.favorites.find((x) => x.id === id)
+      if (fav) return this.registerVault({ id: fav.id, name: fav.name, path: fav.path, isDir: fav.isDir, isFileVault: fav.isFileVault })
+      const isFileVault = /\.mdlb$/i.test(id)
+      const base = id.split(/[\\/]/).pop() || id
+      const name = isFileVault ? base.replace(/\.mdlb$/i, '') : base
+      return this.registerVault({ id, name, path: id, isDir: !isFileVault, isFileVault })
+    },
+
+    /**
      * 剔除磁盘上已不存在的登记库（含仅存在于收藏快照里的库）。
      * 已解锁的库跳过：Rust 侧会话仍持密钥，路径可能只是暂时不可访问（外接盘掉线等），
      * 强制移除会连带清掉未落盘的编辑内容。

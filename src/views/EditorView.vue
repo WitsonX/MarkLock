@@ -229,6 +229,8 @@ export default defineComponent({
       _minimizeTimer: null as ReturnType<typeof setInterval> | null,
       _sleepTimer: null as ReturnType<typeof setInterval> | null,
       _autoSaveTimer: null as ReturnType<typeof setInterval> | null,
+      // saveActive 的 in-flight 互斥标志：Ctrl/⌘S 多路径并发命中时防重复写盘/toast
+      _savingActive: false,
       _onVisChange: null as (() => void) | null,
       _onSidebarMousemove: null as ((e: MouseEvent) => void) | null,
       _onSidebarMouseup: null as ((e: MouseEvent) => void) | null,
@@ -427,7 +429,8 @@ export default defineComponent({
       return out
     },
     activeFileName() {
-      return this.activeFile?.name || this.$t('editor.noFileOpen')
+      // 与页签显示口径一致：所属库锁定/关闭后显示掩码名，标题栏不暴露文件名
+      return this.activeFile ? this.fileDisplayName(this.activeFile) : this.$t('editor.noFileOpen')
     },
     /** 当前文件是否因库锁定而不可读（仅库内文件；单文件 .mdl 走页签内密码框，不走这里） */
     isActiveLocked() {
@@ -435,8 +438,11 @@ export default defineComponent({
       if (!f) return false
       // 单文件加密（vaultId 即文件路径）：永远用页签内密码框解锁
       if (f.vaultId === f.path) return false
+      // 明文文件不受库状态影响
+      if (!this.isVaultFile(f)) return false
       const v = this.store.recent.find((v) => v.id === f.vaultId)
-      return v ? !v.unlocked : false
+      // 库锁定或已关闭（移出登记）都会话失效：显示库锁定占位，而非空白编辑区
+      return v ? !v.unlocked : true
     },
     /** 当前激活的单文件 .mdl 页签是否处于锁定态（显示页签内密码框） */
     isActiveFileLocked() {
@@ -450,7 +456,8 @@ export default defineComponent({
       if (!f || !f.encrypted) return true
       if (f.vaultId === f.path) return !f.locked
       const v = this.store.recent.find((x) => x.id === f.vaultId)
-      return !v ? true : !!v.unlocked
+      // 已关闭（移出登记）的库同样无会话：视为锁定，避免 materialize 闯进失效会话
+      return !v ? false : !!v.unlocked
     },
     // 当前编辑内容（双向绑定到 textarea）
     activeContent: {
@@ -987,6 +994,14 @@ export default defineComponent({
       if (e.key === 'Escape' && this.pvSearchOpen) {
         this.closePvSearch()
         return
+      }
+      // Cmd/Ctrl+S：保存当前页签。编辑模式下 CodeMirror 的 Mod-s keymap 会先命中、
+      // macOS 原生菜单 ⌘S 走 menu:save，saveActive 的 in-flight 互斥防重复写盘/toast。
+      // 此分支主要兜底 Windows 预览就地编辑：焦点在 contenteditable 上，CM keymap
+      // 收不到按键、又无原生菜单可走，此前 Ctrl+S 无响应。
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault()
+        this.saveActive()
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'w' || e.key === 'W')) {
         // 有打开页签才拦截，否则放行（允许系统关闭窗口）
@@ -3613,6 +3628,8 @@ export default defineComponent({
       const hits: tauri.SearchHit[] = []
       for (const f of this.store.openFiles) {
         if (hits.length >= 100) break // 对齐 Rust 侧 SEARCH_MAX_HITS
+        // 库锁定/已关闭的库内文件：文件名与内容均不暴露，直接跳过
+        if (this.isVaultFileLocked(f)) continue
         if (f.locked) {
           // 锁定页签读不到内容，文件名照常匹配
           if (f.name.toLowerCase().includes(ql) || f.path.toLowerCase().includes(ql)) {
@@ -4026,21 +4043,30 @@ export default defineComponent({
 
     // ---------- 保存 ----------
     async saveActive() {
-      this.flushPreviewDom()
-      const f = this.activeFile
-      if (!f) return
-      if (f.isNew) {
-        // 草稿页签：弹出「另存为」选择目标
-        this.openSaveAs()
-        return
-      }
+      // in-flight 互斥：同一 Ctrl/⌘S 可能同时命中 CodeMirror Mod-s keymap 与窗口级
+      // keydown（macOS 还可能叠加原生菜单 menu:save），不互斥会并发各写盘一次、
+      // 各弹一次 toast；标志在 await 前置位，第二个并发调用直接丢弃。
+      if (this._savingActive) return
+      this._savingActive = true
       try {
-        await this.store.saveFile(f.path, f.content)
-        // 把自己的写入计入基线，免得下一轮把刚保存的文件当成被外部改动重读一遍
-        externalChanges.sync([this.watchTargetOf(f)])
-        message.success(f.encrypted ? this.$t('toast.savedEnc') : this.$t('toast.saved'))
-      } catch (e) {
-        message.error(String(e))
+        this.flushPreviewDom()
+        const f = this.activeFile
+        if (!f) return
+        if (f.isNew) {
+          // 草稿页签：弹出「另存为」选择目标
+          this.openSaveAs()
+          return
+        }
+        try {
+          await this.store.saveFile(f.path, f.content)
+          // 把自己的写入计入基线，免得下一轮把刚保存的文件当成被外部改动重读一遍
+          externalChanges.sync([this.watchTargetOf(f)])
+          message.success(f.encrypted ? this.$t('toast.savedEnc') : this.$t('toast.saved'))
+        } catch (e) {
+          message.error(String(e))
+        }
+      } finally {
+        this._savingActive = false
       }
     },
 
@@ -4299,6 +4325,8 @@ export default defineComponent({
       this.vaultUnlocking = true
       this.vaultUnlockError = ''
       try {
+        // 库被关闭（移出登记）后先重建登记（收藏快照 / 路径推导），否则 unlockVault 报「未找到该库」
+        this.store.ensureVaultRegistered(f.vaultId)
         await this.store.unlockVault(f.vaultId, this.vaultUnlockPwd)
         this.vaultUnlockPwd = ''
         await this.ensureAssetsMaterialized(this.activeFile)
@@ -5194,13 +5222,9 @@ export default defineComponent({
 
     // ---------- 打开库（从最近/工作目录点击） ----------
     async recentOpenVault(id: string) {
-      let v = this.store.recent.find((x) => x.id === id)
-      if (!v) {
-        // 库已被移出登记（如清空最近打开）：若其被收藏，则用收藏快照重新登记
-        const fav = this.store.favorites.find((x) => x.id === id)
-        if (!fav) return
-        v = this.store.registerVault({ id: fav.id, name: fav.name, path: fav.path, isDir: fav.isDir, isFileVault: fav.isFileVault })
-      }
+      // 库已被移出登记（关闭 / 清空最近）：用收藏快照或库根路径重建登记
+      const v = this.store.ensureVaultRegistered(id)
+      if (!v) return
       // 单文件 .mdl（非目录、非单文件库）：不作为库处理，直接开加密文件页签（内容区密码框）
       if (!v.isDir && !v.isFileVault) {
         // 收藏/最近是快照，文件可能已被移动或删除：打开前先校验，失效则清理登记
@@ -5263,20 +5287,8 @@ export default defineComponent({
           this.store.openEncryptedFile(f.path, f.name)
           return
         }
-        // 库内加密文件：检查所属库是否已解锁（若已被移出登记，则用收藏快照重建登记，保证解锁页能列出该库）
-        let v = this.store.recent.find((x) => x.id === f.vaultId)
-        if (!v) {
-          const fav = this.store.favorites.find((x) => x.id === f.vaultId)
-          if (fav) {
-            v = this.store.registerVault({ id: fav.id, name: fav.name, path: fav.path, isDir: fav.isDir, isFileVault: fav.isFileVault })
-          } else if (f.vaultId) {
-            // 库本身未被收藏：vaultId 即库根路径（目录库为目录路径，单文件库为 .mdlb 路径），据此重建
-            const isFileVault = /\.mdlb$/i.test(f.vaultId)
-            const base = f.vaultId.split(/[\\/]/).pop() || f.vaultId
-            const name = isFileVault ? base.replace(/\.mdlb$/i, '') : base
-            v = this.store.registerVault({ id: f.vaultId, name, path: f.vaultId, isDir: !isFileVault, isFileVault })
-          }
-        }
+        // 库内加密文件：检查所属库是否已解锁（若已被移出登记，ensureVaultRegistered 重建，保证解锁页能列出该库）
+        const v = this.store.ensureVaultRegistered(f.vaultId)
         if (!v || !v.unlocked) {
           // 解锁后自动打开该文件
           this.store.pendingOpen = { vaultId: f.vaultId, path: f.path, name: f.name }
@@ -5530,12 +5542,12 @@ export default defineComponent({
     },
     /** 库会话是否存活（前端守卫）：.mdlb 库内文件锁定时 locked 仍为 false，仅凭 f.locked
      *  会让 materialize 闯进已锁定会话、每条都判解密失败，误报「N 个附件无法解密」。
-     *  库未登记时放行（后端 NotUnlocked 仍会兜底拦截）。 */
+     *  已关闭（移出登记）的库同样无会话：视为不存活，不做无谓的解密尝试。 */
     vaultSessionAlive(f: OpenFile | undefined): boolean {
       if (!f || !f.encrypted) return true
       if (f.vaultId === f.path) return !f.locked
       const v = this.store.recent.find((x) => x.id === f.vaultId)
-      return !v ? true : !!v.unlocked
+      return !v ? false : !!v.unlocked
     },
     /** 预览用的附件基准目录：加密文件解锁后指向缓存根（f.assetDir），其余回退磁盘锚点目录。 */
     assetPreviewBaseDir(f: OpenFile | undefined): string {
@@ -6198,27 +6210,38 @@ ${bodyHtml}
     // ---------- 工具 ----------
     vaultName(vaultId: string) {
       const v = this.store.recent.find((x) => x.id === vaultId)
-      return v ? v.name : ''
+      if (v) return v.name
+      // 库被关闭后回退收藏快照 / 库根路径名，掩码标签仍能显示「xx 库文件」
+      const fav = this.store.favorites.find((x) => x.id === vaultId)
+      if (fav) return fav.name
+      if (!vaultId) return ''
+      const base = vaultId.split(/[\\/]/).pop() || vaultId
+      return base.replace(/\.mdlb$/i, '')
     },
     vaultColor(vaultId: string) {
       const v = this.store.recent.find((x) => x.id === vaultId)
-      return v ? v.color : '#8a919e'
+      if (v) return v.color
+      const fav = this.store.favorites.find((x) => x.id === vaultId)
+      return fav ? fav.color : '#8a919e'
     },
-    /** 文件图标取色：库内文件用库色；独立 .mdl（无库）用固定加密色；明文保持灰。 */
+    /** 文件图标取色：库内文件用库色（关闭后回退收藏快照色）；独立 .mdl（无库）用固定加密色；明文保持灰。 */
     fileIconColor(f: { vaultId: string; encrypted: boolean }) {
       const v = this.store.recent.find((x) => x.id === f.vaultId)
       if (v) return v.color
+      const fav = this.store.favorites.find((x) => x.id === f.vaultId)
+      if (fav) return fav.color
       return f.encrypted ? '#1677ff' : '#8a919e'
     },
     /** 判断一个打开页签是否是「库内加密文件」（vaultId 是库 id，且不是单文件 .mdl）。 */
     isVaultFile(f: { vaultId: string; encrypted: boolean }) {
       return !!(f.encrypted && f.vaultId && f.vaultId !== (f as any).path)
     },
-    /** 判断一个库内文件所属库当前是否已锁定。 */
+    /** 判断一个库内文件所属库当前是否不可读（已锁定，或已关闭移出登记）。 */
     isVaultFileLocked(f: { vaultId: string; encrypted: boolean }) {
       if (!this.isVaultFile(f)) return false
       const v = this.store.recent.find((x) => x.id === f.vaultId)
-      return v ? !v.unlocked : false
+      // 库被关闭后会话同样失效：按锁定掩码，不暴露文件名
+      return v ? !v.unlocked : true
     },
     /** 页签/条目的显示名：库内文件锁定后显示「xx 库文件」，不暴露具体文件名。 */
     fileDisplayName(f: { name: string; vaultId: string; encrypted: boolean }) {
