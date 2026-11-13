@@ -22,6 +22,7 @@ import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
 import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, type PreviewFmt } from '../lib/wysiwyg'
 import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
+import { bindHoverTip } from '../lib/tooltip'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
 // 已抽到 src/lib/preview.ts，主编辑器与便携便签共用；本文件仅保留逐块渲染的滚动同步逻辑。
@@ -135,7 +136,17 @@ export default defineComponent({
       // 自己回写后的源码快照：用于区分「内容变化来自就地编辑」与「磁盘/外部写入」
       previewSelfContent: null as string | null,
       previewComposing: false,
+      // ⌘/Ctrl 按住中：就地编辑态的链接此刻可点击打开（见 onPreviewLinkClick），
+      // pv-link-hot 类据此把手型光标/下划线提示给到链接上
+      pvLinkHot: false,
+      _pvLinkTipUnbind: null as (() => void) | null,
       _previewFlushTimer: 0 as any,
+      // 视图切换的滚动对位令牌（见 setMode）：每次切换自增，旧的逐帧对位循环据此退出
+      _modeSyncToken: 0,
+      // 最近一次**程序化**定位到的源码行（预览驱动 / 视图切换对位）+ 时间戳：CodeMirror 还会
+      // 补发一次 scroll 事件，行号就是这一行（最多 ±1），短时窗内不当成用户滚动反灌回预览
+      _syncEchoLine: null as number | null,
+      _syncEchoAt: 0,
       // 编辑态没有 `[文字](url)` 这样的源码可以插，链接/图片只能弹窗收地址
       pvLinkOpen: false,
       pvLinkImage: false,
@@ -222,6 +233,8 @@ export default defineComponent({
       _unlistenFocus: null as UnlistenFn | null,
       // 全局键盘监听清理句柄（Cmd/Ctrl+W 关闭页签）
       _onKeydown: null as ((e: KeyboardEvent) => void) | null,
+      _onKeyup: null as ((e: KeyboardEvent) => void) | null,
+      _onWinBlur: null as (() => void) | null,
       _onDocMousedown: null as ((e: MouseEvent) => void) | null,
       // 侧边栏文件/文件夹拖拽：文档级 mousedown 委托（在捕获阶段识别带 data-drag-kind 的行）
       _onFileDragDown: null as ((e: MouseEvent) => void) | null,
@@ -511,10 +524,6 @@ export default defineComponent({
     /** 预览区是否处于可编辑态（所见即所得）= 能开 且 设置开启 */
     previewEditable(): boolean {
       return this.pvCanEdit && this.store.settings.previewInlineEdit !== false
-    },
-    /** 工具栏隐藏时，只读 ⇄ 编辑的切换没有落点，改为预览区右上角的浮动按钮（鼠标进预览区才现形） */
-    pvFloatShow(): boolean {
-      return this.pvCanEdit && !this.store.settings.showToolbar
     },
     /** 预览内搜索计数文案：空查询不显示；无效正则 / 无结果各自提示；否则「当前/总数」 */
     pvSearchCountText(): string {
@@ -973,6 +982,8 @@ export default defineComponent({
     }
     // 全局快捷键：Cmd/Ctrl+W 关闭当前页签（而不是关闭整个窗口）；Cmd/Ctrl+F 打开编辑器搜索
     this._onKeydown = (e: KeyboardEvent) => {
+      // ⌘/Ctrl 按下：就地编辑态链接进入「可点击打开」提示态（光标/下划线，见 pv-link-hot）
+      if (e.key === 'Meta' || e.key === 'Control') this.pvLinkHot = true
       // 新建加密库/设为默认打开程序弹窗：按 Esc 取消。Ant 的 keyboard 仅在焦点位于弹窗内时生效，
       // 这里做兜底，确保焦点不在弹窗内时 Esc 也能取消。
       if (e.key === 'Escape' && (this.showCreateVault || this.showAssocPrompt)) {
@@ -1094,6 +1105,29 @@ export default defineComponent({
       }
     }
     window.addEventListener('keydown', this._onKeydown)
+    this._onKeyup = (e: KeyboardEvent) => {
+      if (e.key === 'Meta' || e.key === 'Control') this.pvLinkHot = false
+    }
+    window.addEventListener('keyup', this._onKeyup)
+    // ⌘Tab 切走等场景收不到 keyup：失焦时兜底清掉，避免提示态卡住
+    this._onWinBlur = () => { this.pvLinkHot = false }
+    window.addEventListener('blur', this._onWinBlur)
+    // 就地编辑态链接的悬停提示（v-html 内容绑不了 v-tip，走委托气泡）：
+    // 绑在组件根而不是 .md 节点——后者随 assetVersion 换 key 重建，监听会丢
+    this._pvLinkTipUnbind = bindHoverTip(this.$el as HTMLElement, {
+      pick: (t) => {
+        if (!this.previewEditable) return null
+        const a = t.closest('.pane-preview a') as HTMLAnchorElement | null
+        // # 锚点在编辑态普通点击就能页内滚动，不需要「按住修饰键」提示
+        if (!a || (a.getAttribute('href') || '').startsWith('#')) return null
+        return a
+      },
+      text: () =>
+        this.pvLinkHot
+          ? this.$t('editor.pvLinkOpenTip')
+          : this.$t('editor.pvLinkTip', { mod: isMac ? '⌘' : 'Ctrl' }),
+      enabled: () => this.previewEditable,
+    })
     // 点击「更多」菜单或搜索面板外部时自动收起
     this._onDocMousedown = (e: MouseEvent) => {
       // 右键菜单：点击其外部任意处即关闭
@@ -1163,6 +1197,9 @@ export default defineComponent({
     if (this._unlistenMenu) this._unlistenMenu()
     if (this._unlistenFocus) this._unlistenFocus()
     if (this._onKeydown) window.removeEventListener('keydown', this._onKeydown)
+    if (this._onKeyup) window.removeEventListener('keyup', this._onKeyup)
+    if (this._onWinBlur) window.removeEventListener('blur', this._onWinBlur)
+    if (this._pvLinkTipUnbind) this._pvLinkTipUnbind()
     if (this._onDocMousedown) document.removeEventListener('mousedown', this._onDocMousedown)
     if (this._onFileDragDown) document.removeEventListener('mousedown', this._onFileDragDown, true)
     if (this._onWinReposition) {
@@ -1312,7 +1349,7 @@ export default defineComponent({
         this.applyPvw(isImage ? { op: 'image', alt: text, url } : { op: 'link', text, url, placeholder: this.$t('editor.phLinkText') })
       })
     },
-    /** 工具栏的只读 ⇄ 编辑开关：翻的是设置里那一个值，不做第二份状态。
+    /** 标题栏（视图切换段左侧）的只读 ⇄ 编辑开关：翻的是设置里那一个值，不做第二份状态。
      *  走 updateSettings 而非直接改内存再 persistSettings：便签窗共用同一份 localStorage，
      *  整体回写本窗旧快照会把它刚写的字段（便签目标 / 快速启动顺序）一并覆盖掉。 */
     togglePvEdit() {
@@ -1401,10 +1438,50 @@ export default defineComponent({
       return !!el.closest('.cm-editor') || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable
     },
     setMode(mode: 'edit' | 'split' | 'preview') {
+      if (mode === this.currentMode) return
       // 离开预览先收掉预览内搜索并还原高亮（编辑 / 分屏下 ⌘F 走编辑器搜索面板）
       if (mode !== 'preview') this.closePvSearch()
+      const fromPreview = this.currentMode !== 'edit'
+      // 面板宽度是 0.24s 过渡：预览从 100% 收到 splitRatio（或反过来），正文边重排边变高，
+      // 同样的 scrollTop 看到的是更靠前的内容——不补偿就是「切分屏时往上滚一下」的根源。
+      // 这里先记下视口顶的锚块（元素 + 块内像素偏移），过渡期间逐帧把它钉回视口顶。
+      const anchor = fromPreview ? this._previewAnchor() : null
       this.currentMode = mode
       this.store.updateSettings({ editorMode: mode })
+
+      const token = ++this._modeSyncToken
+      // 过渡期间禁掉双向同步：每帧重排都会让 CodeMirror 的 scrollDOM 被夹取并发 scroll，
+      // 而窄宽度下的「视口顶行」换算失真，反灌给预览就是一次几行的跳。
+      this.syncingScroll = true
+      const settle = () => {
+        // 期间又切了视图：交给最新那一次收尾，这里不动标志位
+        if (token !== this._modeSyncToken || this.currentMode !== mode) return
+        // 分屏：基准始终是用户刚才在读的预览，过渡结束让源码侧跟到它当前的顶部行
+        if (mode === 'split' && fromPreview) {
+          const line = this._previewTopLine()
+          if (line != null) {
+            const n = Math.round(line)
+            this._syncEchoLine = n
+            this._syncEchoAt = performance.now()
+            this.activeEditor()?.revealLine?.(n)
+          }
+        }
+        setTimeout(() => {
+          if (token === this._modeSyncToken) this.syncingScroll = false
+        }, 120)
+      }
+      if (!anchor || mode === 'edit') {
+        setTimeout(settle, 300)
+        return
+      }
+      const t0 = performance.now()
+      const pin = () => {
+        if (token !== this._modeSyncToken || this.currentMode !== mode) return
+        this._pinPreviewAnchor(anchor)
+        if (performance.now() - t0 < 280) requestAnimationFrame(pin)
+        else { this._pinPreviewAnchor(anchor); settle() }
+      }
+      requestAnimationFrame(pin)
     },
     /** 预览区双击切换 split/preview（可在设置中关闭）：落在代码块复制按钮上时跳过，避免误切视图。
      *  就地编辑开启时让位给浏览器的双击选词——预览已经是编辑面，双击应当选中单词而不是换视图。 */
@@ -1575,6 +1652,20 @@ export default defineComponent({
 
     onEditorScroll(line: number) {
       if (this.syncingScroll) return
+      // 预览模式：源码面板被收成 0 宽，隐藏编辑器的滚动不是任何用户意图——就地编辑每次回写
+      // 都会让 CodeMirror 整篇替换并重设视口（见 CodeMirrorEditor 的 modelValue watcher），
+      // 而在 0 宽下 topViewportLine 的行号换算失真、还会发出 scroll 事件；若把它反向同步给
+      // 预览，可见视口会被一行行往上带（macOS 上预览打字每字上滚的根因，与便签 mode 守卫同理）
+      if (this.currentMode === 'preview') return
+      // 程序化定位的余波：我们用 revealLine 把源码滚到某行后（预览滚动驱动 / 视图切换对位），
+      // CodeMirror 还会补一次 measure 并补发 scroll，行号就是那一行（最多 +1）。当成用户滚动
+      // 反灌回去，预览就会被重新按「块顶对齐」定位——往上错半行到一行，即「切换/滚动时往上一跳」。
+      if (
+        this._syncEchoLine != null &&
+        Math.abs(line - this._syncEchoLine) <= 1 &&
+        performance.now() - this._syncEchoAt < 500
+      ) return
+      this._syncEchoLine = null
       this.syncingScroll = true
       this._previewScrollToLine(line)
       this._outlineSyncActive(line)
@@ -1600,30 +1691,69 @@ export default defineComponent({
     },
     onPreviewScroll() {
       if (this.syncingScroll) return
-      this.syncingScroll = true
-      const pane = this.$refs.previewPane as HTMLElement
+      const line = this._previewTopLine()
       const cm = this.activeEditor()
-      const blocks = this._syncBlocks()
-      if (pane && cm && blocks.length) {
-        const top = pane.scrollTop
-        let i = 0
-        for (let k = 0; k < blocks.length; k++) { if (blocks[k].top <= top) i = k; else break }
-        const cur = blocks[i]
-        const next = blocks[i + 1]
-        let line = cur.line
-        if (next && next.top > cur.top) {
-          const frac = Math.min(1, Math.max(0, (top - cur.top) / (next.top - cur.top)))
-          line = cur.line + frac * (next.line - cur.line)
-        }
-        cm.revealLine(Math.round(line))
-      }
+      if (line == null || !cm) return
+      this.syncingScroll = true
+      const n = Math.round(line)
+      this._syncEchoLine = n
+      this._syncEchoAt = performance.now()
+      cm.revealLine(n)
       setTimeout(() => { this.syncingScroll = false }, 60)
+    },
+    /** 预览区顶部的锚点：视口顶命中的顶层块元素 + 光标相对该块顶的像素偏移。
+     *  宽度变化后按**同一个块**重新测量就能把正在读的那一块钉回视口顶——不依赖行号插值模型，
+     *  重排幅度再大也不会先上跳再回弹。预览不可见时返回 null。 */
+    _previewAnchor(): { el: HTMLElement; dy: number } | null {
+      const pane = this.$refs.previewPane as HTMLElement | null
+      const md = pane?.querySelector('.md') as HTMLElement | null
+      if (!pane || !md || !pane.clientWidth) return null
+      const paneTop = pane.getBoundingClientRect().top
+      const scrollTop = pane.scrollTop
+      let best: HTMLElement | null = null
+      for (const el of Array.from(md.querySelectorAll('.mb')) as HTMLElement[]) {
+        const elTop = el.getBoundingClientRect().top - paneTop + scrollTop
+        if (elTop <= scrollTop + 0.5) best = el
+        else break
+      }
+      if (!best) return null
+      const bestTop = best.getBoundingClientRect().top - paneTop + scrollTop
+      return { el: best, dy: scrollTop - bestTop }
+    },
+    /** 把锚块钉回视口顶（过渡期间逐帧调用）：只量一个元素，长文档也不会每帧扫全文。
+     *  块被重新注入（v-html 换 key）时失效，直接交给收尾对位。 */
+    _pinPreviewAnchor(a: { el: HTMLElement; dy: number }) {
+      const pane = this.$refs.previewPane as HTMLElement | null
+      if (!pane || !a.el.isConnected) return
+      const top = a.el.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop
+      pane.scrollTop = Math.max(0, top + a.dy)
+    },
+    /** 预览区当前视口顶部对应的源码行（顶层块之间线性插值，与 onPreviewScroll 同口径）。
+     *  预览不可见（编辑视图）或没有块锚点时返回 null——此时没有可保留的阅读位置。 */
+    _previewTopLine(): number | null {
+      if (this.currentMode === 'edit') return null
+      const pane = this.$refs.previewPane as HTMLElement | null
+      if (!pane) return null
+      const blocks = this._syncBlocks()
+      if (!blocks.length) return null
+      const top = pane.scrollTop
+      let i = 0
+      for (let k = 0; k < blocks.length; k++) { if (blocks[k].top <= top) i = k; else break }
+      const cur = blocks[i]
+      const next = blocks[i + 1]
+      let line = cur.line
+      if (next && next.top > cur.top) {
+        const frac = Math.min(1, Math.max(0, (top - cur.top) / (next.top - cur.top)))
+        line = cur.line + frac * (next.line - cur.line)
+      }
+      return line
     },
     /** 预览区链接点击拦截：`http/https/mailto` 交给系统默认浏览器；`#锚点` 保留默认行为；
      *  其余相对路径文件链接（如 `./ARCHITECTURE.md`）必须拦截——否则 WKWebView 会拿
      *  `tauri://localhost/ARCHITECTURE.md` 导航，把编辑器整页替换成乱码原文；
      *  拦截后按当前文件所在目录解析为绝对路径，在应用内打开。
-     *  用 `getAttribute('href')` 取原始值，因为属性读取会把相对路径预处理成 `tauri://localhost/...`，不利于协议判断。 */
+     *  用 `getAttribute('href')` 取原始值，因为属性读取会把相对路径预处理成 `tauri://localhost/...`，不利于协议判断。
+     *  就地编辑态普通点击只落光标，⌘/Ctrl+点击才走同一套链接分派（见下方 editable 分支）。 */
     onPreviewLinkClick(e: MouseEvent) {
       const target = e.target as HTMLElement | null
       if (!target) return
@@ -1636,11 +1766,13 @@ export default defineComponent({
         return
       }
       // 就地编辑中：勾选态以 DOM 为准（序列化时读 input.checked），交给浏览器翻转即可；
-      // 链接点击不能让页面跳转或开新页签，那会连光标一起弄丢，只保留 # 锚点的页内滚动。
+      // 普通链接点击只落光标——跳转或开新页签会连光标一起弄丢；⌘/Ctrl+点击打开链接，
+      // 与只读预览同一套分派（外链进系统浏览器、相对路径应用内打开、# 锚点页内滚动）。
       if (this.previewEditable) {
         if (target.closest('input.task-cb')) return
         const box = target.closest('a') as HTMLAnchorElement | null
-        if (box && !(box.getAttribute('href') || '').startsWith('#')) e.preventDefault()
+        if (box && (e.metaKey || e.ctrlKey)) this.dispatchPreviewLink(e, box)
+        else if (box && !(box.getAttribute('href') || '').startsWith('#')) e.preventDefault()
         return
       }
       // 任务清单复选框：回改源码对应标记（分屏直接改，预览模式先确认）
@@ -1653,6 +1785,11 @@ export default defineComponent({
       }
       const a = target.closest('a') as HTMLAnchorElement | null
       if (!a) return
+      this.dispatchPreviewLink(e, a)
+    },
+    /** 链接分派（只读预览点击 与 就地编辑 ⌘/Ctrl+点击 共用）：
+     *  http/https/mailto 交系统浏览器；# 锚点保留页内滚动；相对路径在应用内打开。 */
+    dispatchPreviewLink(e: MouseEvent, a: HTMLAnchorElement) {
       const raw = a.getAttribute('href') || ''
       const lower = raw.toLowerCase()
       if (lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('mailto:')) {
@@ -6277,20 +6414,23 @@ ${bodyHtml}
       return this.fileTip(f)
     },
     /** 页签/条目的「相对所属根目录」路径（不含文件名）：单文件库=库内相对路径、目录库=相对库根、
-     *  工作目录内明文=相对工作目录根、其余明文=绝对路径。锁定库文件与未保存草稿返回空串。 */
+     *  工作目录内明文=相对工作目录根、其余明文=绝对路径。锁定库文件与未保存草稿返回空串。
+     *  直接躺在根里（相对目录为空）的文件回退成「根的显示名」（工作目录文件夹名 / 库名）——
+     *  否则同名条目里它因为没目录可写而没有副标题，用户分不清它是哪一个。 */
     tabRelDir(f: { path: string; vaultId: string; encrypted: boolean; relPath?: string; isNew?: boolean }): string {
       if ((f as any).isNew || this.isVaultFileLocked(f)) return ''
       const dirname = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
       if (f.encrypted && f.vaultId) {
         const hash = f.path.indexOf('#')
-        if (hash >= 0) return dirname(f.relPath || f.path.slice(hash + 1))
+        if (hash >= 0) return dirname(f.relPath || f.path.slice(hash + 1)) || this.vaultName(f.vaultId)
         const root = this.normPath(f.vaultId)
         const p = this.normPath(f.path)
-        return root && p.startsWith(root + '/') ? p.slice(root.length + 1) : dirname(p)
+        if (root && p.startsWith(root + '/')) return dirname(p.slice(root.length + 1)) || this.vaultName(f.vaultId)
+        return dirname(p)
       }
       const root = this.normPath(this.workdirRoot)
       const p = this.normPath(f.path)
-      if (root && p.startsWith(root + '/')) return dirname(p.slice(root.length + 1))
+      if (root && p.startsWith(root + '/')) return dirname(p.slice(root.length + 1)) || this.workdirTitle
       return dirname(p)
     },
     /** 给一组条目生成「同名才有的目录子标题」：按显示名分组，冲突组内从所属目录名开始，
@@ -6383,6 +6523,11 @@ ${bodyHtml}
         </span>
         <span v-if="hasLockables" class="icon-btn" :title="$t('editor.lockSc')" style="color: #d48806;" @click="lockAll">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+        </span>
+        <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，就近摆在视图切换段左侧（便签窗同位置） -->
+        <span v-if="currentMode === 'preview'" class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+          <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
+          <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
         </span>
         <div class="seg">
           <span :class="{ on: currentMode === 'edit' }" :title="$t('editor.toggleViewSc')" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
@@ -6742,9 +6887,10 @@ ${bodyHtml}
       <!-- 工作台 -->
       <section class="workbench">
         <!-- 格式化工具栏 -->
-        <!-- 格式化工具栏：预览模式同样显示（就地编辑开启时命令作用在渲染出的 DOM 上，见 lib/wysiwyg 命令层）。
+        <!-- 格式化工具栏：编辑 / 分屏常显；预览态只在就地编辑开启时显示（命令作用在渲染出的 DOM 上，见 lib/wysiwyg 命令层），
+             只读预览没有落点，整条收起。
              mousedown 一律 preventDefault：否则点按钮会把焦点从 contenteditable 上抢走、选区随之丢失。 -->
-        <div v-show="store.settings.showToolbar && activeFile" class="toolbar" :class="{ 'fmt-off': currentMode === 'preview' && !previewEditable }" @mousedown.prevent>
+        <div v-show="store.settings.showToolbar && activeFile && (currentMode !== 'preview' || previewEditable)" class="toolbar" @mousedown.prevent @contextmenu="openContextMenu($event, 'view')">
           <span class="icon-btn" v-tip="{ text: $t('editor.h1'), place: 'bottom' }" @click="fmtHeading(1)"><b style="font-size:13px;">H1</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h2'), place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h3'), place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
@@ -6763,14 +6909,10 @@ ${bodyHtml}
           <span class="icon-btn" v-tip="{ text: $t('editor.linkSc'), place: 'bottom' }" @click="fmtLink(false)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.image'), place: 'bottom' }" @click="fmtLink(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.hr'), place: 'bottom' }" @click="fmtHr"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /></svg></span>
-          <span class="tb-sep"></span>
+          <!-- 换行开关只在源码可写的编辑 / 分屏有落点；跟着它一起隐掉分隔线，避免预览态尾部多出一根竖线 -->
+          <span v-if="currentMode !== 'preview'" class="tb-sep"></span>
           <span v-if="currentMode !== 'preview'" class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? $t('editor.wrapOff') : $t('editor.wrapOn'), place: 'bottom' }" @click="wordWrap = !wordWrap">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-9" /><path d="M12 18l-3-3 3-3" /></svg>
-          </span>
-          <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，这里只是就近的入口 -->
-          <span v-else class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
-            <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
-            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
           </span>
           <span class="tb-spacer"></span>
           <span class="tag tag-gray" style="flex:0 0 auto;">Markdown</span>
@@ -6872,7 +7014,7 @@ ${bodyHtml}
 
             <!-- 预览 -->
             <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
-              <!-- 预览内搜索（预览模式 ⌘F）：sticky 零高度行贴在滚动容器顶部，与 pv-float-row 同形状；
+              <!-- 预览内搜索（预览模式 ⌘F）：sticky 零高度行贴在滚动容器顶部；
                    整行不吃点击，只有搜索栏吃，不挡正文框选 -->
               <div v-if="pvSearchOpen" class="pv-search-row">
                 <div class="pv-search-bar" @click.stop @dblclick.stop>
@@ -6902,17 +7044,9 @@ ${bodyHtml}
                   </button>
                 </div>
               </div>
-              <!-- 工具栏隐藏时唯一的只读 ⇄ 编辑入口：贴在滚动容器顶部（sticky + 零高度，不占正文位置），
-                   平时不可见、鼠标进入预览区才半透明显形；整行不吃点击，只有按钮吃；搜索栏开着时让位避免重叠 -->
-              <div v-if="pvFloatShow && !pvSearchOpen" class="pv-float-row">
-                <button type="button" class="pv-float" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'left' }" @click="togglePvEdit">
-                  <svg v-if="previewEditable" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
-                  <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
-                </button>
-              </div>
               <!-- 预览即编辑面（设置项 previewInlineEdit）：v-html 绑的是 previewHtml 而不是 renderedPreview，
                    编辑期间该字符串被冻结——任何一次重新注入都会重建 DOM、清掉光标并丢掉未回写的改动 -->
-              <div class="md" ref="previewMd" :key="assetVersion" spellcheck="false" :class="[`hljs-theme-${store.settings.codeTheme}`, { 'wysiwyg-on': previewEditable }]" :contenteditable="previewEditable ? 'true' : 'false'" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="previewHtml" @input="onPreviewEditInput" @keydown="onPreviewEditKeydown" @paste="onPreviewEditPaste" @compositionstart="onPreviewCompositionStart" @compositionend="onPreviewCompositionEnd"></div>
+              <div class="md" ref="previewMd" :key="assetVersion" spellcheck="false" :class="[`hljs-theme-${store.settings.codeTheme}`, { 'wysiwyg-on': previewEditable, 'pv-link-hot': pvLinkHot }]" :contenteditable="previewEditable ? 'true' : 'false'" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="previewHtml" @input="onPreviewEditInput" @keydown="onPreviewEditKeydown" @paste="onPreviewEditPaste" @compositionstart="onPreviewCompositionStart" @compositionend="onPreviewCompositionEnd"></div>
             </div>
           </template>
         </div>
@@ -7865,8 +7999,9 @@ ${bodyHtml}
 .t-item.dragging { opacity: 0.4; }
 .t-item.dragover { box-shadow: inset 0 2px 0 var(--primary); background: var(--primary-bg); }
 .t-item .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* 同名条目的目录子标题：紧跟文件名，小字弱化，过长省略 */
-.t-item .dir-sub { flex: 0 1 auto; max-width: 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--text-4); margin-left: -8px; }
+/* 同名条目的目录子标题：小字弱化、过长省略；靠 fname 撑开把空档留在文件名一侧，
+   静态时贴住行右缘，悬停后行内浮出星标 / 关闭按钮再把它往左挤 */
+.t-item .dir-sub { flex: 0 1 auto; max-width: 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--text-4); }
 .t-item svg.lead { flex: 0 0 auto; }
 .chev-i { transition: transform 0.15s; }
 .t-item .meta { font-size: 11px; color: var(--text-4); flex: 0 0 auto; }
@@ -7887,14 +8022,15 @@ ${bodyHtml}
 /* 状态栏外部修改提示：modified 可点击重载，missing 仅展示 */
 .statusbar .st-ext { color: #d46b08; cursor: pointer; }
 .statusbar .st-ext.missing { color: #cf1322; cursor: default; }
+/* 收藏星标：平时 display:none 不占位——否则行右缘白留 23px，目录副标题贴不到右边；
+   悬停（或已收藏）才出现，与 .x 同步占位，把副标题挤到左侧 */
 .t-item .star {
   width: 18px; height: 18px;
-  display: inline-flex; align-items: center; justify-content: center;
+  display: none; align-items: center; justify-content: center;
   border-radius: 4px; color: var(--text-4); flex: 0 0 auto;
-  opacity: 0;
 }
-.t-item:hover .star { opacity: 1; }
-.t-item .star.on { opacity: 1; color: var(--gold); }
+.t-item:hover .star, .t-item .star.on { display: inline-flex; }
+.t-item .star.on { color: var(--gold); }
 .t-item .star:hover { background: var(--border); color: var(--gold); }
 .t-sub { padding-left: 28px; }
 .t-sub2 { padding-left: 49px; }
@@ -7998,30 +8134,11 @@ label.radio input[type="radio"] { margin: 0; }
 .toolbar .icon-btn.on { background: var(--primary-bg); color: var(--primary-active); }
 .tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 6px; flex: 0 0 auto; }
 .tb-spacer { flex: 1; }
-/* 预览只读态：格式化按钮整排置灰且不吃点击，只留右侧的只读 ⇄ 编辑开关可用 */
-.toolbar.fmt-off .icon-btn:not(.pv-toggle) { opacity: .38; pointer-events: none; }
+/* 只读 ⇄ 编辑（标题栏，视图切换段左侧；便签窗同位置） */
 .pv-toggle { border: 1px solid var(--border-2); border-radius: 5px; height: 24px; padding: 0 5px; }
-/* 工具栏隐藏时预览区右上角的浮动切换：sticky 贴在滚动容器顶部、零高度所以不挤正文 */
-.pv-float-row {
-  position: sticky; top: 10px; z-index: 6;
-  height: 0; overflow: visible;
-  text-align: right; padding-right: 18px;
-  pointer-events: none;
-}
-.pv-float {
-  pointer-events: auto;
-  display: inline-flex; align-items: center; justify-content: center;
-  width: 26px; height: 26px; padding: 0;
-  border: 1px solid var(--border-2); border-radius: 6px;
-  background: var(--panel); color: var(--text-2);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, .12);
-  opacity: 0; transition: opacity .16s ease, color .16s ease;
-}
-.pane-preview:hover .pv-float { opacity: .55; }
-.pv-float:hover { opacity: 1; color: var(--text); background: var(--hover); }
-.pv-float.on { color: var(--primary-active); }
+.tb-right .pv-toggle.on { background: var(--primary-bg); color: var(--primary-active); border-color: var(--primary-bg); }
 
-/* 预览内搜索栏：与 pv-float-row 同形状的 sticky 零高度行，滚动时始终贴在预览区顶部；
+/* 预览内搜索栏：sticky 零高度行，滚动时始终贴在预览区顶部；
    栏体自己吃点击，行容器 pointer-events: none 不挡正文框选 */
 .pv-search-row {
   position: sticky; top: 10px; z-index: 7;

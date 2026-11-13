@@ -360,8 +360,10 @@ html[data-theme='dark'] .md input[type="checkbox"]:checked {
 .md.wysiwyg-on:focus { outline: none; }
 /* 空的编辑容器（回车刚分出的新段）本身没有行盒，插入符会看不见，用 min-height 顶出一行 */
 .md.wysiwyg-on p, .md.wysiwyg-on li { min-height: 1em; }
-/* 编辑态点链接不跳转，手型光标会误导「可以点」 */
+/* 编辑态普通点击链接不跳转（只落光标），手型光标会误导「可以点」；
+   按住 ⌘/Ctrl 时链接变为「点击打开」（pv-link-hot 由视图层按键状态驱动），手型 + 下划线提示 */
 .md.wysiwyg-on a { cursor: text; }
+.md.wysiwyg-on.pv-link-hot a { cursor: pointer; text-decoration: underline; }
 /* contenteditable=false 的应用控件（复制按钮、任务复选框）不参与文本拖拽与选中 */
 .md.wysiwyg-on [contenteditable="false"] { cursor: default; }
 /* 但两枚控件本身仍然可点，不能跟着上面的规则失去手型 */

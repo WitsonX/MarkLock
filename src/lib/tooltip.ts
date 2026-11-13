@@ -186,4 +186,62 @@ const tip: Directive = {
   unmounted: (el) => unbind(el as HTMLElement),
 }
 
+/** v-html 动态内容（如就地编辑预览里的链接）的悬停气泡：委托 mouseover/mouseout，
+ *  无需逐元素绑 v-tip。pick 从事件目标挑出要提示的元素（返回 null 则不提示），
+ *  text/enabled 在显示时刻求值；与 v-tip 共用同一只单例气泡。返回解绑函数。 */
+export function bindHoverTip(
+  root: HTMLElement,
+  opts: {
+    pick: (target: HTMLElement) => HTMLElement | null
+    text: () => string
+    enabled?: () => boolean
+    place?: 'right' | 'bottom' | 'top' | 'left'
+  },
+): () => void {
+  const place = opts.place || 'top'
+  const enabled = opts.enabled || (() => true)
+  let cur: HTMLElement | null = null
+  let timer: number | null = null
+  const clear = () => {
+    if (timer !== null) {
+      window.clearTimeout(timer)
+      timer = null
+    }
+  }
+  const drop = () => {
+    clear()
+    cur = null
+    hide()
+  }
+  const over = (e: MouseEvent) => {
+    const t = e.target as HTMLElement | null
+    const hit = t ? opts.pick(t) : null
+    if (hit === cur) return
+    drop()
+    if (!hit) return
+    cur = hit
+    // 延迟显示：快速划过不打扰（与 v-tip 同节奏）；到点再验一次仍悬停同一元素且还在文档里
+    // （v-html 重建 DOM / 退出编辑态后旧节点已失效，不能拿它去定位）
+    timer = window.setTimeout(() => {
+      if (cur === hit && hit.isConnected && enabled()) show(hit, opts.text(), place)
+    }, SHOW_DELAY)
+  }
+  const out = (e: MouseEvent) => {
+    // 移到链接自己的子节点（如强调文字）不算离开
+    if (cur && !(e.relatedTarget instanceof Node && cur.contains(e.relatedTarget))) drop()
+  }
+  const scroll = () => drop()
+  root.addEventListener('mouseover', over)
+  root.addEventListener('mouseout', out)
+  root.addEventListener('mousedown', drop)
+  window.addEventListener('scroll', scroll, true)
+  return () => {
+    drop()
+    root.removeEventListener('mouseover', over)
+    root.removeEventListener('mouseout', out)
+    root.removeEventListener('mousedown', drop)
+    window.removeEventListener('scroll', scroll, true)
+  }
+}
+
 export default tip

@@ -107,6 +107,9 @@ export default {
     // Preview inline edit: the read-only ⇄ edit toolbar switch and the link/image dialog
     pvEditTip: 'Read-only. Click to edit the text right in the preview',
     pvReadTip: 'Editable. Click to switch back to read-only preview',
+    // Hover hint for links in inline-edit mode: plain click only places the caret, modifier-click opens ({mod} is ⌘/Ctrl per platform)
+    pvLinkTip: 'Hold {mod} and click to open the link',
+    pvLinkOpenTip: 'Click to open the link',
     pvLink: 'Link',
     pvLinkText: 'Text to display',
     pvImageAlt: 'Alternative text',
@@ -642,7 +645,7 @@ export default {
       recent: 'Recently opened', recentD: 'Vaults and files you opened recently',
       workdir: 'Working directory', workdirD: 'File tree of open working directories',
       outline: 'Outline', outlineD: 'Heading structure of the current file; click to jump',
-      inlineEdit: 'Edit in the preview', inlineEditD: 'Type straight into the preview view; changes are converted back to Markdown source and the format toolbar works there too. Source formatting gets normalised (Setext headings, underscore bold) while rendering stays the same. Turn off to keep the preview read-only — the eye / pencil button at the right end of the toolbar is the same switch, and it moves to the top-right corner of the preview when the toolbar is hidden',
+      inlineEdit: 'Edit in the preview', inlineEditD: 'Type straight into the preview view; changes are converted back to Markdown source and, while this is on, the format toolbar stays available in preview too. Source formatting gets normalised (Setext headings, underscore bold) while rendering stays the same. Turn it off and the preview is read-only with the whole format toolbar hidden — the eye / pencil button just left of Edit / Split / Preview in the title bar is the same switch',
       dblToggle: 'Double-click preview to switch view', dblToggleD: 'Double-clicking the preview toggles between split and preview; with in-place editing on, double-click selects a word instead and this setting has no effect',
       gTypography: 'Typography',
       fontSize: 'Editor font size',

@@ -369,14 +369,15 @@ export default defineComponent({
       const st = view.state
       const anchor = Math.min(st.selection.main.anchor, newVal.length)
       const head = Math.min(st.selection.main.head, newVal.length)
-      const topLine = topViewportLine(view)
       view.dispatch({
         changes: { from: 0, to: current.length, insert: newVal },
         selection: { anchor, head },
         annotations: Transaction.addToHistory.of(false),
       })
-      // 整篇替换后按行号重新对位视口（行数变少时 revealLine 会自动夹取）
-      revealLine(topLine)
+      // 整篇替换后按行号重新对位视口（行数变少时 revealLine 会自动夹取）。
+      // 编辑器不可见时（预览模式面板收成 0 宽）不做对位：0 宽下行号换算失真、视口也无保留意义，
+      // 且 scrollIntoView 发出的 scroll 事件会被父组件当成用户滚动，反向把可见预览区一行行往上带
+      if (isVisible()) revealLine(topViewportLine(view))
     })
 
     watch(() => props.readonly, (newVal) => {
