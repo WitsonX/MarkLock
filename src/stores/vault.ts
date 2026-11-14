@@ -169,6 +169,8 @@ export interface Settings {
   showHiddenFiles: boolean
   /** 恢复上次打开的文件 */
   restoreLastSession: boolean
+  /** 是否记录打开历史（「最近打开」列表）：关闭后不再写入新记录，并清空已有记录 */
+  recordHistory: boolean
   /** 登录系统时自动启动 MarkLock（写入 macOS LaunchAgent / Windows HKCU Run / Linux XDG autostart）。
    *  默认关闭：尊重用户预期，避免安装后默默驻留开机项；由用户在设置页显式开启。 */
   autoStart: boolean
@@ -223,6 +225,8 @@ export interface Settings {
   showStatusbar: boolean
   /** 双击预览区域时是否在分屏/预览之间切换 */
   previewDblClickToggle: boolean
+  /** 鼠标停在正文（编辑/预览面板）内时，工具栏与状态栏是否淡至几乎全透明（靠近这两条时恢复完全不透明） */
+  chromeAutoFade: boolean
   /** 预览视图是否允许就地编辑（所见即所得：改渲染结果，防抖反解析回源码） */
   previewInlineEdit: boolean
   /** 编辑器模式：编辑 / 分屏 / 预览 */
@@ -255,11 +259,11 @@ export interface Settings {
 // 导出供 UI 标注「默认」档位（如状态栏字号 / 自动锁定菜单），避免各处硬编码默认值
 export const DEFAULT_SETTINGS: Settings = {
   autoLockSecs: 300,
-  showTabs: true,
+  // 默认不显示页签栏：打开的文件统一列在侧边栏，避免顶部与侧边栏两份重复清单
+  showTabs: false,
   showSidebar: true,
-  // 初始不展示「打开的文件」：页签栏已能切换文件，侧边栏这份重复工作列表默认收起，
-  // 可在设置页或侧边栏分组菜单里开启（开启后不会因打开了文件而自动显示）
-  showOpenFiles: false,
+  // 默认在侧边栏展示「打开的文件」：替代页签栏作为文件切换入口
+  showOpenFiles: true,
   showUnlockedVaults: true,
   showFavorites: true,
   // 初始不展示「最近打开」：新装/重置时该分组多为噪音，可在设置或侧边栏菜单里开启
@@ -268,6 +272,8 @@ export const DEFAULT_SETTINGS: Settings = {
   showOutline: true,
   showHiddenFiles: false,
   restoreLastSession: true,
+  // 默认记录打开历史：侧边栏「最近打开」靠它提供数据；关注隐私的用户可在设置里关闭
+  recordHistory: true,
   // 开机自启默认关闭：需用户在设置页显式开启，避免安装后静默写入系统启动项
   autoStart: false,
   // 自启时默认不弹主窗（托盘默认开启，静默驻留更符合「开机自启」预期）；托盘关闭时运行时强制弹窗保可达
@@ -293,17 +299,20 @@ export const DEFAULT_SETTINGS: Settings = {
   language: 'system',
   codeTheme: 'github',
   codeIndent: 4,
-  editorFontSize: 14,
-  editorMaxWidth: 1280,
+  editorFontSize: 16,
+  editorMaxWidth: 900,
   previewFontFamily: 'default',
   previewLineHeight: 1.7,
   showToolbar: true,
+  // 状态栏默认显示：预览模式下它随鼠标位置半透明淡出、不干扰阅读，编辑 / 分屏常显提供行数 / 字数 / 保存状态
   showStatusbar: true,
-  // 双击预览区切换视图默认关闭：需用户在显示设置里显式开启，避免无意双击导致视图切换
-  previewDblClickToggle: false,
+  // 双击预览区切换视图默认开启：阅读时双击正文即可在预览 / 分屏之间往返
+  previewDblClickToggle: true,
+  // 工具栏 / 状态栏悬停淡出默认开启：鼠标在正文里时两条几乎全透明，阅读更沉浸；移上去即恢复
+  chromeAutoFade: true,
   // 预览就地编辑默认开启：这是预览视图唯一能改内容的途径，关掉就等于预览只能看
   previewInlineEdit: true,
-  editorMode: 'split',
+  editorMode: 'preview',
   assocPromptAsked: false,
   watchExternalChanges: true,
   autoSaveSecs: 0,
@@ -559,7 +568,8 @@ export const useVaultStore = defineStore('vault', {
         vaults: state.settings.showUnlockedVaults && state.recent.some((v) => v.isDir || v.isFileVault),
         // 收藏为空（无收藏的库也无收藏的文件）时不占位，与「打开的库」的空组隐藏策略一致
         favorites: state.settings.showFavorites && state.favorites.length + state.favoriteFiles.length > 0,
-        recent: state.settings.showRecent,
+        // 关闭「记录打开历史」后该分组无数据可展示，直接不占位
+        recent: state.settings.showRecent && state.settings.recordHistory,
         workdir: state.settings.showWorkdir,
         outline: state.settings.showOutline && !!state.openFiles.find((f) => f.path === state.activePath)?.content,
       }
@@ -1217,8 +1227,9 @@ export const useVaultStore = defineStore('vault', {
       return file
     },
 
-    /** 记录/更新一个文件到「最近打开」（去重 + 置顶）。 */
+    /** 记录/更新一个文件到「最近打开」（去重 + 置顶）；用户关闭「记录打开历史」时不落任何记录。 */
     touchRecentFile(path: string, name: string, vaultId: string, encrypted: boolean) {
+      if (!this.settings.recordHistory) return
       this.recentFiles = this.recentFiles.filter((f) => f.path !== path)
       this.recentFiles.unshift({ path, name, vaultId, encrypted, lastOpened: Date.now() })
       // 最多保留 50 条
@@ -1402,6 +1413,9 @@ export const useVaultStore = defineStore('vault', {
       // 若以本窗内存旧值为基准持久化，会把它刚写入、本窗尚未同步的字段一并覆盖掉。
       this.settings = { ...loadSettings(), ...patch }
       this.persistSettings()
+      // 关闭「记录打开历史」时同步清空已有记录：只停写不清空会让旧记录一直留在侧边栏与
+      // localStorage，与「不记录」的隐私预期相悖。
+      if (patch.recordHistory === false) this.clearRecentFiles()
     },
 
     /**

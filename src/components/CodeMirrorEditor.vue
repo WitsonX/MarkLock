@@ -76,7 +76,7 @@ export default defineComponent({
       '.cm-content': {
         caretColor: 'var(--primary)',
         fontFamily: 'var(--font-mono, ui-monospace, monospace)',
-        fontSize: 'var(--editor-font-size, 14px)',
+        fontSize: 'var(--editor-font-size, 16px)',
         lineHeight: '1.6',
       },
       '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },

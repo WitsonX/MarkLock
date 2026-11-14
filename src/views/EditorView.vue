@@ -20,9 +20,10 @@ import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
 import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
-import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, type PreviewFmt } from '../lib/wysiwyg'
+import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock, type PreviewFmt } from '../lib/wysiwyg'
 import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
 import { bindHoverTip } from '../lib/tooltip'
+import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
 // 已抽到 src/lib/preview.ts，主编辑器与便携便签共用；本文件仅保留逐块渲染的滚动同步逻辑。
@@ -31,6 +32,17 @@ import { bindHoverTip } from '../lib/tooltip'
 interface WorkNode extends FsNode {
   open?: boolean
   loaded?: boolean
+}
+
+/** 侧边栏大纲的一行：标题原文 + 结构路径 + 后代数（见 outlineTree） */
+interface OutlineRow {
+  level: number
+  text: string
+  line: number
+  /** 结构路径：同级序号用点连接（如 "0.2.1"）；只随标题结构变化，因此比行号稳，用作折叠状态的 key */
+  path: string
+  /** 后代标题数（跨级也算），0 表示叶子，不显示折叠箭头 */
+  kids: number
 }
 
 /** 「定位文件到系统文件管理器」菜单项文案：按平台区分（macOS 访达 /
@@ -117,8 +129,23 @@ export default defineComponent({
       // 大纲当前定位的标题所在行号（随编辑光标 / 滚动同步）
       outlineActiveLine: 0,
 
+      // 大纲折叠状态：按文件路径分别记录被折叠的节点（path → true，path 见 outlineTree）。
+      // 每个文件一份，切页签再切回来折叠态还在；整体替换对象以保证响应式。
+      outlineClosedByPath: {} as Record<string, Record<string, boolean>>,
+
+      // 大纲折叠档位（分组标题上那个圆形按钮的三档循环）：0 = 全部展开，1 = 收起到一级，2 = 收起到二级。
+      // 它只决定「一键收起时折谁」，具体折叠结果写进 outlineClosedByPath，所以收起后仍可逐级手动展开。
+      outlineDepthByPath: {} as Record<string, number>,
+
+      // 工具栏 / 状态栏悬停淡出三态（由鼠标坐标几何判定，见 applyChromeState）：
+      // show=鼠标在对应条带上；dim=鼠标在正文内但不在条带上（几乎全透明）；hide=鼠标不在正文内（直接隐藏）
+      toolbarChrome: 'hide' as 'show' | 'dim' | 'hide',
+      statusChrome: 'hide' as 'show' | 'dim' | 'hide',
+      _chromePt: null as null | { x: number; y: number },
+      _chromeRaf: 0,
+
       // 侧边栏宽度（可拖拽调整）
-      sidebarWidth: 264,
+      sidebarWidth: 250,
       _sidebarDragging: false,
 
       // 分屏比例（编辑器占比，0.2~0.8）
@@ -154,6 +181,8 @@ export default defineComponent({
       pvLinkUrl: '',
       // 弹窗会抢走焦点与选区，打开前存住、确认后放回去
       pvRange: null as Range | null,
+      // 编辑现有链接/图片（双击或工具栏识别进入）：弹窗预填其文字与地址，确认时整节点原地替换
+      pvEditTarget: null as HTMLElement | null,
 
       // 预览内搜索（预览模式 ⌘F）：不再切分屏，直接在渲染出的 DOM 里查找。
       // 查询词与选项在面板关闭后保留，⌘F 重开接着上次搜；命中组是注入的 <mark>，每次搜索重新收集
@@ -235,6 +264,10 @@ export default defineComponent({
       _onKeydown: null as ((e: KeyboardEvent) => void) | null,
       _onKeyup: null as ((e: KeyboardEvent) => void) | null,
       _onWinBlur: null as (() => void) | null,
+      // 工具栏 / 状态栏悬停淡出的鼠标坐标监听（rAF 合帧）
+      _onChromeMove: null as ((e: MouseEvent) => void) | null,
+      // 指针出窗监听：mouseout 且 relatedTarget 为 null 时主动收起两条栏
+      _onChromeOut: null as ((e: MouseEvent) => void) | null,
       _onDocMousedown: null as ((e: MouseEvent) => void) | null,
       // 侧边栏文件/文件夹拖拽：文档级 mousedown 委托（在捕获阶段识别带 data-drag-kind 的行）
       _onFileDragDown: null as ((e: MouseEvent) => void) | null,
@@ -393,6 +426,11 @@ export default defineComponent({
     activeVault() {
       return this.store.activeVault
     },
+    /** 浮层淡出只在预览模式生效：编辑 / 分屏要边写边用工具栏，两条栏固定常显占位；
+     *  预览是阅读态，才让两条栏浮起来、按鼠标位置三态显隐。 */
+    chromeOverlay(): boolean {
+      return this.store.settings.chromeAutoFade && this.currentMode === 'preview'
+    },
     /** 侧边栏分组 id（按用户排好的顺序，已过滤隐藏项）。未挂载工作目录时连「工作目录」分组也不显示。 */
     visibleSections() {
       const secs = this.store.visibleSections as string[]
@@ -407,7 +445,7 @@ export default defineComponent({
         (s.showUnlockedVaults && this.store.registeredVaults.length > 0) ||
         (s.showWorkdir && !!this.workdirRoot) ||
         (s.showFavorites && this.store.favorites.length + this.store.favoriteFiles.length > 0) ||
-        (s.showRecent && this.store.recentFiles.length + this.store.registeredVaults.length > 0) ||
+        (s.showRecent && s.recordHistory && this.store.recentFiles.length + this.store.registeredVaults.length > 0) ||
         (s.showOutline && this.outline.length > 0)
       return !hasContent
     },
@@ -440,6 +478,73 @@ export default defineComponent({
         out.push({ level: m[1].length, text: (m[2] || '').trim() || this.$t('editor.noHeading'), line: i + 1 })
       }
       return out
+    },
+    /** 当前文件已折叠的大纲节点表（path → true）。不同文件各一份，互不影响。 */
+    outlineClosedMap(): Record<string, boolean> {
+      return this.outlineClosedByPath[this.activePath] || {}
+    },
+    /** 当前文件的大纲折叠档位：0 = 全部展开，1 = 收起到一级，2 = 收起到二级（按钮三档循环用）。 */
+    outlineDepth(): number {
+      return this.outlineDepthByPath[this.activePath] || 0
+    },
+    /** 当前文件的最大标题层级：决定循环档位要不要跳过「二级」（文档只有两级时二级与全部等价）。 */
+    outlineMaxLevel(): number {
+      return this.outline.reduce((m, h) => Math.max(m, h.level), 0)
+    },
+    /** 按钮的循环档位：收起到一级 → 收起到二级（文档有三级以上时）→ 全部展开。
+     *  只有一级标题时没有可收的内容，返回空数组，按钮不渲染。 */
+    outlineDepthSteps(): number[] {
+      const max = this.outlineMaxLevel
+      if (max < 2) return []
+      return max > 2 ? [1, 2, 0] : [1, 0]
+    },
+    /** 下一次点击切到的档位（循环）；按钮 tooltip 也用它。 */
+    outlineNextDepth(): number {
+      const steps = this.outlineDepthSteps
+      if (!steps.length) return 0
+      const i = steps.indexOf(this.outlineDepth)
+      return steps[(i + 1) % steps.length]
+    },
+    /** 按钮 tooltip：描述「点一下会变得怎样」。 */
+    outlineDepthTitle(): string {
+      const d = this.outlineNextDepth
+      if (d === 0) return this.$t('editor.outlineDepthAll')
+      if (d === 1) return this.$t('editor.outlineDepth1')
+      return this.$t('editor.outlineDepth2')
+    },
+    /** 大纲树：给每个标题补出结构路径 path（同级序号用点连接，如 "0.2.1"）与后代数 kids。
+     *  后代按「层级比当前大」判定，所以 H1 → H3 跨级时 H3 仍算 H1 的后代。 */
+    outlineTree(): OutlineRow[] {
+      const rows: OutlineRow[] = []
+      // 栈里是当前标题的祖先链（含每个祖先已产出的子项数），遇到同级或更高层级就弹出
+      const stack: { level: number; path: string; row: OutlineRow; next: number }[] = []
+      let rootNext = 0
+      for (const h of this.outline) {
+        while (stack.length && stack[stack.length - 1].level >= h.level) stack.pop()
+        const parent = stack[stack.length - 1]
+        const idx = parent ? parent.next++ : rootNext++
+        const path = parent ? `${parent.path}.${idx}` : String(idx)
+        const row: OutlineRow = { level: h.level, text: h.text, line: h.line, path, kids: 0 }
+        for (const s of stack) s.row.kids++
+        rows.push(row)
+        stack.push({ level: h.level, path, row, next: 0 })
+      }
+      return rows
+    },
+    /** 按折叠表算出实际可见的大纲行：被折叠节点的整棵子树一起隐藏（自身仍显示）。 */
+    outlineRows(): OutlineRow[] {
+      const closed = this.outlineClosedMap
+      if (!Object.keys(closed).length) return this.outlineTree
+      const rows: OutlineRow[] = []
+      // hideBelow：该节点的子树是否已被上层折叠遮住（含自身被折叠）
+      const stack: { level: number; hideBelow: boolean }[] = []
+      for (const h of this.outlineTree) {
+        while (stack.length && stack[stack.length - 1].level >= h.level) stack.pop()
+        const hidden = stack.length ? stack[stack.length - 1].hideBelow : false
+        if (!hidden) rows.push(h)
+        stack.push({ level: h.level, hideBelow: hidden || !!closed[h.path] })
+      }
+      return rows
     },
     activeFileName() {
       // 与页签显示口径一致：所属库锁定/关闭后显示掩码名，标题栏不暴露文件名
@@ -651,7 +756,8 @@ export default defineComponent({
         'menu:sec-vaults': !!s.showUnlockedVaults,
         'menu:sec-workdir': !!s.showWorkdir,
         'menu:sec-favorites': !!s.showFavorites,
-        'menu:sec-recent': !!s.showRecent,
+        // 关闭「记录打开历史」时该分组不展示，勾选态同步置否
+        'menu:sec-recent': !!(s.showRecent && s.recordHistory),
         'menu:sec-outline': !!s.showOutline,
       }
     },
@@ -719,7 +825,9 @@ export default defineComponent({
       this.flushPreviewDom()
       this.focusPwdIfLocked()
       const f = this.activeFile
-      if (f && !f.locked && !this.isActiveLocked && !this.isEditingFocused()) {
+      // 预览态下源码面板是收起的：不把焦点抢给不可见的 CodeMirror（会把光标和滚动带进收起的面板），
+      // 新建草稿时的聚焦另由 openNewDraft 按「就地编辑 → 预览面 / 只读预览 → 切分屏后编辑器」处理
+      if (f && !f.locked && !this.isActiveLocked && this.currentMode !== 'preview' && !this.isEditingFocused()) {
         nextTick(() => this.activeEditor()?.focus?.())
       }
       // 切页签时在侧边栏定位选中文件：工作目录树 / 加密库树展开祖先并滚入可见
@@ -787,8 +895,8 @@ export default defineComponent({
     },
   },
   mounted() {
-    // 恢复上次编辑器模式
-    this.currentMode = this.store.settings.editorMode || 'split'
+    // 恢复上次编辑器模式（首次使用默认预览：打开即读，需要改字再切分屏）
+    this.currentMode = this.store.settings.editorMode || 'preview'
     // 应用编辑器/预览字号（CSS 变量挂在 documentElement，编辑器与预览共用）
     this.applyEditorFontSize()
     // 应用预览内容栏最大宽（--editor-max-width，驱动 .md 的 max-width）
@@ -1100,7 +1208,7 @@ export default defineComponent({
       // macOS 上 Cmd+= 实际产生 '+'（Shift 组合），故两个键新都收；不加 !e.shiftKey 守卫
       if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_' || e.key === '0')) {
         e.preventDefault()
-        if (e.key === '0') this.setEditorFontSize(14)
+        if (e.key === '0') this.setEditorFontSize(16)
         else this.setEditorFontSize(this.store.settings.editorFontSize + ((e.key === '-' || e.key === '_') ? -2 : 2))
       }
     }
@@ -1110,22 +1218,55 @@ export default defineComponent({
     }
     window.addEventListener('keyup', this._onKeyup)
     // ⌘Tab 切走等场景收不到 keyup：失焦时兜底清掉，避免提示态卡住
-    this._onWinBlur = () => { this.pvLinkHot = false }
+    this._onWinBlur = () => {
+      this.pvLinkHot = false
+      // 鼠标已不在正文里，两条栏直接收起
+      this.toolbarChrome = 'hide'
+      this.statusChrome = 'hide'
+    }
     window.addEventListener('blur', this._onWinBlur)
-    // 就地编辑态链接的悬停提示（v-html 内容绑不了 v-tip，走委托气泡）：
+    // 工具栏 / 状态栏的悬停淡出：按鼠标坐标与正文矩形的几何关系分三态，rAF 合帧避免每次移动都重排
+    this._onChromeMove = (e: MouseEvent) => {
+      this._chromePt = { x: e.clientX, y: e.clientY }
+      if (this._chromeRaf) return
+      this._chromeRaf = requestAnimationFrame(() => {
+        this._chromeRaf = 0
+        this.applyChromeState()
+      })
+    }
+    window.addEventListener('mousemove', this._onChromeMove)
+    // 指针移出窗口后 mousemove 不再派发，最后一次的 dim/show 态会一直挂着；
+    // mouseout 且 relatedTarget 为 null 即「出窗」，清掉坐标并直接收起（清坐标也防住已排队的 rAF 用旧坐标复活状态）
+    this._onChromeOut = (e: MouseEvent) => {
+      if (e.relatedTarget) return
+      this._chromePt = null
+      this.toolbarChrome = 'hide'
+      this.statusChrome = 'hide'
+    }
+    document.addEventListener('mouseout', this._onChromeOut)
+    // 就地编辑态链接/图片的悬停提示（v-html 内容绑不了 v-tip，走委托气泡）：
     // 绑在组件根而不是 .md 节点——后者随 assetVersion 换 key 重建，监听会丢
+    let pvTipImg = false
     this._pvLinkTipUnbind = bindHoverTip(this.$el as HTMLElement, {
       pick: (t) => {
         if (!this.previewEditable) return null
+        const img = t.closest('.pane-preview img') as HTMLImageElement | null
+        if (img) {
+          pvTipImg = true
+          return img
+        }
         const a = t.closest('.pane-preview a') as HTMLAnchorElement | null
         // # 锚点在编辑态普通点击就能页内滚动，不需要「按住修饰键」提示
         if (!a || (a.getAttribute('href') || '').startsWith('#')) return null
+        pvTipImg = false
         return a
       },
       text: () =>
-        this.pvLinkHot
-          ? this.$t('editor.pvLinkOpenTip')
-          : this.$t('editor.pvLinkTip', { mod: isMac ? '⌘' : 'Ctrl' }),
+        pvTipImg
+          ? this.$t('editor.pvImageTip')
+          : this.pvLinkHot
+            ? this.$t('editor.pvLinkOpenTip')
+            : this.$t('editor.pvLinkTipEdit', { mod: isMac ? '⌘' : 'Ctrl' }),
       enabled: () => this.previewEditable,
     })
     // 点击「更多」菜单或搜索面板外部时自动收起
@@ -1199,6 +1340,9 @@ export default defineComponent({
     if (this._onKeydown) window.removeEventListener('keydown', this._onKeydown)
     if (this._onKeyup) window.removeEventListener('keyup', this._onKeyup)
     if (this._onWinBlur) window.removeEventListener('blur', this._onWinBlur)
+    if (this._onChromeMove) window.removeEventListener('mousemove', this._onChromeMove)
+    if (this._onChromeOut) document.removeEventListener('mouseout', this._onChromeOut)
+    if (this._chromeRaf) cancelAnimationFrame(this._chromeRaf)
     if (this._pvLinkTipUnbind) this._pvLinkTipUnbind()
     if (this._onDocMousedown) document.removeEventListener('mousedown', this._onDocMousedown)
     if (this._onFileDragDown) document.removeEventListener('mousedown', this._onFileDragDown, true)
@@ -1250,6 +1394,24 @@ export default defineComponent({
       const w = Number(this.store.settings.editorMaxWidth) || 0
       document.documentElement.style.setProperty('--editor-max-width', w > 0 ? `${w}px` : 'none')
     },
+    /** 按鼠标坐标定工具栏 / 状态栏的三态：对应条带上=show（完全不透明且可点）、正文内=dim（几乎全透明）、
+     *  正文外=hide（直接隐藏）。走几何判定而不是元素 mouseenter：两条栏收起后 pointer-events 已关，
+     *  靠命中自身会陷入「隐藏→重新命中正文→又隐藏」的抖动循环。 */
+    applyChromeState() {
+      if (!this.chromeOverlay) return
+      const el = this.$refs.panesWrap as HTMLElement | null
+      const pt = this._chromePt
+      if (!el || !pt) return
+      const r = el.getBoundingClientRect()
+      const inPanes = pt.x >= r.left && pt.x <= r.right && pt.y >= r.top && pt.y <= r.bottom
+      // 条带高度与两条栏自身高度一致（.toolbar 40px / .statusbar 28px）
+      const overToolbar = inPanes && pt.y < r.top + 40
+      const overStatusbar = inPanes && pt.y > r.bottom - 28
+      const tb = overToolbar ? 'show' : inPanes ? 'dim' : 'hide'
+      const sb = overStatusbar ? 'show' : inPanes ? 'dim' : 'hide'
+      if (tb !== this.toolbarChrome) this.toolbarChrome = tb
+      if (sb !== this.statusChrome) this.statusChrome = sb
+    },
     /** 字体族 id → CSS font-family 值（含跨平台回退栈）：委托给共享的 src/lib/fonts.ts，
         未知/历史 id 自动回退到跟随界面。供 .md 内联变量与导出 HTML 共用。 */
     fontFamilyStack(family: string): string {
@@ -1299,7 +1461,7 @@ export default defineComponent({
       this.activeEditor()?.wrapSelection(before, after, placeholder)
     },
     fmtCodeBlock() {
-      if (this.previewEditable) return this.applyPvw({ op: 'codeblock' })
+      if (this.previewEditable) return this.applyPvw({ op: 'codeblock', placeholder: this.$t('editor.fmtCode') })
       this.activeEditor()?.insertCodeBlock()
     },
     fmtPrefix(prefix: string) {
@@ -1315,22 +1477,53 @@ export default defineComponent({
       this.activeEditor()?.insertBlock('---')
     },
     fmtLink(image: boolean) {
-      if (this.previewEditable) return this.openPvLinkDialog(image)
+      if (this.previewEditable) return this.openPvLinkDialog(image, this.pvExistingNode(image))
       this.activeEditor()?.insertLink(image)
     },
-    /** 编辑态的链接/图片入口：先把当前选区存住再开弹窗，否则确认时不知道该把链接放到哪。 */
-    openPvLinkDialog(image: boolean) {
+    /** 就地编辑的「编辑现有」识别：链接看光标是否落在 a 内；图片看选区是否罩住 img
+     *  （点击选中/拖选都算，折叠光标不算——避免在图片旁打字时误劫持工具栏）。 */
+    pvExistingNode(image: boolean): HTMLElement | null {
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      const s = document.getSelection()
+      if (!root || !s || !s.rangeCount) return null
+      if (image) {
+        const r = s.getRangeAt(0)
+        for (const img of Array.from(root.querySelectorAll('img'))) {
+          if (r.intersectsNode(img)) return img
+        }
+        return null
+      }
+      for (const n of [s.anchorNode, s.focusNode]) {
+        const el = n && n.nodeType === Node.TEXT_NODE ? n.parentElement : (n as Element | null)
+        const a = el?.closest('a')
+        if (a && root.contains(a)) return a
+      }
+      return null
+    },
+    /** 编辑态的链接/图片入口：先把当前选区存住再开弹窗，否则确认时不知道该把链接放到哪。
+     *  传 target 即「编辑现有节点」：预填文字/alt 与地址，确认时原地替换。 */
+    openPvLinkDialog(image: boolean, target?: HTMLElement | null) {
       const s = document.getSelection()
       this.pvRange = s && s.rangeCount ? s.getRangeAt(0).cloneRange() : null
       this.pvLinkImage = image
-      // 与 CodeMirror 的 insertLink 同一套默认值：有选区用选区文字，图片留 'alt'，链接用占位词
-      this.pvLinkText = image ? (s?.toString() || 'alt') : (s?.toString() || '')
-      this.pvLinkUrl = ''
+      this.pvEditTarget = target ?? null
+      if (target) {
+        // 图片地址读 data-src 原值（src 已被换成 asset 协议地址），链接读 href 原值
+        this.pvLinkText = image ? (target.getAttribute('alt') ?? '') : (target.textContent ?? '')
+        this.pvLinkUrl = image
+          ? (target.getAttribute('data-src') || target.getAttribute('src') || '')
+          : (target.getAttribute('href') ?? '')
+      } else {
+        // 与 CodeMirror 的 insertLink 同一套默认值：有选区用选区文字，图片留 'alt'，链接用占位词
+        this.pvLinkText = image ? (s?.toString() || 'alt') : (s?.toString() || '')
+        this.pvLinkUrl = ''
+      }
       this.pvLinkOpen = true
     },
     closePvLinkDialog() {
       this.pvLinkOpen = false
       this.pvRange = null
+      this.pvEditTarget = null
       ;(this.$refs.previewMd as HTMLElement | undefined)?.focus({ preventScroll: true })
     },
     submitPvLink() {
@@ -1339,12 +1532,22 @@ export default defineComponent({
       this.pvLinkOpen = false
       const range = this.pvRange
       this.pvRange = null
+      const target = this.pvEditTarget
+      this.pvEditTarget = null
       if (!url) return
       this.$nextTick(() => {
         const s = document.getSelection()
-        if (s && range) {
-          s.removeAllRanges()
-          s.addRange(range)
+        if (s) {
+          if (target && target.isConnected) {
+            // 编辑现有：整节点选中后交给 insertHTML 替换，走原生撤销栈，⌘Z 可整步撤回
+            const r = document.createRange()
+            r.selectNode(target)
+            s.removeAllRanges()
+            s.addRange(r)
+          } else if (range) {
+            s.removeAllRanges()
+            s.addRange(range)
+          }
         }
         this.applyPvw(isImage ? { op: 'image', alt: text, url } : { op: 'link', text, url, placeholder: this.$t('editor.phLinkText') })
       })
@@ -1412,7 +1615,7 @@ export default defineComponent({
         case 'menu:sec-vaults': this.store.updateSettings({ showUnlockedVaults: !this.store.settings.showUnlockedVaults }); break
         case 'menu:sec-workdir': this.store.updateSettings({ showWorkdir: !this.store.settings.showWorkdir }); break
         case 'menu:sec-favorites': this.store.updateSettings({ showFavorites: !this.store.settings.showFavorites }); break
-        case 'menu:sec-recent': this.store.updateSettings({ showRecent: !this.store.settings.showRecent }); break
+        case 'menu:sec-recent': this.toggleRecentSection(); break
         case 'menu:sec-outline': this.store.updateSettings({ showOutline: !this.store.settings.showOutline }); break
         case 'menu:vault-open': this.openVaultAction(); break
         case 'menu:vault-close': this.closeAllVaults(); break
@@ -1484,11 +1687,19 @@ export default defineComponent({
       requestAnimationFrame(pin)
     },
     /** 预览区双击切换 split/preview（可在设置中关闭）：落在代码块复制按钮上时跳过，避免误切视图。
-     *  就地编辑开启时让位给浏览器的双击选词——预览已经是编辑面，双击应当选中单词而不是换视图。 */
+     *  就地编辑开启时让位给浏览器的双击选词——但双击链接/图片例外：弹预填弹窗就地修改。 */
     onPreviewDblClick(e: MouseEvent) {
-      if (this.previewEditable) return
+      if (this.previewEditable) {
+        const node = (e.target as HTMLElement | null)?.closest('a, img') as HTMLElement | null
+        const root = this.$refs.previewMd as HTMLElement | undefined
+        if (node && root?.contains(node)) {
+          e.preventDefault()
+          this.openPvLinkDialog(node.tagName === 'IMG', node)
+        }
+        return
+      }
       if (!this.store.settings.previewDblClickToggle) return
-      if ((e.target as HTMLElement | null)?.closest('.code-copy-btn')) return
+      if ((e.target as HTMLElement | null)?.closest('.code-ctl')) return
       // 连点复选框是连续勾选/取消，不应误触视图切换
       if ((e.target as HTMLElement | null)?.closest('input.task-cb')) return
       this.setMode(this.currentMode === 'split' ? 'preview' : 'split')
@@ -1549,19 +1760,47 @@ export default defineComponent({
       document.execCommand('insertText', false, text)
       this.onPreviewEditInput()
     },
-    /** 代码块内 Enter 必须插入裸换行：浏览器在 `<pre>` 里插 `<div>`，`textContent` 会丢掉换行，
-     *  回写后两行代码被并成一行。其余块交给原生 insertParagraph 分段。 */
+    /** 代码块内 Enter 换成软换行（详见 `enterInCodeBlock`）：WebKit 用 insertParagraph
+     *  或 insertText('\n') 都会断出一个新 `<pre>`，等于凭空多一个代码块。其余块交回原生分段。
+     *  Tab / Shift+Tab 同理只在代码块里接管（详见 `tabInCodeBlock`），其余位置留给浏览器切焦点。 */
     onPreviewEditKeydown(e: KeyboardEvent) {
-      if (!this.previewEditable || e.key !== 'Enter' || e.shiftKey || e.isComposing) return
-      const node = window.getSelection()?.anchorNode?.parentElement ?? null
-      if (node?.closest('pre')) {
-        e.preventDefault()
-        document.execCommand('insertText', false, '\n')
+      if (!this.previewEditable || e.isComposing) return
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      if (!root) return
+      if (e.key === 'Tab') {
+        if (tabInCodeBlock(e, root, this.store.settings.codeIndent)) this.onPreviewEditInput()
+        return
+      }
+      if (e.key !== 'Enter' || e.shiftKey) return
+      if (enterInCodeBlock(e, root)) {
         this.onPreviewEditInput()
         return
       }
-      const root = this.$refs.previewMd as HTMLElement | undefined
-      if (root && enterInTaskItem(e, root)) this.onPreviewEditInput()
+      if (enterInTaskItem(e, root)) this.onPreviewEditInput()
+    },
+    /** 点最后一个块下方的空白时把光标落到块后：代码块 / 表格这类块底下没有可落笔的段落，
+     *  浏览器会把光标塞回块里，用户就写不了块后的正文（见 `caretBelowLastBlock`）。 */
+    onPreviewMousedown(e: MouseEvent) {
+      if (!this.previewEditable || e.button !== 0) return
+      const root = this.$refs.previewMd as HTMLElement | null
+      const pane = this.$refs.previewPane as HTMLElement | null
+      const t = e.target as HTMLElement | null
+      // 语言标签是控件：别让这次 mousedown 把代码块里的光标挪走（click 照常派发）
+      if (t?.closest('.code-lang-btn')) {
+        e.preventDefault()
+        return
+      }
+      // 控件带同样在块外（虚线区域）：点它不该把光标落到代码块后面
+      if (t?.closest('.code-ctl')) {
+        e.preventDefault()
+        return
+      }
+      // 只接管「点在空白处」（预览滚动容器 / 正文根 / 块外壳）；块内、搜索条、复制按钮照旧交给浏览器
+      if (!root || !pane || (t !== root && t !== pane && !t?.classList.contains('mb'))) return
+      // 滚动条上的 mousedown 也落在 pane 上：接管后拖不动滚动条，按坐标把它排除掉
+      const box = pane.getBoundingClientRect()
+      if (e.clientX - box.left >= pane.clientWidth || e.clientY - box.top >= pane.clientHeight) return
+      if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
     },
 
     // ---------- 预览内搜索（预览模式 ⌘F，不再跳分屏） ----------
@@ -1689,6 +1928,50 @@ export default defineComponent({
       cm?.setCursorToLine?.(item.line)
       this._previewScrollToLine(item.line)
     },
+    /** 大纲行左侧槽的缩进与宽度：缩进放在可点击的槽里（而不是整行 padding），
+     *  所以带子项时「文字之前的一切」（含缩进空白）都能点开折叠；槽内容宽固定，同级文字起点才对齐。 */
+    olLeadStyle(level: number) {
+      return { paddingLeft: `calc(4px + ${level - 1}em)`, width: `calc(32px + ${level - 1}em)` }
+    },
+    /** 折叠 / 展开大纲的某个标题节点（点击左侧箭头，不影响跳转）。 */
+    toggleOutlineFold(path: string) {
+      const key = this.activePath
+      const next = { ...(this.outlineClosedByPath[key] || {}) }
+      if (next[path]) delete next[path]
+      else next[path] = true
+      this.outlineClosedByPath = { ...this.outlineClosedByPath, [key]: next }
+    },
+    /** 生成「收起到 depth 层」的折叠表：遍历标题树，凡是层级超过 depth 的标题，
+     *  就把它的父标题折叠（整棵子树收起来，父标题自己仍可见、仍可再点开）；
+     *  文档开头就超深（没有父级）时退化为折叠自身，避免一键把大纲清空。
+     *  已被祖先折叠遮住的分支直接跳过，避免给展开后看不到的节点预置折叠态。 */
+    outlineFoldForDepth(depth: number): Record<string, boolean> {
+      const closed: Record<string, boolean> = {}
+      const stack: { level: number; hideBelow: boolean }[] = []
+      for (const h of this.outlineTree) {
+        while (stack.length && stack[stack.length - 1].level >= h.level) stack.pop()
+        const underClosed = stack.length ? stack[stack.length - 1].hideBelow : false
+        let hides = underClosed
+        if (!underClosed && h.level > depth) {
+          const cut = h.path.lastIndexOf('.')
+          closed[cut < 0 ? h.path : h.path.slice(0, cut)] = true
+          hides = true
+        }
+        stack.push({ level: h.level, hideBelow: hides })
+      }
+      return closed
+    },
+    /** 循环切换大纲折叠档位：收起到一级 → 收起到二级 → 全部展开（档位按文档实际层数裁剪）。
+     *  只改写折叠表，所以收起后每个被折的 H1/H2 仍带箭头，可以单独再展开。 */
+    toggleOutlineDepth() {
+      const key = this.activePath
+      const depth = this.outlineNextDepth
+      this.outlineDepthByPath = { ...this.outlineDepthByPath, [key]: depth }
+      this.outlineClosedByPath = {
+        ...this.outlineClosedByPath,
+        [key]: depth ? this.outlineFoldForDepth(depth) : {},
+      }
+    },
     onPreviewScroll() {
       if (this.syncingScroll) return
       const line = this._previewTopLine()
@@ -1757,6 +2040,14 @@ export default defineComponent({
     onPreviewLinkClick(e: MouseEvent) {
       const target = e.target as HTMLElement | null
       if (!target) return
+      // 代码块语言标签：就地编辑态点开语言菜单（只读态只是一枚静态标签）
+      const langBtn = target.closest('.code-lang-btn') as HTMLElement | null
+      if (langBtn) {
+        e.preventDefault()
+        e.stopPropagation()
+        this.openCodeLang(langBtn)
+        return
+      }
       // 代码块复制按钮优先拦截（button 不在 a 内，后续链接分支不会误捕）
       const copyBtn = target.closest('.code-copy-btn') as HTMLElement | null
       if (copyBtn) {
@@ -1786,6 +2077,16 @@ export default defineComponent({
       const a = target.closest('a') as HTMLAnchorElement | null
       if (!a) return
       this.dispatchPreviewLink(e, a)
+    },
+    /** 代码块语言标签：就地编辑时点开语言菜单，选完改 `<code>` 的 language 类、重排高亮，
+     *  再走防抖回写把围栏信息串更新到源码（序列化器本来就按 language-x 生成围栏）。 */
+    openCodeLang(chip: HTMLElement) {
+      const pre = chip.closest('pre') as HTMLElement | null
+      if (!this.previewEditable || !pre) return
+      openCodeLangMenu(chip, codeLangOf(pre), (id) => {
+        if (!applyCodeLang(pre, id)) return
+        this.onPreviewEditInput()
+      })
     },
     /** 链接分派（只读预览点击 与 就地编辑 ⌘/Ctrl+点击 共用）：
      *  http/https/mailto 交系统浏览器；# 锚点保留页内滚动；相对路径在应用内打开。 */
@@ -1942,6 +2243,17 @@ export default defineComponent({
     },
     toggleSidebar() {
       this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar })
+    },
+    /** 侧边栏「最近打开」分组开关：该分组依赖「记录打开历史」，关闭记录时分组不展示；
+     *  从菜单再次开启时一并恢复记录，避免出现「勾上了却看不到分组」的死开关。 */
+    toggleRecentSection() {
+      const s = this.store.settings
+      const on = !(s.showRecent && s.recordHistory)
+      if (on && !s.recordHistory) {
+        this.store.updateSettings({ recordHistory: true })
+        message.info(this.$t('toast.recordHistoryReopened'))
+      }
+      this.store.updateSettings({ showRecent: on })
     },
     onSidebarResizeStart(e: MouseEvent) {
       e.preventDefault()
@@ -2525,15 +2837,31 @@ export default defineComponent({
     },
 
     // ---------- 右键上下文菜单 ----------
-    /** 视图开关菜单项（页签/工具栏/状态栏/侧边栏）。 */
-    viewToggleItems() {
+    /** 视图开关菜单项（页签/工具栏/状态栏/侧边栏）。
+     *  withFade 为 true 时追加「工具栏与状态栏半透明」——只有工具栏 / 状态栏自身的右键菜单才带这一项，
+     *  标题栏、页签栏的右键菜单不出现（那里右键想的是布局开关，不是这两条栏的淡出行为）。 */
+    viewToggleItems(withFade = false) {
       const s = this.store.settings
-      return [
+      const items: any[] = [
         { kind: 'item', label: this.$t('menu.viewTabs'), checked: s.showTabs, run: () => this.store.updateSettings({ showTabs: !this.store.settings.showTabs }) },
         { kind: 'item', label: this.$t('menu.viewToolbar'), checked: s.showToolbar, run: () => this.store.updateSettings({ showToolbar: !this.store.settings.showToolbar }) },
         { kind: 'item', label: this.$t('menu.viewStatusbar'), checked: s.showStatusbar, run: () => this.store.updateSettings({ showStatusbar: !this.store.settings.showStatusbar }) },
         { kind: 'item', label: this.$t('menu.viewSidebar'), sc: '⌘J', checked: s.showSidebar, run: () => this.store.updateSettings({ showSidebar: !this.store.settings.showSidebar }) },
       ]
+      if (withFade) {
+        // 悬停淡出只在预览模式生效，编辑 / 分屏下切换看不出变化，故非预览态补一句尾注
+        items.push({
+          kind: 'item', label: this.$t('menu.viewChromeFade'),
+          hint: this.currentMode === 'preview' ? '' : this.$t('menu.viewChromeFadeHint'),
+          checked: s.chromeAutoFade,
+          run: () => {
+            this.store.updateSettings({ chromeAutoFade: !this.store.settings.chromeAutoFade })
+            // 刚打开时两条栏还挂着上一次的旧态，立即用最后的鼠标位置重算一次，省掉「要动一下鼠标才显形」
+            this.applyChromeState()
+          },
+        })
+      }
+      return items
     },
     /** 侧边栏分组开关菜单项（与主菜单侧边栏子菜单一致）。 */
     sidebarToggleItems() {
@@ -2545,7 +2873,7 @@ export default defineComponent({
         { kind: 'item', label: this.$t('sidebar.vaults'), checked: s.showUnlockedVaults, run: () => this.store.updateSettings({ showUnlockedVaults: !this.store.settings.showUnlockedVaults }) },
         { kind: 'item', label: this.$t('sidebar.workdir'), checked: s.showWorkdir, run: () => this.store.updateSettings({ showWorkdir: !this.store.settings.showWorkdir }) },
         { kind: 'item', label: this.$t('sidebar.favorites'), checked: s.showFavorites, run: () => this.store.updateSettings({ showFavorites: !this.store.settings.showFavorites }) },
-        { kind: 'item', label: this.$t('sidebar.recent'), checked: s.showRecent, run: () => this.store.updateSettings({ showRecent: !this.store.settings.showRecent }) },
+        { kind: 'item', label: this.$t('sidebar.recent'), checked: s.showRecent && s.recordHistory, run: () => this.toggleRecentSection() },
         { kind: 'item', label: this.$t('sidebar.outline'), checked: s.showOutline, run: () => this.store.updateSettings({ showOutline: !this.store.settings.showOutline }) },
         { kind: 'sep' },
         // 「打开库」常驻（可同时打开多个库）；仅当有已登记库时才追加「关闭所有库」。
@@ -2559,13 +2887,16 @@ export default defineComponent({
           : { kind: 'item', label: this.$t('menu.openWorkdir'), run: () => this.chooseWorkdir() },
       ]
     },
-    /** 打开右键菜单：按类型构建菜单项并定位到光标处（夹取到视口内）。 */
-    openContextMenu(e: MouseEvent, menu: 'view' | 'tabsbar' | 'tab' | 'sidebar' | 'vault' | 'favfile', path?: string) {
+    /** 打开右键菜单：按类型构建菜单项并定位到光标处（夹取到视口内）。
+     *  view = 标题栏等处的纯视图开关；bar = 工具栏 / 状态栏自身，比 view 多一项「半透明」。 */
+    openContextMenu(e: MouseEvent, menu: 'view' | 'bar' | 'tabsbar' | 'tab' | 'sidebar' | 'vault' | 'favfile', path?: string) {
       e.preventDefault()
       this.ctxSelPath = ''
       let items: any[] = []
       if (menu === 'view') {
         items = this.viewToggleItems()
+      } else if (menu === 'bar') {
+        items = this.viewToggleItems(true)
       } else if (menu === 'tabsbar') {
         items = [
           { kind: 'item', label: this.$t('menu.newFile'), sc: '⌘N', run: () => this.openNewDraft() },
@@ -4088,8 +4419,7 @@ export default defineComponent({
         if (k && k !== this.dragKey) this.dragOverKey = k
       }
       const up = () => {
-        window.removeEventListener('mousemove', move)
-        window.removeEventListener('mouseup', up)
+        cleanup()
         if (started) {
           const from = this.dragKey
           const to = this.dragOverKey
@@ -4108,8 +4438,23 @@ export default defineComponent({
         this.dragOverKey = ''
         this.dragging = false
       }
+      // 统一摘监听：mousemove / mouseup / blur 三个一起处理
+      const cleanup = () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        window.removeEventListener('blur', cancel)
+      }
+      // 窗口失焦时 mouseup 可能根本收不到（拖到窗口外松开、系统弹窗、切走应用），
+      // 监听会一直残留，失焦就主动收尾
+      const cancel = () => {
+        cleanup()
+        this.dragKey = ''
+        this.dragOverKey = ''
+        this.dragging = false
+      }
       window.addEventListener('mousemove', move)
       window.addEventListener('mouseup', up)
+      window.addEventListener('blur', cancel)
     },
     splitDragKey(key: string): [string, string] {
       const i = key.indexOf(':')
@@ -4154,9 +4499,8 @@ export default defineComponent({
         const k = sec.getAttribute('dragable') || ''
         if (k && k !== this.dragKey) this.dragOverKey = k
       }
-      const up = () => {
-        window.removeEventListener('mousemove', move)
-        window.removeEventListener('mouseup', up)
+      const up = (ev: MouseEvent) => {
+        cleanup()
         if (started) {
           const from = this.dragKey
           const to = this.dragOverKey
@@ -4166,16 +4510,37 @@ export default defineComponent({
             if (fromId && toId) this.store.reorderSection(fromId, toId)
           }
         } else {
-          // 未拖动：按点击折叠/展开
-          const [, id] = this.splitDragKey(key)
-          if (id) this.toggleSec(id)
+          // 未拖动：按点击折叠/展开。但必须按下与松开都落在同一个分组标题上：
+          // mouseup 丢失时监听会残留，别处（如搜索框）的下一次 mouseup 会走到这里，
+          // 把整个分组列表误收起
+          const head = (ev.target as Element | null)?.closest?.('.sec-head')
+          const sec = head?.closest('.sec[dragable]')
+          if (sec && sec.getAttribute('dragable') === key) {
+            const [, id] = this.splitDragKey(key)
+            if (id) this.toggleSec(id)
+          }
         }
+        this.dragKey = ''
+        this.dragOverKey = ''
+        this.dragging = false
+      }
+      // 统一摘监听：mousemove / mouseup / blur 三个一起处理
+      const cleanup = () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        window.removeEventListener('blur', cancel)
+      }
+      // 窗口失焦时 mouseup 可能根本收不到（拖到窗口外松开、系统弹窗、切走应用），
+      // 监听会一直残留，失焦就主动收尾
+      const cancel = () => {
+        cleanup()
         this.dragKey = ''
         this.dragOverKey = ''
         this.dragging = false
       }
       window.addEventListener('mousemove', move)
       window.addEventListener('mouseup', up)
+      window.addEventListener('blur', cancel)
     },
 
     // ---------- 保存 ----------
@@ -4767,8 +5132,27 @@ export default defineComponent({
     },
     openNewDraft() {
       this.store.openNewDraft(this.$t('common.untitled'))
-      // 预览态下源码面板已收起，切到分屏确保编辑器可见
-      if (this.currentMode === 'preview') this.setMode('split')
+      // 预览态下预览默认是只读的：没开「预览区就地编辑」就必须切到分屏，否则新建的草稿没地方输入
+      const needSplit = this.currentMode === 'preview' && !this.previewEditable
+      if (needSplit) this.setMode('split')
+      // 开了就地编辑的预览态保持不动：预览区本身可写，把焦点交给预览面，新建完即可直接输入
+      else if (this.currentMode === 'preview') {
+        nextTick(() => {
+          const el = this.$refs.previewMd as HTMLElement | null
+          if (!el) return
+          el.focus({ preventScroll: true })
+          // 空草稿没有块级子节点，显式把 caret 落到容器开头：
+          // 各家 WebView 在 focus 空 contenteditable 时不一定给出可输入的插入点
+          const sel = document.getSelection()
+          if (!sel) return
+          const r = document.createRange()
+          r.selectNodeContents(el)
+          r.collapse(true)
+          sel.removeAllRanges()
+          sel.addRange(r)
+        })
+        return
+      }
       // 新页签首次渲染才创建实例，等挂载完成后聚焦，可直接输入
       nextTick(() => {
         this.activeEditor()?.focus?.()
@@ -5726,13 +6110,49 @@ export default defineComponent({
     isImageName(name: string): boolean {
       return /\.(png|jpe?g|gif|webp|bmp|svg|avif|tiff?|ico)$/i.test(name)
     },
+    /** 粘贴/拖入的落点：粘贴那一刻光标在预览就地编辑面里，就返回该容器与选区快照。
+     *  写盘是异步的（读剪贴板字节 + IPC），等回来时浏览器选区多半已经不在原处，所以先把 Range 存下来。 */
+    pvPasteTarget(): { root: HTMLElement; range: Range | null } | null {
+      if (!this.previewEditable) return null
+      const root = this.$refs.previewMd as HTMLElement | undefined
+      if (!root) return null
+      const s = document.getSelection()
+      const n = s?.anchorNode ?? null
+      if (!(n && root.contains(n)) && document.activeElement !== root) return null
+      return { root, range: s && s.rangeCount ? s.getRangeAt(0).cloneRange() : null }
+    },
     /** 把资源链接插入正文光标处；路径含空格/括号用 `<…>` 包裹保证 markdown 合法。
-     *  copyMode=true 写相对 `名.dat/文件名`；false（仅链接）写传入的绝对路径。 */
-    insertAssetLink(datDirName: string, storedName: string, absSrc: string, copyMode: boolean) {
+     *  copyMode=true 写相对 `名.dat/文件名`；false（仅链接）写传入的绝对路径。
+     *  传了 `pv` 就是“粘贴发生在预览就地编辑里”：插进渲染出的 DOM 的粘贴处（走 execCommand，进原生撤销栈），
+     *  不再默默写进 CodeMirror 的光标（那是上次源码编辑的位置，会插错地方）。 */
+    insertAssetLink(
+      datDirName: string,
+      storedName: string,
+      absSrc: string,
+      copyMode: boolean,
+      pv?: { root: HTMLElement; range: Range | null } | null,
+    ) {
       const link = copyMode ? `${datDirName}/${storedName}` : absSrc
       const safe = /[\s()]/.test(link) ? `<${link}>` : link
       const alt = storedName.replace(/\.[^.]+$/, '') || storedName
       const text = this.isImageName(storedName) ? `![${alt}](${safe})` : `[${storedName}](${safe})`
+      if (pv) {
+        // range 只在第一张上用：之后光标已经跟在插入内容后面，跟着上一步的落点走才不会倒着插
+        const r = pv.range
+        pv.range = null
+        if (r && r.startContainer.isConnected && pv.root.contains(r.startContainer)) {
+          const s = document.getSelection()
+          s?.removeAllRanges()
+          s?.addRange(r)
+        }
+        const fmt: PreviewFmt = this.isImageName(storedName)
+          ? { op: 'image', alt, url: link }
+          : { op: 'link', text: storedName, url: link, placeholder: storedName }
+        if (applyPreviewFormat(pv.root, fmt)) {
+          this.onPreviewEditInput()
+          return
+        }
+      }
       this.activeEditor()?.insertText('\n' + text + '\n')
     },
     /** 读取剪贴板 File 为 data URL（base64 内联）。 */
@@ -5784,6 +6204,8 @@ export default defineComponent({
       if (!hasAsset) return
       e.preventDefault()
       e.stopPropagation()
+      // 粘贴发生在预览就地编辑里：把落点记在预览上，写盘回来再插回那里
+      const pv = this.pvPasteTarget()
       const { datDirName, anchorDir } = this.assetAnchorInfo(f)
       const destDir = this.joinPath(anchorDir, datDirName)
       // 加密文件（.mdl/.mdlb）：图片以密文 .mdat 落盘，写入后刷新缓存供即时预览
@@ -5798,13 +6220,13 @@ export default defineComponent({
               pendingLogical.push(await tauri.writeEncryptedAsset(f.vaultId, destDir, this.genPastedName(file), dataUrl))
             } else {
               const finalAbs = await tauri.writeAssetBytes(destDir, this.genPastedName(file), dataUrl)
-              this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true)
+              this.insertAssetLink(datDirName, this.fileName(finalAbs), finalAbs, true, pv)
             }
           }
           // 加密附件：先刷缓存再插链接，保证预览首渲即命中缓存（先插链接会先渲出裂图）
           if (pendingLogical.length) {
             await this.refreshAssetsMaterialized(f)
-            for (const logical of pendingLogical) this.insertAssetLink(datDirName, logical, logical, true)
+            for (const logical of pendingLogical) this.insertAssetLink(datDirName, logical, logical, true, pv)
           }
           message.success(this.$t('toast.pastedAssets', { n: files.length, dir: datDirName }))
           return
@@ -6016,7 +6438,12 @@ export default defineComponent({
       } finally {
         setAssetBaseDir(savedBase)
       }
+      // 代码块右下角外侧的控件带（语言标签 + 复制按钮）在离线页面里没有意义，整条剔除；
+      // 两个按钮正则作为兜底（旧版渲染可能只带了按钮没带容器）
+      body = body.replace(/<div class="code-ctl"[^>]*>[\s\S]*?<\/div>/g, '')
       body = body.replace(/<button[^>]*class="code-copy-btn"[\s\S]*?<\/button>/g, '')
+      // 语言标签同理：离线 HTML / PDF 里没有菜单可点，留着只是一块多余的控件
+      body = body.replace(/<button[^>]*class="code-lang-btn"[\s\S]*?<\/button>/g, '')
       // 预览里可点的任务复选框在离线页面无回写能力，补回 disabled 保持只读观感
       body = body.replace(/<input type="checkbox" class="task-cb"/g, '<input type="checkbox" disabled="" class="task-cb"')
       // 本地资源（图片+附件）：常规 HTML 复制到 `<html文件名>.dat/`，其余模式全部内联为 data URL
@@ -6294,7 +6721,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 .md a { color: ${C.link}; text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md code { background: ${C.codeBg}; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace; }
-.md pre { background: ${C.preBg}; border: 1px solid ${C.preBorder}; border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; }
+.md pre { background: ${C.preBg}; border: 1px solid ${C.preBorder}; border-radius: 6px; padding: 0; overflow-x: auto; margin: 1em 0; }
+.md pre .code-body { padding: 12px 16px; }
 .md pre code { background: transparent; padding: 0; font-size: 0.85em; tab-size: ${indent}; }
 .md blockquote { border-left: 4px solid ${C.quoteBorder}; padding: 0.5em 1em; margin: 1em 0; background: ${C.quoteBg}; color: ${C.text2}; }
 .md ul, .md ol { padding-left: 2em; margin: 0.8em 0; }
@@ -6307,7 +6735,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 .md th, .md td { border: 1px solid ${C.border}; padding: 8px 12px; text-align: left; }
 .md th { background: ${C.thBg}; font-weight: 600; }
 .md tr:nth-child(even) { background: ${C.stripe}; }
-.md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
+.md img { max-width: 100%; border-radius: 6px; margin: 0.5em 0; }
 .md hr { border: none; border-top: 1px solid ${C.hr}; margin: 2em 0; }
 .md .mb > :first-child { margin-top: 0; }
 .hljs-comment, .hljs-quote { color: ${HL.comment}; font-style: italic; }
@@ -6323,8 +6751,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI"
 @page { margin: 0; }
 body { width: ${isMac ? 595 : 793}px; font-size: ${isMac ? 11.25 : 15}px; }
 .md { max-width: none; padding: 2.13em 2.4em 3.73em; }
-.md pre { padding: 0.8em 1.07em; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
-.md img, .md pre, .md blockquote, .md table { break-inside: avoid; }
+.md pre { padding: 0; break-inside: avoid; }
+.md pre .code-body { padding: 0.8em 1.07em; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; }
+.md img, .md blockquote, .md table { break-inside: avoid; }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { break-after: avoid; }` : ''}`
       const safeTitle = (title || this.$t('editor.exportTitle')).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c] as string))
       return `<!DOCTYPE html>
@@ -6574,7 +7003,7 @@ ${bodyHtml}
                 <div class="m-item" @click="store.updateSettings({ showUnlockedVaults: !store.settings.showUnlockedVaults })"><span class="ck">{{ store.settings.showUnlockedVaults ? '✓' : '' }}</span>{{ $t('sidebar.vaults') }}</div>
                 <div class="m-item" @click="store.updateSettings({ showWorkdir: !store.settings.showWorkdir })"><span class="ck">{{ store.settings.showWorkdir ? '✓' : '' }}</span>{{ $t('menu.workdirHome') }}</div>
                 <div class="m-item" @click="store.updateSettings({ showFavorites: !store.settings.showFavorites })"><span class="ck">{{ store.settings.showFavorites ? '✓' : '' }}</span>{{ $t('sidebar.favorites') }}</div>
-                <div class="m-item" @click="store.updateSettings({ showRecent: !store.settings.showRecent })"><span class="ck">{{ store.settings.showRecent ? '✓' : '' }}</span>{{ $t('sidebar.recent') }}</div>
+                <div class="m-item" @click="toggleRecentSection()"><span class="ck">{{ store.settings.showRecent && store.settings.recordHistory ? '✓' : '' }}</span>{{ $t('sidebar.recent') }}</div>
                 <div class="m-item" @click="store.updateSettings({ showOutline: !store.settings.showOutline })"><span class="ck">{{ store.settings.showOutline ? '✓' : '' }}</span>{{ $t('sidebar.outline') }}</div>
                 <div class="m-sep"></div>
                 <div class="m-item" @click="openVaultAction(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openVault') }}</span></div>
@@ -6626,6 +7055,8 @@ ${bodyHtml}
               <span class="chev" :style="isSecClosed('open') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
               {{ $t('sidebar.openFiles') }} <span class="cnt">{{ openFiles.length }}</span>
               <span class="acts">
+                <!-- 新建文件：与 ⌘N / 主菜单同一动作（开一个未命名草稿页签，编辑后另存） -->
+                <span class="icon-btn" :title="$t('menu.newFile')" @click.stop="openNewDraft()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg></span>
                 <span class="icon-btn" :title="$t('editor.closeAllBtn')" @click.stop="closeAllFiles()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg></span>
               </span>
             </div>
@@ -6791,20 +7222,41 @@ ${bodyHtml}
             <div class="sec-head" @mousedown="onSectionMouseDown('sec:outline', $event)">
               <span class="chev" :style="isSecClosed('outline') ? 'transform:rotate(-90deg)' : ''"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg></span>
               {{ $t('sidebar.outline') }} <span class="cnt">{{ outline.length }}</span>
+              <span v-if="outlineDepthSteps.length" class="acts">
+                <!-- 折叠档位循环：点一下收起到一级 → 再点收起到二级 → 再点全部展开；
+                     走的是折叠表而非过滤，收起后的标题仍带箭头，可随时展开。
+                     图标两态：全部展开时是「箭头朝外」，已收起时是「箭头朝内」（点一下换一态） -->
+                <span
+                  class="icon-btn"
+                  :title="outlineDepthTitle"
+                  @click.stop="toggleOutlineDepth()"
+                ><svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path v-if="outlineDepth === 0" d="M513.664 602.709333a32.085333 32.085333 0 0 0-22.698667 9.301334l-160 160a32 32 0 0 0 45.098667 45.098666l137.258667-137.258666 137.301333 137.258666a31.957333 31.957333 0 0 0 56.32-22.058666 32 32 0 0 0-11.178667-23.04l-160-160a32 32 0 0 0-22.101333-9.301334zM514.261333 396.245333a32 32 0 0 0 22.741334-9.258666l160-160a32 32 0 0 0-45.141334-45.141334L514.602667 319.146667 377.301333 181.845333A32 32 0 1 0 332.202667 226.986667l160 160a32 32 0 0 0 22.058666 9.258666z" /><path v-else d="M513.664 828.288a32 32 0 0 1-22.698667-9.258667l-160-160a32 32 0 0 1 45.098667-45.141333l137.258667 137.301333 137.301333-137.301333a32 32 0 1 1 45.098667 45.141333l-160 160a32 32 0 0 1-22.058667 9.258667zM511.402667 170.666667a32 32 0 0 0-22.698667 9.301333l-160 160A32 32 0 0 0 373.76 385.066667l137.301333-137.258667 137.258667 137.258667a32 32 0 1 0 45.141333-45.098667l-160-160A32 32 0 0 0 511.402667 170.666667z" /></svg></span>
+              </span>
             </div>
             <div class="sec-list" v-show="!isSecClosed('outline')">
               <div v-if="!outline.length" class="empty-hint">{{ $t('editor.outlineEmpty') }}</div>
               <div
                 v-else
-                v-for="(h, i) in outline"
-                :key="h.line + '-' + i"
+                v-for="h in outlineRows"
+                :key="h.path"
                 class="ol-item"
                 :class="{ on: h.line === outlineActiveLine }"
-                :style="{ paddingLeft: 12 + (h.level - 1) * 13 + 'px' }"
                 v-tip="$t('editor.outlineTip', { text: h.text, line: h.line })"
                 @click="outlineGoto(h)"
               >
-                <span class="ol-h">H{{ h.level }}</span>
+                <!-- 左槽：层级缩进 + 折叠箭头 + H 徽章（紧凑合并成一槽）。缩进落在槽内，所以
+                     「文字之前的一切」（含缩进空白）都是可点区域：带子项时折叠，叶子时跳转。
+                     叶子隐藏箭头但保留槽位，让同级 H 徽章纵向对齐（不再左移一截显得乱） -->
+                <span
+                  class="ol-lead"
+                  :style="olLeadStyle(h.level)"
+                  @click.stop="h.kids ? toggleOutlineFold(h.path) : outlineGoto(h)"
+                >
+                  <span class="ol-caret" :class="{ closed: h.kids && outlineClosedMap[h.path], empty: !h.kids }">
+                    <svg v-if="h.kids" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6" /></svg>
+                  </span>
+                  <span class="ol-h">H{{ h.level }}</span>
+                </span>
                 <span class="ol-text">{{ h.text }}</span>
               </div>
             </div>
@@ -6857,7 +7309,7 @@ ${bodyHtml}
       <!-- 侧边栏拖拽手柄 -->
       <div class="sidebar-resize" v-show="store.settings.showSidebar" @mousedown="onSidebarResizeStart"></div>
 
-      <div class="right-col">
+      <div class="right-col" :class="{ 'chrome-overlay': chromeOverlay }">
       <!-- 页签栏（仅侧边栏右侧） -->
       <div class="tabsbar" v-show="store.settings.showTabs" @contextmenu="openContextMenu($event, 'tabsbar')" @dblclick="onToolbarBlankDblclick">
         <div
@@ -6885,12 +7337,12 @@ ${bodyHtml}
       </div>
 
       <!-- 工作台 -->
-      <section class="workbench">
+      <section class="workbench" :class="{ 'chrome-overlay': chromeOverlay }">
         <!-- 格式化工具栏 -->
         <!-- 格式化工具栏：编辑 / 分屏常显；预览态只在就地编辑开启时显示（命令作用在渲染出的 DOM 上，见 lib/wysiwyg 命令层），
              只读预览没有落点，整条收起。
              mousedown 一律 preventDefault：否则点按钮会把焦点从 contenteditable 上抢走、选区随之丢失。 -->
-        <div v-show="store.settings.showToolbar && activeFile && (currentMode !== 'preview' || previewEditable)" class="toolbar" @mousedown.prevent @contextmenu="openContextMenu($event, 'view')">
+        <div v-show="store.settings.showToolbar && activeFile && (currentMode !== 'preview' || previewEditable)" class="toolbar" :class="{ 'chrome-show': toolbarChrome === 'show', 'chrome-dim': toolbarChrome === 'dim' }" @mousedown.prevent @contextmenu="openContextMenu($event, 'bar')">
           <span class="icon-btn" v-tip="{ text: $t('editor.h1'), place: 'bottom' }" @click="fmtHeading(1)"><b style="font-size:13px;">H1</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h2'), place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h3'), place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
@@ -6914,12 +7366,10 @@ ${bodyHtml}
           <span v-if="currentMode !== 'preview'" class="icon-btn" :class="{ on: wordWrap }" v-tip="{ text: wordWrap ? $t('editor.wrapOff') : $t('editor.wrapOn'), place: 'bottom' }" @click="wordWrap = !wordWrap">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h15a3 3 0 0 1 0 6h-9" /><path d="M12 18l-3-3 3-3" /></svg>
           </span>
-          <span class="tb-spacer"></span>
-          <span class="tag tag-gray" style="flex:0 0 auto;">Markdown</span>
         </div>
 
         <!-- 编辑 / 预览 双栏（mode-* 类驱动切换滑移动画；拖拽时分屏比例即时跟手，禁用过渡） -->
-        <div class="panes" :class="[`mode-${currentMode}`, { 'no-anim': _splitDragging }]">
+        <div ref="panesWrap" class="panes" :class="[`mode-${currentMode}`, { 'no-anim': _splitDragging, 'chrome-overlay': chromeOverlay }]">
           <!-- 未打开文件时的空态引导 -->
           <div v-if="!activeFile" class="pane-locked">
             <div class="locked-inner">
@@ -7013,7 +7463,7 @@ ${bodyHtml}
             <div v-show="currentMode === 'split'" class="split-resize" @mousedown="onSplitResizeStart" @dblclick="resetSplitRatio"></div>
 
             <!-- 预览 -->
-            <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick">
+            <div class="pane pane-preview" :class="{ collapsed: currentMode === 'edit' }" ref="previewPane" :style="currentMode === 'split' ? { flex: '0 0 ' + ((1 - splitRatio) * 100) + '%' } : {}" @scroll="onPreviewScroll" @click="onPreviewLinkClick" @dblclick="onPreviewDblClick" @mousedown="onPreviewMousedown">
               <!-- 预览内搜索（预览模式 ⌘F）：sticky 零高度行贴在滚动容器顶部；
                    整行不吃点击，只有搜索栏吃，不挡正文框选 -->
               <div v-if="pvSearchOpen" class="pv-search-row">
@@ -7054,7 +7504,7 @@ ${bodyHtml}
       </section>
 
       <!-- 状态栏（仅侧边栏右侧，与页签栏同列） -->
-      <div v-show="store.settings.showStatusbar" class="statusbar" @contextmenu="openContextMenu($event, 'view')">
+      <div v-show="store.settings.showStatusbar" class="statusbar" :class="{ 'chrome-show': statusChrome === 'show', 'chrome-dim': statusChrome === 'dim' }" @contextmenu="openContextMenu($event, 'bar')">
         <span class="st">{{ activeFile ? $t('editor.lineN', { n: activeFile.content.split('\n').length }) : '—' }}</span>
       <span class="st">{{ activeFile ? $t('editor.charN', { n: activeFile.content.length }) : '—' }}</span>
       <span class="st"><span class="dot" :style="activeFile && activeFile.dirty ? 'background:var(--gold)' : ''"></span> {{ activeFile && activeFile.dirty ? $t('editor.unsaved') : $t('editor.saved') }}</span>
@@ -7868,7 +8318,7 @@ ${bodyHtml}
 
 /* 侧边栏 */
 .sidebar {
-  width: 264px; flex: 0 0 264px;
+  width: 250px; flex: 0 0 250px;
   display: flex; flex-direction: column;
   background: var(--sidebar-bg);
   /* 侧边栏与右列的分隔线：用弹层边框色，比 --border 再深一档 */
@@ -7889,7 +8339,7 @@ ${bodyHtml}
 }
 .sb-head { padding: 10px 12px 6px; }
 .sb-search { position: relative; }
-.sb-search .input { height: 30px; font-size: 13px; padding-left: 30px; background: var(--panel); }
+.sb-search .input { height: 30px; font-size: var(--sb-font-size); padding-left: 30px; background: var(--panel); }
 .sb-search svg { position: absolute; left: 9px; top: 8px; }
 
 /* 搜索结果下拉 */
@@ -7905,7 +8355,7 @@ ${bodyHtml}
   z-index: 50;
   padding: 4px;
 }
-.search-empty { padding: 18px 12px; text-align: center; font-size: 12.5px; color: var(--text-4); }
+.search-empty { padding: 18px 12px; text-align: center; font-size: var(--sb-font-size); color: var(--text-4); }
 .search-hit {
   display: flex; gap: 8px; align-items: flex-start;
   padding: 7px 8px;
@@ -7917,8 +8367,8 @@ ${bodyHtml}
 .sh-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex: 0 0 auto; }
 .sh-body { flex: 1; min-width: 0; }
 .sh-title { display: flex; align-items: baseline; gap: 6px; }
-.sh-name { font-size: 12.5px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.sh-vault { font-size: 10.5px; color: var(--text-3); flex: 0 0 auto; }
+.sh-name { font-size: var(--sb-font-size); font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sh-vault { font-size: var(--sb-font-size-sm); color: var(--text-3); flex: 0 0 auto; }
 /* 文件名命中徽章：与结果行本身显示的文件名区分，避免误认为内容匹配 */
 .sh-name-tag {
   flex: 0 0 auto;
@@ -7929,8 +8379,8 @@ ${bodyHtml}
   background: var(--primary-bg);
   border: 1px solid rgba(22, 119, 255, 0.2);
 }
-.sh-snippet { font-size: 12px; color: var(--text-3); margin-top: 2px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
-.sh-snippet.path-hit { color: var(--text-4); font-family: var(--mono); font-size: 11.5px; }
+.sh-snippet { font-size: calc(var(--sb-font-size) - 1px); color: var(--text-3); margin-top: 2px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all; }
+.sh-snippet.path-hit { color: var(--text-4); font-family: var(--mono); font-size: calc(var(--sb-font-size) - 1.5px); }
 .sh-snippet mark { background: transparent; color: var(--primary); font-weight: 600; }
 
 .sb-body { flex: 1; overflow-y: auto; padding-bottom: 12px; }
@@ -7947,7 +8397,7 @@ ${bodyHtml}
 .sec-head {
   display: flex; align-items: center; gap: 4px;
   height: 28px; padding: 0 8px 0 4px;
-  font-size: 11px; font-weight: bold;
+  font-size: var(--sb-font-size-sm); font-weight: bold;
   color: var(--text-2);
   letter-spacing: 0.3px;
   white-space: nowrap;
@@ -7957,7 +8407,10 @@ ${bodyHtml}
   z-index: 2;
 }
 .sec-head .chev { width: 18px; height: 18px; display: inline-flex; align-items: center; justify-content: center; color: var(--text-3); transition: transform 0.15s; }
-.sec-head .cnt { color: var(--text-4); font-weight: 400; margin-left: 2px; }
+.sec-head .cnt { color: var(--text-4); font-weight: 400; margin-left: 2px; opacity: 0; transition: opacity 0.15s ease; }
+/* 条目计数平时不显示，鼠标进入侧边栏才淡入。用 opacity 而非 display，
+   隐藏时仍占位，避免显隐瞬间标题行宽度重排、长标题的省略号位置跳动 */
+.sidebar:hover .sec-head .cnt { opacity: 1; }
 .sec-head .acts { margin-left: auto; display: none; gap: 2px; flex: 0 0 auto; }
 /* 工作目录标题为目录名，可能很长：允许收缩省略，把右侧按钮组留给固定宽度 */
 .sec-head .wd-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -7965,26 +8418,49 @@ ${bodyHtml}
 .sec-head .acts .icon-btn { width: 20px; height: 20px; }
 /* 悬停背景：侧边栏底色与 --hover 太接近几乎看不出，改用 --border 保证可辨识 */
 .sec-head .acts .icon-btn:hover { background: var(--border); }
+/* 大纲折叠档位按钮：图标本身分「收起 / 展开」两态（见模板），不再靠旋转切换 */
 
 .sec-list { background-color: var(--panel); }
 
-/* 大纲条目：按标题层级缩进，H1~H6 小字号徽章标识 */
+/* 大纲条目：按标题层级缩进，H1~H6 小字号徽章标识。
+   字号用专有的 --ol-font-size（比侧边栏基准大一档，见 global.css），编辑器字号放大时同步变大，
+   因此不能再用固定 height，改为 min-height + 上下内边距，让行盒随字号自然长高；
+   徽章与缩进也都用 em 随字号缩放 */
 .ol-item {
-  display: flex; align-items: center; gap: 6px;
-  height: 26px; padding-right: 10px;
-  font-size: 12.5px; color: var(--text-2);
+  display: flex; align-items: center; gap: 4px;
+  min-height: 26px; padding: 3px 10px 3px 0;
+  font-size: var(--ol-font-size); line-height: 1.45;
+  color: var(--text-2);
   cursor: pointer; white-space: nowrap; overflow: hidden;
 }
 .ol-item:hover { background: var(--hover); }
 .ol-item.on { background: var(--primary-bg); color: var(--primary); }
-.ol-item .ol-h { flex: 0 0 auto; font-size: 9.5px; font-weight: 600; color: var(--text-4); opacity: 0.75; letter-spacing: 0.2px; }
+.ol-item .ol-h { flex: 0 0 auto; font-size: 0.76em; font-weight: 600; color: var(--text-4); opacity: 0.75; letter-spacing: 0.2px; }
 .ol-item.on .ol-h { color: var(--primary); opacity: 1; }
-.ol-item .ol-text { overflow: hidden; text-overflow: ellipsis; }
+.ol-item .ol-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* 左槽：层级缩进 + 折叠箭头 + H 徽章（宽度由 olLeadStyle 内联给出）。
+   箭头与徽章紧挨着合并成一槽（箭头 10px + 间隙 2px + 徽章），
+   比原来「箭头 + 徽章」各占一段且都留大间隙紧了很多；叶子用空箭头占位保持徽章对齐 */
+.ol-item .ol-lead {
+  flex: 0 0 auto; height: 18px;
+  display: inline-flex; align-items: center; gap: 2px;
+  color: var(--text-4);
+}
+.ol-item .ol-lead .ol-caret {
+  flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 10px; height: 14px; border-radius: 3px;
+  transition: transform 0.15s ease, color 0.15s ease;
+}
+.ol-item .ol-lead .ol-caret.empty { visibility: hidden; }
+.ol-item .ol-lead .ol-caret.closed { transform: rotate(-90deg); }
+.ol-item .ol-lead .ol-caret:hover { color: var(--text-2); background: var(--border); }
+.ol-item.on .ol-lead { color: var(--primary); }
 
 .t-item {
   display: flex; align-items: center; gap: 5px;
   height: 29px; padding: 0 10px 0 12px;
-  font-size: 13px; color: var(--text-2);
+  font-size: var(--sb-font-size); color: var(--text-2);
   cursor: pointer;
   -webkit-user-select: none; user-select: none;
   position: relative;
@@ -8130,10 +8606,22 @@ label.radio input[type="radio"] { margin: 0; }
   border-bottom: 1px solid var(--border-2);
   overflow-x: auto;
 }
+/* 悬停淡出（chromeAutoFade）：两条栏改为浮在正文之上、不再占位，正文与滚动条因此贯穿全高。
+   三态由鼠标坐标定：收起态 opacity 0 + pointer-events none（不挡正文选中/点击），
+   正文内 dim 态几乎全透明，鼠标进入对应条带才 show 并可点。 */
+.workbench.chrome-overlay { position: relative; }
+.workbench.chrome-overlay .toolbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 40px;
+  z-index: 12;
+  background: var(--panel);
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.workbench.chrome-overlay .toolbar.chrome-dim { opacity: 0.35; }
+.workbench.chrome-overlay .toolbar.chrome-show { opacity: 1; pointer-events: auto; }
 .toolbar .icon-btn { flex: 0 0 auto; }
 .toolbar .icon-btn.on { background: var(--primary-bg); color: var(--primary-active); }
 .tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 6px; flex: 0 0 auto; }
-.tb-spacer { flex: 1; }
 /* 只读 ⇄ 编辑（标题栏，视图切换段左侧；便签窗同位置） */
 .pv-toggle { border: 1px solid var(--border-2); border-radius: 5px; height: 24px; padding: 0 5px; }
 .tb-right .pv-toggle.on { background: var(--primary-bg); color: var(--primary-active); border-color: var(--primary-bg); }
@@ -8238,7 +8726,7 @@ label.radio input[type="radio"] { margin: 0; }
 }
 .empty-hint {
   padding: 14px 12px;
-  font-size: 12.5px;
+  font-size: var(--sb-font-size);
   color: var(--text-4);
   text-align: center;
   cursor: pointer;
@@ -8250,18 +8738,24 @@ label.radio input[type="radio"] { margin: 0; }
   display: flex; flex-direction: column; align-items: center; gap: 6px;
   padding: 48px 16px 0; color: var(--text-4); text-align: center;
 }
-.sb-empty-title { font-size: 13px; font-weight: 600; color: var(--text-3); }
-.sb-empty-desc { font-size: 12px; line-height: 1.6; }
+.sb-empty-title { font-size: var(--sb-font-size); font-weight: 600; color: var(--text-3); }
+.sb-empty-desc { font-size: calc(var(--sb-font-size) - 1px); line-height: 1.6; }
 .sb-empty-btn {
   margin-top: 6px; width: 100%; max-width: 180px;
   display: flex; align-items: center; justify-content: center; gap: 8px;
   padding: 6px 10px; border: 1px solid var(--border-pop); border-radius: 8px;
-  background: var(--bg); font-size: 12.5px; color: var(--text-2); cursor: pointer;
+  background: var(--bg); font-size: var(--sb-font-size); color: var(--text-2); cursor: pointer;
   transition: border-color 0.15s, color 0.15s;
 }
 .sb-empty-btn:hover { border-color: var(--primary); color: var(--primary); }
 
 .pane-preview { background: var(--panel); }
+/* 预览 + 浮层淡出：正文上下留出两条栏的高度余量（顶 40+16 / 底 28+36），
+   工具栏 / 状态栏浮现时不会压住首尾行；滚动条仍贯穿全高 */
+.panes.chrome-overlay.mode-preview .pane-preview :deep(.md) {
+  padding-top: 56px;
+  padding-bottom: 64px;
+}
 /* 全局搜索命中在预览区的临时高亮（由 _markPreviewHit 注入）：用琥珀色底而非浏览器默认的
    黄底黑字，保证亮/暗主题下都不抢正文颜色；首次出现闪一下以便定位后一眼看到 */
 .pane-preview .md :deep(mark.pv-hit) {
@@ -8373,6 +8867,18 @@ html[data-theme='dark'] .pane-preview .md :deep(mark.pv-search.pv-search-on) {
   border-top: 1px solid var(--border-2);
   user-select: none;
 }
+/* 状态栏的淡出态与工具栏同构：不占位、浮在正文底部 */
+.right-col.chrome-overlay { position: relative; }
+.right-col.chrome-overlay .statusbar {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  /* 绝对定位后 flex-basis 不再生效，必须显式给高，否则塌缩成内容高度 */
+  height: 28px;
+  z-index: 12;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.18s ease;
+}
+.right-col.chrome-overlay .statusbar.chrome-dim { opacity: 0.35; }
+.right-col.chrome-overlay .statusbar.chrome-show { opacity: 1; pointer-events: auto; }
 .statusbar .st { display: inline-flex; align-items: center; gap: 5px; }
 /* 状态栏可点击弹菜单的项（字号 / 自动锁定）：与 .st-ext 一样给出手型与悬停反馈 */
 .statusbar .st-menu { cursor: pointer; }

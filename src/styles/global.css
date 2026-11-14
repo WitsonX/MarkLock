@@ -41,6 +41,20 @@
 
   --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, "Courier New", monospace;
 
+  /* 编辑器字号（px）：由 EditorView 按设置写到 documentElement 上覆盖，这里给默认值兜底 */
+  --editor-font-size: 16px;
+
+  /* 侧边栏字号：跟随编辑器字号温和缩放（16px 时约 13.1px，与原先写死的 12.5 / 13px 基本一致）。
+     上下限是必需的：小字号下不至于缩到不可读，大字号下也不会把固定 250px 宽的侧边栏
+     挤得只剩省略号。分组标题、条数、说明等次级文字统一用 -sm 一档。 */
+  --sb-font-size: clamp(12.5px, calc(var(--editor-font-size) * 0.82), 15px);
+  --sb-font-size-sm: clamp(11px, calc(var(--editor-font-size) * 0.7), 13px);
+
+  /* 大纲字号：在侧边栏基准上再大一档（16px 时约 14.1px）。大纲是纯文本导航，
+     扫读频率高、行距也疏，比文件树略大不至于显小；上限比文件树高 0.5px 即可，
+     否则 H6 缩进叠加后在 250px 宽侧边栏里标题很快就会只剩省略号 */
+  --ol-font-size: clamp(13px, calc(var(--editor-font-size) * 0.88), 15.5px);
+
   /* highlight.js 代码块 token 配色（亮色，对齐 GitHub _light_） */
   --hl-comment: #6a737d;
   --hl-keyword: #cf222e;
@@ -249,7 +263,7 @@ html[data-platform='macos'] .titlebar {
 /* ---------- Markdown 预览样式 ---------- */
 /* 字号跟随编辑器字号设置（+1px：正文非等宽，同 px 值下视觉偏小）；标题/代码均为 em，根字号一变整体等比缩放 */
 /* 字体族与行间距由预览设置驱动（见 --preview-font-family / --preview-line-height，在 EditorView 内联到 .md），未设置时回退默认：跟随界面字体、1.7 行距 */
-.md { padding: 20px 26px 40px; line-height: var(--preview-line-height, 1.7); font-family: var(--preview-font-family, inherit); color: var(--text); font-size: calc(var(--editor-font-size, 14px) + 1px); }
+.md { padding: 20px 26px 40px; line-height: var(--preview-line-height, 1.7); font-family: var(--preview-font-family, inherit); color: var(--text); font-size: calc(var(--editor-font-size, 16px) + 1px); }
 .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1.2em 0 0.6em; font-weight: 600; }
 .md h1 { font-size: 1.8em; border-bottom: 1px solid var(--md-heading-border); padding-bottom: 0.3em; }
 .md h2 { font-size: 1.5em; border-bottom: 1px solid var(--md-heading-border); padding-bottom: 0.3em; }
@@ -258,35 +272,112 @@ html[data-platform='macos'] .titlebar {
 .md a { color: var(--md-link); text-decoration: none; }
 .md a:hover { text-decoration: underline; }
 .md code { background: var(--md-code-bg); color: var(--md-code-text); padding: 2px 6px; border-radius: 4px; font-size: 0.9em; font-family: var(--mono); }
-.md pre { background: var(--md-pre-bg); border: 1px solid var(--md-pre-border); border-radius: 6px; padding: 12px 16px; overflow-x: auto; margin: 1em 0; position: relative; }
+.md pre { background: var(--md-pre-bg); border: 1px solid var(--md-pre-border); border-radius: 6px; padding: 0; overflow: visible; margin: 1em 0; position: relative; }
+/* 横向滚动交给内层：<pre> 自己不裁溢出，控件带浮在右上角外侧也不会被切 */
+.md pre .code-body { padding: 12px 16px; border-radius: inherit; overflow-x: auto; }
 .md pre code { background: transparent; padding: 0; font-size: 0.85em; tab-size: var(--code-indent, 4); }
-/* 预览代码块右上角复制按钮：悬停代码块时显现，复制成功后 .copied 切换为对勾 + 主色 */
+/* 代码块右上角的浮动控件带：语言标签 + 复制按钮。
+   绝对定位浮在代码上方（不占文档流、不改行高，也不需给代码块留白），
+   按钮自带不透明底色，盖住的那几个字符悬停时才被挡，平时不影响阅读。 */
+.code-ctl { position: absolute; top: 4px; right: 4px; z-index: 1; display: flex; align-items: center; gap: 6px; white-space: normal; }
+/* 默认隐藏，鼠标移到代码块（或控件拿到焦点、菜单正开着）才浮出。高度统一在带子上定，
+   语言标签与复制按钮的内边距 / 行高改成 0 8px / 1，两个按钮高度才会一致 */
+.code-ctl > * { height: 26px; box-sizing: border-box; opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
+.md pre:hover .code-ctl > *, .code-ctl > *:focus-visible, .code-lang-btn.menu-on { opacity: 1; }
 .code-copy-btn {
-  position: absolute;
-  top: 7px;
-  right: 8px;
-  z-index: 1;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
+  padding: 0 8px;
   font-size: 12px;
+  line-height: 1;
   font-family: inherit;
   color: var(--text-3);
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 5px;
   cursor: pointer;
-  opacity: 0;
   transition: opacity 0.15s, color 0.15s, border-color 0.15s;
 }
-.md pre:hover > .code-copy-btn,
-.code-copy-btn:focus-visible { opacity: 1; }
 .code-copy-btn:hover { color: var(--text); border-color: var(--border-pop); }
 .code-copy-btn .cc-check { display: none; }
 .code-copy-btn.copied { color: var(--green); border-color: var(--green); opacity: 1; }
 .code-copy-btn.copied .cc-copy { display: none; }
 .code-copy-btn.copied .cc-check { display: inline; }
+
+/* 代码块的语言标签（同在右上角控件带里）：就地编辑时可点开语言菜单（逻辑见 src/lib/codeLang.ts），
+   只读预览悬停可见但不可点；导出 HTML / PDF 时整条控件带剔除。 */
+.code-lang-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-3);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: default;
+}
+.md.wysiwyg-on .code-lang-btn { cursor: pointer; }
+.md.wysiwyg-on .code-lang-btn:hover { color: var(--text); border-color: var(--border-pop); }
+
+/* 代码块语言菜单：原生 DOM 挂在 body 上（src/lib/codeLang.ts），用 fixed 定位吸附在标签下方 */
+.code-lang-menu {
+  position: fixed;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  width: 230px;
+  padding: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border-pop);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+.clm-search {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.clm-search:focus { border-color: var(--primary); }
+.clm-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 264px;
+  margin-top: 6px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.clm-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+/* 用 class 隐藏而不是 [hidden]：属性选择器会输给 `.clm-item` 自带的 display */
+.clm-item.off { display: none; }
+.clm-item:hover, .clm-item.cur { background: var(--hover); }
+.clm-item.on { color: var(--primary); font-weight: 600; }
+.clm-id { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
 /* 行内代码复制：按钮绝对定位悬浮在 code 右端、略微覆盖，不占行宽；
    右侧预留 margin 补偿覆盖量避免压到后续文字；不透明底色 + 微阴影保证压在文字上仍可读，
    仅留图标隐藏文字（.cc-txt 宽度归零），悬停行内容器时显现，复制成功后变对勾 */
@@ -308,12 +399,14 @@ html[data-platform='macos'] .titlebar {
   background: var(--panel);
   border-color: var(--border);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+  /* 基态隐藏，悬停行内代码（或按钮拿到焦点）才浮出；复制成功后 .copied 强制可见 */
+  opacity: 0;
 }
 .md .codespan-wrap > .code-copy-btn .cc-ico { width: 11px; height: 11px; }
 .codespan-wrap > .code-copy-btn .cc-txt { width: 0; overflow: hidden; }
 .md .codespan-wrap:hover > .code-copy-btn,
 .codespan-wrap > .code-copy-btn:focus-visible { opacity: 1; }
-.md .codespan-wrap > .code-copy-btn.copied { border-color: var(--green); }
+.md .codespan-wrap > .code-copy-btn.copied { border-color: var(--green); opacity: 1; }
 .md blockquote { border-left: 4px solid var(--md-quote-border); padding: 0.5em 1em; margin: 1em 0; background: var(--md-quote-bg); color: var(--md-quote-text); }
 .md ul, .md ol { padding-left: 2em; margin: 0.8em 0; }
 .md li { margin: 0.3em 0; }
@@ -348,7 +441,7 @@ html[data-theme='dark'] .md input[type="checkbox"]:checked {
 .md th, .md td { border: 1px solid var(--md-table-border); padding: 8px 12px; text-align: left; }
 .md th { background: var(--md-th-bg); font-weight: 600; }
 .md tr:nth-child(even) { background: var(--md-stripe); }
-.md img { max-width: 100%; border-radius: 6px; margin: 1em 0; }
+.md img { max-width: 100%; border-radius: 6px; margin: 0.5em 0; }
 .md hr { border: none; border-top: 1px solid var(--md-hr); margin: 2em 0; }
 
 /* ---------- 预览就地编辑（.wysiwyg-on = 预览视图且设置开启） ----------

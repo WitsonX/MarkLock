@@ -3,6 +3,8 @@ import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
 import * as tauri from '../lib/tauri'
 import { toggleTaskMarker } from '../lib/preview'
+import { caretBelowLastBlock } from '../lib/wysiwyg'
+import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
 import { isMac } from '../lib/platform'
 import { bindHoverTip } from '../lib/tooltip'
 import { t } from '../locales'
@@ -69,8 +71,36 @@ export default defineComponent({
     if (this._linkTipUnbind) this._linkTipUnbind()
   },
   methods: {
+    /** 点最后一个块下方的空白时把光标落到块后（代码块 / 表格底下没有可落笔的段落，
+     *  浏览器会把光标塞回块里）：与主编辑器 `onPreviewMousedown` 同一套逻辑。 */
+    onMousedown(e: MouseEvent) {
+      if (!this.editable || e.button !== 0) return
+      const target = e.target as HTMLElement | null
+      // 语言标签与右下角控件带是控件：别让这次 mousedown 把代码块里的光标挪走（click 照常派发）
+      if (target?.closest('.code-ctl')) {
+        e.preventDefault()
+        return
+      }
+      const root = this.$el as HTMLElement
+      const t = target
+      if (t !== root && !t?.classList.contains('mb')) return
+      if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
+    },
     onClick(e: MouseEvent) {
       const target = e.target as HTMLElement
+      // 代码块语言标签：就地编辑态点开语言菜单（只读态只是一枚静态标签）
+      const langBtn = target.closest('.code-lang-btn') as HTMLElement | null
+      if (langBtn) {
+        e.preventDefault()
+        e.stopPropagation()
+        const pre = langBtn.closest('pre') as HTMLElement | null
+        if (this.editable && pre) {
+          openCodeLangMenu(langBtn, codeLangOf(pre), (id) => {
+            if (applyCodeLang(pre, id)) this.$emit('edit-input')
+          })
+        }
+        return
+      }
       // 代码复制按钮（代码块 / 行内代码共用 .code-copy-btn）：编辑态同样可用，故排在 editable 分叉之前
       const btn = target.closest('.code-copy-btn') as HTMLElement | null
       if (btn) {
@@ -149,6 +179,7 @@ export default defineComponent({
     :contenteditable="editable ? 'true' : 'false'"
     v-html="html"
     @click="onClick"
+    @mousedown="onMousedown"
     @input="$emit('edit-input')"
     @keydown="$emit('edit-keydown', $event)"
     @paste="$emit('edit-paste', $event)"

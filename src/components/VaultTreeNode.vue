@@ -158,7 +158,8 @@ export default defineComponent({
 .vtn-row {
   display: flex; align-items: center; gap: 5px;
   height: 28px; padding-right: 10px;
-  font-size: 13px; color: var(--text-2);
+  /* 侧边栏字号基准（global.css --sb-font-size）：随编辑器字号适度缩放 */
+  font-size: var(--sb-font-size); color: var(--text-2);
   cursor: pointer; -webkit-user-select: none; user-select: none;
 }
 .vtn-row:hover { background: var(--hover); }

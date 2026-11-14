@@ -15,7 +15,7 @@ function escapeCode(s: string): string {
 }
 
 /** marked v5+ 移除了 highlight 选项，改用自定义 renderer 接 highlight.js */
-function highlightCode(text: string, lang: string): string {
+export function highlightCode(text: string, lang: string): string {
   try {
     if (lang && hljs.getLanguage(lang)) return hljs.highlight(text, { language: lang }).value
     return hljs.highlightAuto(text).value
@@ -33,6 +33,15 @@ const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = tr
 /** 行内代码复制按钮：复用 .code-copy-btn 状态类（.cc-txt 由 CSS 隐藏只留图标），
  *  与 code 同为 .codespan-wrap 的兄弟节点，选中 code 文本时不会带入按钮文字。 */
 const INLINE_COPY_BTN = () => CODE_COPY_BTN(translate('common.copy'), translate('editor.copyInlineAria'))
+
+/** 代码块右上角的浮动控件带：语言标签 + 复制按钮（见 `lib/codeLang.ts` 的 `openCodeLangMenu`）。
+ *  平时隐藏，鼠标移到代码块（或控件拿到焦点、菜单开着）才浮出；绝对定位浮在代码上方，
+ *  不占文档流、不改行高，代码块也不用为它留白。`contenteditable=false` 与复制按钮同理：它是界面控件
+ *  不是正文，既不能被光标插进去打字，序列化侧也按类名整体跳过（`isChrome`）；导出 HTML 时同样剔除。 */
+const CODE_LANG_BTN = (lang: string) => {
+  const tip = escAttr(translate('editor.codeLangTip'))
+  return `<button type="button" contenteditable="false" class="code-lang-btn" data-lang="${escAttr(lang)}" aria-label="${tip}" title="${tip}">${escAttr(lang || translate('editor.codeLangAuto'))}</button>`
+}
 
 /** 当前预览文件所在目录（解析正文里相对图片路径的基准）。
  *  渲染前由调用方经 setAssetBaseDir 写入，image 渲染器读取它拼绝对路径再转 asset URL。
@@ -96,7 +105,9 @@ marked.use({
       const name = (lang || '').trim().split(/\s+/)[0]
       // 围栏信息串要进 class 属性，限定为语言名常见字符，避免引号/尖括号提前闭合属性破坏标签
       const safe = /^[\w+.-]+$/.test(name) ? name : ''
-      return `<pre>${CODE_COPY_BTN()}<code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></pre>\n`
+      // 代码正文包一层 .code-body 管横向滚动，让 <pre> 自己 overflow: visible——
+      // 否则右下角外侧的工具条会被 pre 的溢出裁剪掉（见 global.css 的 .code-ctl）
+      return `<pre><div class="code-body"><code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></div><div class="code-ctl" contenteditable="false">${CODE_LANG_BTN(safe)}${CODE_COPY_BTN()}</div></pre>\n`
     },
     // 行内代码：code 后跟复制按钮，外包 inline 容器供 CSS 悬停显现与事件定位；
     // 必须自己转义：marked 只在「默认 renderer」里对 codespan 做 escapeHtml，token.text 是原始文本，

@@ -94,9 +94,9 @@ function escapeCell(s: string): string {
   return s.replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ').trim()
 }
 
-/** 应用自己注入的控件不属于正文，绝不能进源码（复制按钮及其图标与文字）。 */
+/** 应用自己注入的控件不属于正文，绝不能进源码（复制按钮、语言标签，以及它们的图标与文字）。 */
 function isChrome(el: HTMLElement): boolean {
-  return el.classList.contains('code-copy-btn') || el.classList.contains('cc-txt') || el.classList.contains('cc-ico')
+  return el.classList.contains('code-copy-btn') || el.classList.contains('code-lang-btn') || el.classList.contains('code-ctl') || el.classList.contains('cc-txt') || el.classList.contains('cc-ico')
 }
 
 /** 原始 HTML 整块保留前先剥掉应用注入的临时搜索高亮（预览内搜索 pv-search / 全局搜索命中定位 pv-hit），
@@ -158,7 +158,11 @@ function inlineNode(node: Node): string {
       return (el as HTMLInputElement).checked ? '[x]' : '[ ]'
     case 'IMG': {
       const title = el.getAttribute('title')
-      return `![${el.getAttribute('alt') ?? ''}](${imgSrc(el)}${title ? ` "${title}"` : ''})`
+      const src = imgSrc(el)
+      // 路径含空格/括号得用 `<…>` 包住，否则回写的 `![alt](a b.png)` 重新解析会在空格处断掉
+      // （从剪贴板粘贴的截图文件名常带空格）。已带尖括号的原样输出，避免双层。
+      const dest = !src || /^<.*>$/.test(src) ? src : linkDest(src)
+      return `![${el.getAttribute('alt') ?? ''}](${dest}${title ? ` "${title}"` : ''})`
     }
     case 'A': {
       const href = el.getAttribute('href') ?? ''
@@ -284,8 +288,9 @@ function blockquoteMd(el: HTMLElement): string {
 
 /** 代码块文本必须按 DOM 走，不能用 `textContent`：编辑器在 `<pre>` 里敲回车，浏览器留下的是一
  *  个 `<br>`（Chromium）或一个 `<div>`（WebKit），`textContent` 把两者都读成零宽，两行代码会被
- *  并成一行——这是真丢内容，不是排版规整。这里把 `<br>` 与块边界都记作换行。 */
-function codeText(el: HTMLElement): string {
+ *  并成一行——这是真丢内容，不是排版规整。这里把 `<br>` 与块边界都记作换行。
+ *  也供 `lib/codeLang.ts` 重排高亮时保留内容与光标偏移。 */
+export function codeText(el: HTMLElement): string {
   if (isChrome(el)) return ''
   let out = ''
   for (const c of Array.from(el.childNodes)) {
@@ -401,7 +406,7 @@ export type PreviewFmt =
   | { op: 'heading'; level: number }
   | { op: 'wrap'; before: string; placeholder: string }
   | { op: 'prefix'; prefix: string }
-  | { op: 'codeblock' }
+  | { op: 'codeblock'; placeholder: string }
   | { op: 'insertMd'; md: string }
   | { op: 'link'; text: string; url: string; placeholder: string }
   | { op: 'image'; alt: string; url: string }
@@ -626,11 +631,14 @@ function applyTask(root: HTMLElement): void {
 }
 
 /** 插入一段 Markdown 渲染出的块（表格、分隔线）：直接借 marked 的输出，
- *  省掉一份「HTML 长什么样」的第二定义，插入形状与渲染形状天然一致。 */
-function applyInsertMd(root: HTMLElement, md: string): void {
+ *  省掉一份「HTML 长什么样」的第二定义，插入形状与渲染形状天然一致。
+ *  已经在代码块里则不动：块级标签嵌进 `<pre>` 属于非法结构，回写也表达不出来。 */
+function applyInsertMd(root: HTMLElement, md: string): boolean {
+  if (pvAncestor(root, 'pre')) return false
   const html = renderMarkdown(md).trim()
   splitBeforeBlock(root)
   runCmd('insertHTML', html)
+  return true
 }
 
 function applyImage(root: HTMLElement, alt: string, url: string): void {
@@ -647,15 +655,30 @@ function inlineHtml(md: string): string {
   return renderMarkdown(md).trim().replace(/^<p>/, '').replace(/<\/p>$/, '')
 }
 
-function applyCodeBlock(root: HTMLElement): void {
+function applyCodeBlock(root: HTMLElement, placeholder: string): boolean {
   const s = pvSelection()
-  const txt = s && !s.isCollapsed ? s.toString() : ''
+  if (!s) return false
+  // 已经在代码块里：不再嵌一层代码块（源码也表达不出嵌套围栏），直接忽略这次点击
+  if (pvAncestor(root, 'pre')) return false
+  const selected = s.isCollapsed ? '' : s.toString()
   splitBeforeBlock(root)
-  runCmd('insertHTML', renderMarkdown(fencedCodeMd(txt, '')).trim())
-  if (!txt) {
-    const code = justInserted('code')
-    if (code) selectContents(code, true)
-  }
+  // 空选中时不能插一个空的 <code>：WebKit 的 insertHTML 会把光标留在**上一个段落**末尾
+  // （空 <code> 没有落点），接着打字就写进了上文。这里插一段占位文字再按下文选中它，
+  // 光标必然落在代码块里，打字即替换占位。
+  const before = new Set(Array.from(root.querySelectorAll('pre')))
+  runCmd('insertHTML', renderMarkdown(fencedCodeMd(selected || placeholder, '')).trim())
+  // 回插后的落点在两个内核并不一致（Chromium 落在 <code> 内、WebKit 落在前一个段落末尾），
+  // 不能用「光标前一个兄弟」推断插进来的是谁，按插入前后的差集认领新代码块最稳。
+  const pre = Array.from(root.querySelectorAll('pre')).find((p) => !before.has(p))
+  const code = pre?.querySelector('code')
+  if (!code) return false
+  const r = document.createRange()
+  r.selectNodeContents(code)
+  // 有选中文字：光标落到代码末尾继续敲；占位：整段保持选中，直接输入即替换
+  if (selected) r.collapse(false)
+  s.removeAllRanges()
+  s.addRange(r)
+  return true
 }
 
 /** 就地编辑下执行一次格式化；返回是否真的下发了命令，调用方据此决定要不要回写源码。 */
@@ -694,11 +717,9 @@ export function applyPreviewFormat(root: HTMLElement, fmt: PreviewFmt): boolean 
           return false
       }
     case 'codeblock':
-      applyCodeBlock(root)
-      return true
+      return applyCodeBlock(root, fmt.placeholder)
     case 'insertMd':
-      applyInsertMd(root, fmt.md)
-      return true
+      return applyInsertMd(root, fmt.md)
     case 'link': {
       if (!fmt.text) {
         // 空选区：留占位文字并选中它，用户直接打字就能替换。文字刻意不取地址本身，见下面那条注释。
@@ -739,4 +760,224 @@ export function enterInTaskItem(e: KeyboardEvent, root: HTMLElement): boolean {
   runCmd('insertParagraph')
   runCmd('insertHTML', '<input type="checkbox" contenteditable="false" class="task-cb"> ')
   return true
+}
+
+/** 光标是否落在代码块里。`anchorNode` 可能是文本节点（读 parentElement），
+ *  也可能直接就是 `<pre>` / `<code>` 本身（读它自己）——只认前者会漏掉后者。 */
+export function inCodeBlock(root: HTMLElement): boolean {
+  const s = pvSelection()
+  const n = s ? (s.focusNode ?? s.anchorNode) : null
+  if (!n || !root.contains(n)) return false
+  const el = n.nodeType === Node.TEXT_NODE ? n.parentElement : (n as Element)
+  return !!el && root.contains(el) && !!el.closest('pre')
+}
+
+/** 代码块里按回车 = 软换行，返回是否消费了这次按键（preventDefault 在这里做）。
+ *  不能用 `insertParagraph`，也不能用 `insertText('\n')`：WebKit 对这个 `<pre>` 里的两种写法
+ *  都会把块**断成两个 `<pre>`**，也就是凭空多出一个代码块；`insertLineBreak` 只落换行、块不动。 */
+export function enterInCodeBlock(e: KeyboardEvent, root: HTMLElement): boolean {
+  if (!root.isContentEditable || !inCodeBlock(root)) return false
+  e.preventDefault()
+  // 命令返回 false 说明这个内核没实现它：退回纯文本换行，至少不会把这次回车吞掉
+  if (!runCmd('insertLineBreak')) runCmd('insertText', '\n')
+  return true
+}
+
+/** 代码块里的一处行首位置（DOM 位置）。 */
+type DomPos = { node: Node; offset: number }
+
+/** 代码块里的行首位置，按文档顺序：块首、文本里的 `\n` 之后、`<br>` 之后。
+ *  只认这三种：渲染层把源码里的换行写成文本里的 `\n`，就地编辑敲出来的换行则是 `<br>`。 */
+function codeLineStarts(host: HTMLElement): DomPos[] {
+  const out: DomPos[] = [{ node: host, offset: 0 }]
+  const walk = (el: Node): void => {
+    let i = 0
+    for (const c of Array.from(el.childNodes)) {
+      if (c.nodeType === Node.TEXT_NODE) {
+        const v = c.nodeValue ?? ''
+        for (let k = 0; k < v.length; k++) if (v[k] === '\n') out.push({ node: c, offset: k + 1 })
+      } else if (c.nodeType === Node.ELEMENT_NODE) {
+        if ((c as Element).tagName === 'BR') out.push({ node: el, offset: i + 1 })
+        else walk(c)
+      }
+      i++
+    }
+  }
+  walk(host)
+  return out
+}
+
+/** 行首位置相对某个文档位置的前后：-1 前 / 0 同一处 / 1 后。 */
+function cmpPos(pos: DomPos, node: Node, offset: number): number {
+  const q = document.createRange()
+  q.setStart(node, offset)
+  q.collapse(true)
+  return q.comparePoint(pos.node, pos.offset)
+}
+
+/** 文档顺序上下一个节点（越过父节点往上找，到 `stop` 为止）。 */
+function followingNode(n: Node, stop: Node): Node | null {
+  let cur: Node | null = n
+  while (cur && cur !== stop) {
+    if (cur.nextSibling) return cur.nextSibling
+    cur = cur.parentNode
+  }
+  return null
+}
+
+/** 元素里的第一段文本；先碰到 `<br>` 说明这一行是空的。 */
+function firstText(el: Element): Text | null {
+  for (const c of Array.from(el.childNodes)) {
+    if (c.nodeType === Node.TEXT_NODE) return c as Text
+    if (c.nodeType === Node.ELEMENT_NODE) {
+      if ((c as Element).tagName === 'BR') return null
+      const t = firstText(c as Element)
+      if (t) return t
+    }
+  }
+  return null
+}
+
+/** 某个节点的开头能看到的文本位置；`<br>` 返回 null。 */
+function textAt(n: Node): { node: Text; offset: number } | null {
+  if (n.nodeType === Node.TEXT_NODE) return { node: n as Text, offset: 0 }
+  if (n.nodeType !== Node.ELEMENT_NODE || (n as Element).tagName === 'BR') return null
+  const t = firstText(n as Element)
+  return t ? { node: t, offset: 0 } : null
+}
+
+/** 行首位置往后、本行第一段文本的起点。文本里的 `\n` 之后可能正好停在节点末尾，
+ *  这时要看同行的下一个节点；元素位置（`<code>` 开头、`<br>` 之后）则看下一个子节点。 */
+function lineTextAt(code: HTMLElement, pos: DomPos): { node: Text; offset: number } | null {
+  if (pos.node.nodeType === Node.TEXT_NODE) {
+    const t = pos.node as Text
+    if (pos.offset < (t.nodeValue ?? '').length) return { node: t, offset: pos.offset }
+    const next = followingNode(t, code)
+    return next ? textAt(next) : null
+  }
+  const next = pos.node.childNodes[pos.offset] as Node | undefined
+  return next ? textAt(next) : null
+}
+
+/** 行首最多 `n` 格缩进的范围（前导空格；制表符算一格）。没有缩进返回 null。 */
+function leadingIndent(
+  code: HTMLElement,
+  pos: DomPos,
+  n: number,
+): { node: Text; start: number; end: number } | null {
+  const t = lineTextAt(code, pos)
+  if (!t) return null
+  const v = t.node.nodeValue ?? ''
+  if (v[t.offset] === '\t') return { node: t.node, start: t.offset, end: t.offset + 1 }
+  let k = 0
+  while (k < n && v[t.offset + k] === ' ') k++
+  return k ? { node: t.node, start: t.offset, end: t.offset + k } : null
+}
+
+/** 代码块里按 Tab / Shift+Tab = 缩进 / 退一级，返回是否消费了这次按键（preventDefault 在这里做）。
+ *  浏览器把 Tab 当成焦点切换，正文里又没有制表位可言，所以只在代码块里接管：按设置项
+ *  `codeIndent` 插 2 / 4 个空格（源码里本来就有的制表符仍由 CSS 的 `tab-size` 决定宽度）。
+ *  有选区时按行处理：直接在选区上 `insertText` 会把选中的代码整段替换成空格，
+ *  必须先算出选区碰到的每个行首、逐个插入 / 删除。 */
+export function tabInCodeBlock(e: KeyboardEvent, root: HTMLElement, width: number): boolean {
+  // 带修饰键的 Tab（⌘/Ctrl/Alt+Tab）是系统或应用的快捷键，不能被缩进吃掉
+  if (!root.isContentEditable || e.metaKey || e.ctrlKey || e.altKey || !inCodeBlock(root)) return false
+  const s = pvSelection()
+  if (!s) return false
+  const pre = pvAncestor<HTMLElement>(root, 'pre')
+  const code = (pre?.querySelector('code') as HTMLElement | null) ?? pre
+  if (!code) return false
+  const n = width === 2 ? 2 : 4
+  const spaces = ' '.repeat(n)
+  const r = s.getRangeAt(0)
+  const starts = codeLineStarts(code)
+  // 只有光标：行首位置就是光标所在行的行首
+  if (s.isCollapsed) {
+    e.preventDefault()
+    // Tab：在光标处插空格，插入后光标自然停在缩进之后
+    if (!e.shiftKey) {
+      runCmd('insertText', spaces)
+      return true
+    }
+    // Shift+Tab：删掉这一行行首最多一格缩进，光标跟着活 Range 一起左移
+    let idx = 0
+    for (let i = 0; i < starts.length; i++) if (cmpPos(starts[i], r.startContainer, r.startOffset) <= 0) idx = i
+    const lead = leadingIndent(code, starts[idx], n)
+    if (!lead) return true
+    const keep = r.cloneRange()
+    const q = document.createRange()
+    q.setStart(lead.node, lead.start)
+    q.setEnd(lead.node, lead.end)
+    s.removeAllRanges()
+    s.addRange(q)
+    runCmd('delete')
+    s.removeAllRanges()
+    s.addRange(keep)
+    return true
+  }
+  // 跨出代码块的选区不接：缩进半个文档不是这里该干的事，交回浏览器
+  if (!code.contains(r.startContainer) || !code.contains(r.endContainer)) return false
+  e.preventDefault()
+  // 选区碰到哪几行：起点所在行到终点所在行；终点正好停在下一行行首时，那一行不算被选中
+  let i0 = 0
+  for (let i = 0; i < starts.length; i++) if (cmpPos(starts[i], r.startContainer, r.startOffset) <= 0) i0 = i
+  let i1 = i0
+  for (let i = i0; i < starts.length; i++) if (cmpPos(starts[i], r.endContainer, r.endOffset) <= 0) i1 = i
+  if (i1 > i0 && cmpPos(starts[i1], r.endContainer, r.endOffset) === 0) i1--
+  const keep = r.cloneRange()
+  // 从后往前改：先动的行都在后面，不会让还没处理的行首位置失效
+  for (let i = i1; i >= i0; i--) {
+    const q = document.createRange()
+    if (e.shiftKey) {
+      const lead = leadingIndent(code, starts[i], n)
+      if (!lead) continue
+      q.setStart(lead.node, lead.start)
+      q.setEnd(lead.node, lead.end)
+    } else {
+      q.setStart(starts[i].node, starts[i].offset)
+      q.collapse(true)
+    }
+    s.removeAllRanges()
+    s.addRange(q)
+    if (e.shiftKey) runCmd('delete')
+    else runCmd('insertText', spaces)
+  }
+  // 改完把选区放回原处：keep 是活 Range，前面增删的字符会自动把它推开
+  s.removeAllRanges()
+  s.addRange(keep)
+  return true
+}
+
+/** 点在最后一个块的下方空白处时，把光标落到块后。
+ *  代码块 / 表格 / 分隔线这类块没有「块后」的落笔位置：浏览器会把光标塞进块里
+ *  （代码块直接塞到代码末尾），于是写不出块后的正文。命中时补一个空段落并把光标放进去，
+ *  返回是否接管（调用方据此 preventDefault）。空段落在序列化时被 `blockMd` 丢掉，不进源码。 */
+export function caretBelowLastBlock(root: HTMLElement, clientY: number): boolean {
+  const last = root.lastElementChild as HTMLElement | null
+  if (!last) return false
+  const block = last.classList.contains('mb') ? (last.firstElementChild as HTMLElement | null) : last
+  if (!block || !/^(PRE|TABLE|HR)$/.test(block.tagName)) return false
+  if (clientY <= block.getBoundingClientRect().bottom) return false
+  const p = ensureTrailingParagraph(root)
+  root.focus({ preventScroll: true })
+  const r = document.createRange()
+  r.selectNodeContents(p)
+  r.collapse(true)
+  const s = document.getSelection()
+  if (s) {
+    s.removeAllRanges()
+    s.addRange(r)
+  }
+  return true
+}
+
+/** 末尾的空段落：已经有了就复用（连点空白不该堆出一串 `<p><br></p>`）。 */
+function ensureTrailingParagraph(root: HTMLElement): HTMLElement {
+  const last = root.lastElementChild as HTMLElement | null
+  const tail = last && last.classList.contains('mb') ? (last.firstElementChild as HTMLElement | null) : last
+  if (tail && tail.tagName === 'P' && !(tail.textContent ?? '').trim()) return tail
+  const p = document.createElement('p')
+  p.appendChild(document.createElement('br'))
+  root.appendChild(p)
+  return p
 }

@@ -902,6 +902,10 @@ greet('MarkLock');`
               <div class="info"><div class="t">{{ $t('settings.general.hiddenFiles') }}</div><div class="d">{{ $t('settings.general.hiddenFilesD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.showHiddenFiles }" @click="store.updateSettings({ showHiddenFiles: !store.settings.showHiddenFiles })"></div>
             </div>
+            <div class="row" data-key="recordHistory" data-keywords="打开历史 最近打开 记录 隐私 痕迹 history recent privacy">
+              <div class="info"><div class="t">{{ $t('settings.general.recordHistory') }}</div><div class="d">{{ $t('settings.general.recordHistoryD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.recordHistory }" @click="store.updateSettings({ recordHistory: !store.settings.recordHistory })"></div>
+            </div>
             <div class="row" data-key="convertMdAction" data-keywords="转为加密 mdl 明文 删除 保留 convert encrypt delete keep">
               <div class="info"><div class="t">{{ $t('settings.general.convertMd') }}</div><div class="d">{{ $t('settings.general.convertMdD') }}</div></div>
               <div class="seg">
@@ -1024,10 +1028,10 @@ greet('MarkLock');`
                   <span class="t">{{ $t('settings.appear.favorites') }}</span>
                   <span class="d">{{ $t('settings.appear.favoritesD') }}</span>
                 </label>
-                <label class="row row-check" data-key="showRecent" data-keywords="侧边栏 最近打开 recent">
-                  <input type="checkbox" :checked="store.settings.showRecent" @change="toggleArea('showRecent')" />
+                <label class="row row-check" :class="{ disabled: !store.settings.recordHistory }" data-key="showRecent" data-keywords="侧边栏 最近打开 recent">
+                  <input type="checkbox" :checked="store.settings.showRecent && store.settings.recordHistory" :disabled="!store.settings.recordHistory" @change="toggleArea('showRecent')" />
                   <span class="t">{{ $t('settings.appear.recent') }}</span>
-                  <span class="d">{{ $t('settings.appear.recentD') }}</span>
+                  <span class="d">{{ store.settings.recordHistory ? $t('settings.appear.recentD') : $t('settings.appear.recentOff') }}</span>
                 </label>
                 <label class="row row-check" data-key="showWorkdir" data-keywords="侧边栏 工作目录 文件夹 workdir folder">
                   <input type="checkbox" :checked="store.settings.showWorkdir" @change="toggleArea('showWorkdir')" />
@@ -1048,6 +1052,10 @@ greet('MarkLock');`
             <div class="row" data-key="previewDblClickToggle" data-keywords="双击 预览 分屏 切换 视图 double click preview split toggle">
               <div class="info"><div class="t">{{ $t('settings.appear.dblToggle') }}</div><div class="d">{{ $t('settings.appear.dblToggleD') }}</div></div>
               <div class="switch" :class="{ on: store.settings.previewDblClickToggle }" @click="store.updateSettings({ previewDblClickToggle: !store.settings.previewDblClickToggle })"></div>
+            </div>
+            <div class="row" data-key="chromeAutoFade" data-keywords="工具栏 状态栏 淡出 透明 悬停 沉浸 阅读 自动隐藏 fade dim transparent hover toolbar statusbar">
+              <div class="info"><div class="t">{{ $t('settings.appear.chromeFade') }}</div><div class="d">{{ $t('settings.appear.chromeFadeD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.chromeAutoFade }" @click="store.updateSettings({ chromeAutoFade: !store.settings.chromeAutoFade })"></div>
             </div>
           </div>
           <div class="group">
@@ -1632,6 +1640,9 @@ greet('MarkLock');`
 .area-rows { flex: 1; min-width: 0; padding: 2px 0 4px; }
 .row-check { cursor: pointer; gap: 10px; padding-left: 6px; }
 .row-check:hover { background: var(--hover); }
+/* 「最近打开」依赖「记录打开历史」：后者关闭时置灰，避免出现勾上了却不显示的死开关 */
+.row-check.disabled { cursor: not-allowed; opacity: .55; }
+.row-check.disabled:hover { background: transparent; }
 .row-check input {
   width: 15px; height: 15px; margin: 0; flex: none;
   accent-color: var(--primary); cursor: pointer;

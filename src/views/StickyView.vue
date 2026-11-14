@@ -9,7 +9,7 @@ import type { QuickLaunchItem, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
 import { renderMarkdown, setAssetBaseDir } from '../lib/preview'
-import { domToMarkdown, preserveTrailing, enterInTaskItem } from '../lib/wysiwyg'
+import { domToMarkdown, preserveTrailing, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock } from '../lib/wysiwyg'
 import { lang } from '../locales'
 import { isMac } from '../lib/platform'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
@@ -324,21 +324,36 @@ export default defineComponent({
       document.execCommand('insertText', false, text)
       this.onPreviewEditInput()
     },
-    /** 代码块内 Enter 必须插入裸换行：浏览器在 `<pre>` 里插 `<div>`，`textContent` 会丢掉换行，
-     *  回写后两行代码被并成一行。其余块交给原生 insertParagraph 分段。 */
+    /** 代码块内 Enter 换成软换行（详见 `enterInCodeBlock`）：WebKit 用 insertParagraph
+     *  或 insertText('\n') 都会断出一个新 `<pre>`，等于凭空多一个代码块。其余块交回原生分段。
+     *  Tab / Shift+Tab 同理只在代码块里接管（详见 `tabInCodeBlock`），其余位置留给浏览器切焦点。 */
     onPreviewEditKeydown(e: KeyboardEvent) {
-      if (!this.previewEditable) return
+      if (!this.previewEditable || e.isComposing) return
       // 便签是整篇渲染、没有主编辑器那套 ⌘S 之外的键位冲突：Ctrl/Cmd+S 仍交给窗口级 onKey 落盘
-      if (e.key !== 'Enter' || e.shiftKey || e.isComposing) return
-      const node = window.getSelection()?.anchorNode?.parentElement ?? null
-      if (node?.closest('pre')) {
-        e.preventDefault()
-        document.execCommand('insertText', false, '\n')
+      const root = this.previewMdEl()
+      if (!root) return
+      if (e.key === 'Tab') {
+        if (tabInCodeBlock(e, root, this.store.settings.codeIndent)) this.onPreviewEditInput()
+        return
+      }
+      if (e.key !== 'Enter' || e.shiftKey) return
+      if (enterInCodeBlock(e, root)) {
         this.onPreviewEditInput()
         return
       }
+      if (enterInTaskItem(e, root)) this.onPreviewEditInput()
+    },
+    /** 便签的 `.md` 只包住正文，最后一个块下方的空白落在滚动容器上（组件只管自己的根元素）：
+     *  与主编辑器同一套兜底，点空白处把光标落到块后（见 `caretBelowLastBlock`）。 */
+    onPreviewPaneMousedown(e: MouseEvent) {
+      if (!this.previewEditable || e.button !== 0) return
+      const pane = this.$refs.previewPane as HTMLElement | null
+      if (!pane || e.target !== pane) return
+      // 滚动条上的 mousedown 也落在 pane 上：接管后拖不动滚动条，按坐标排除
+      const box = pane.getBoundingClientRect()
+      if (e.clientX - box.left >= pane.clientWidth || e.clientY - box.top >= pane.clientHeight) return
       const root = this.previewMdEl()
-      if (root && enterInTaskItem(e, root)) this.onPreviewEditInput()
+      if (root && caretBelowLastBlock(root, e.clientY)) e.preventDefault()
     },
     /** 只读 ⇄ 编辑开关（便签自己的会话内状态，不写全局设置项）。 */
     togglePvEdit() {
@@ -417,7 +432,7 @@ export default defineComponent({
       if (this.previewEditable) return
       if (!this.store.settings.previewDblClickToggle) return
       const t = e.target as HTMLElement | null
-      if (t?.closest('.code-copy-btn')) return
+      if (t?.closest('.code-ctl')) return
       if (t?.closest('input.task-cb')) return
       this.mode = this.mode === 'split' ? 'preview' : 'split'
     },
@@ -643,7 +658,7 @@ export default defineComponent({
           <div class="pane pane-editor" :class="{ collapsed: mode === 'preview' }">
             <CodeMirrorEditor ref="editorCm" :model-value="content" :word-wrap="wordWrap" @update:model-value="onInput" :on-save="save" :on-scroll="onEditorScroll" />
           </div>
-          <div ref="previewPane" class="pane pane-preview" :class="{ collapsed: mode === 'edit' }" @dblclick="onPreviewDblClick" @scroll="onPreviewScroll">
+          <div ref="previewPane" class="pane pane-preview" :class="{ collapsed: mode === 'edit' }" @dblclick="onPreviewDblClick" @scroll="onPreviewScroll" @mousedown="onPreviewPaneMousedown">
             <!-- html 绑的是被冻结的 previewHtml（编辑期间不再重设 innerHTML，光标才保得住），
                  source 仍传当前正文，供只读态的任务清单回改按序号定位源码标记 -->
             <MarkdownPreview

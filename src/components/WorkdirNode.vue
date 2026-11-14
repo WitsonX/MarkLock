@@ -153,7 +153,8 @@ export default defineComponent({
 .t-item {
   display: flex; align-items: center; gap: 5px;
   height: 29px; padding-right: 10px;
-  font-size: 13px; color: var(--text-2);
+  /* 侧边栏字号基准（global.css --sb-font-size）：随编辑器字号适度缩放 */
+  font-size: var(--sb-font-size); color: var(--text-2);
   cursor: pointer; -webkit-user-select: none; user-select: none;
   position: relative;
 }
@@ -168,5 +169,5 @@ export default defineComponent({
 .t-item:hover .acts { display: flex; }
 .t-item .acts .icon-btn { width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; color: var(--text-4); border-radius: 4px; }
 .t-item .acts .icon-btn:hover { background: var(--border); color: var(--text); }
-.wdn-empty { height: 24px; display: flex; align-items: center; font-size: 12px; color: var(--text-4); }
+.wdn-empty { height: 24px; display: flex; align-items: center; font-size: calc(var(--sb-font-size) - 1px); color: var(--text-4); }
 </style>
