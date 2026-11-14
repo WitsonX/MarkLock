@@ -110,6 +110,7 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 ### Security & polish
 
 - Idle auto-lock (5 min default), lock on minimize / sleep / screen lock, key material zeroized on lock, clipboard cleared after 60s
+- Files inside a locked vault show as `vault file` in tabs, favorites and recent entries — the real filename never leaks
 - **Record recent files** can be turned off: switching it off immediately clears the recent list and stops recording (not recoverable); vault registrations and favorites are unaffected
 - Skin system: on top of light / dark / follow-system there are six color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox), switchable from the status bar; a skin covers the UI, the source editor, the Markdown preview and exported HTML, and advanced users can build their own (per-token palette plus free-form CSS)
 - English / Chinese UI, adjustable editor font size plus preview font and spacing
