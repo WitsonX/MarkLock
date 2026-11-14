@@ -1,5 +1,3 @@
-<div align="center">
-
 # MarkLock
 
 **Encrypted Markdown viewer & editor** · local-first · zero upload
@@ -9,8 +7,6 @@
 [![Release](https://img.shields.io/github/v/release/WitsonX/MarkLock?label=release)](https://github.com/WitsonX/MarkLock/releases/latest)
 
 [简体中文](README.md) · **English**
-
-</div>
 
 ---
 

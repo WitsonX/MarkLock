@@ -1,5 +1,3 @@
-<div align="center">
-
 # MarkLock
 
 **可加密的 Markdown 查看 / 编辑器** · 本地优先 · 零上传
@@ -9,8 +7,6 @@
 [![Release](https://img.shields.io/github/v/release/WitsonX/MarkLock?label=release)](https://github.com/WitsonX/MarkLock/releases/latest)
 
 **简体中文** · [English](README.en.md)
-
-</div>
 
 ---
 
