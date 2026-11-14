@@ -141,6 +141,10 @@ export default defineComponent({
       // show=鼠标在对应条带上；dim=鼠标在正文内但不在条带上（几乎全透明）；hide=鼠标不在正文内（直接隐藏）
       toolbarChrome: 'hide' as 'show' | 'dim' | 'hide',
       statusChrome: 'hide' as 'show' | 'dim' | 'hide',
+      // 标题栏右侧视图切换组（保存 / 锁定 / 就地编辑 / 编辑-分屏-预览）的三态，用同一份鼠标坐标判定：
+      // dim=指针在窗内但没压到这组（半透明）；show=压在它上面；hide=指针已离开窗口（收起）。
+      // 初值是 dim 而不是 hide：刚启动时还没有 mousemove，要能一眼看到当前模式
+      titleChrome: 'dim' as 'show' | 'dim' | 'hide',
       _chromePt: null as null | { x: number; y: number },
       _chromeRaf: 0,
 
@@ -268,6 +272,8 @@ export default defineComponent({
       _onChromeMove: null as ((e: MouseEvent) => void) | null,
       // 指针出窗监听：mouseout 且 relatedTarget 为 null 时主动收起两条栏
       _onChromeOut: null as ((e: MouseEvent) => void) | null,
+      // 窗口重新聚焦（如 ⌘Tab 回来）时把这组图标放回半透明：那一刻还收不到 mousemove
+      _onWinFocus: null as (() => void) | null,
       _onDocMousedown: null as ((e: MouseEvent) => void) | null,
       // 侧边栏文件/文件夹拖拽：文档级 mousedown 委托（在捕获阶段识别带 data-drag-kind 的行）
       _onFileDragDown: null as ((e: MouseEvent) => void) | null,
@@ -431,6 +437,13 @@ export default defineComponent({
     chromeOverlay(): boolean {
       return this.store.settings.chromeAutoFade && this.currentMode === 'preview'
     },
+    /** 预览浮层模式下要不要给正文留顶部呼吸区（.md 的 padding-top）：
+     *  跟着工具栏的**实际显隐**走。只读预览（preview 且未开就地编辑）整条工具栏是收起的，
+     *  那 56px 纯粹是一块空白，把正文白白推下去；开了就地编辑才需要给浮现的工具栏让位。 */
+    chromeTopPad(): boolean {
+      return !!this.activeFile && this.store.settings.showToolbar
+        && (this.currentMode !== 'preview' || this.previewEditable)
+    },
     /** 侧边栏分组 id（按用户排好的顺序，已过滤隐藏项）。未挂载工作目录时连「工作目录」分组也不显示。 */
     visibleSections() {
       const secs = this.store.visibleSections as string[]
@@ -549,6 +562,17 @@ export default defineComponent({
     activeFileName() {
       // 与页签显示口径一致：所属库锁定/关闭后显示掩码名，标题栏不暴露文件名
       return this.activeFile ? this.fileDisplayName(this.activeFile) : this.$t('editor.noFileOpen')
+    },
+    /** 标题栏文档名后的库名。
+     *  单文件加密（.mdl，vaultId 就是文件自身）不显示：库即文件，两者名字永远一模一样，
+     *  标题栏会变成「x.mdl ● x.mdl」两遍；.mdlb 库内文件才有区分意义，照旧显示。 */
+    titleVaultLabel() {
+      const f = this.activeFile
+      if (!f) return ''
+      if (f.vaultId === f.path || /\.mdl$/i.test(f.path)) return ''
+      // 库锁定后不暴露库名（与文档名的掩码口径一致）
+      if (this.isActiveLocked) return ''
+      return this.vaultName(this.store.activeVaultId || f.vaultId || '')
     },
     /** 当前文件是否因库锁定而不可读（仅库内文件；单文件 .mdl 走页签内密码框，不走这里） */
     isActiveLocked() {
@@ -1223,8 +1247,14 @@ export default defineComponent({
       // 鼠标已不在正文里，两条栏直接收起
       this.toolbarChrome = 'hide'
       this.statusChrome = 'hide'
+      this.titleChrome = 'hide'
     }
     window.addEventListener('blur', this._onWinBlur)
+    this._onWinFocus = () => {
+      // 指针还没动，先回到半透明；压到这组上后由 mousemove 升级成 show
+      if (this.titleChrome === 'hide') this.titleChrome = 'dim'
+    }
+    window.addEventListener('focus', this._onWinFocus)
     // 工具栏 / 状态栏的悬停淡出：按鼠标坐标与正文矩形的几何关系分三态，rAF 合帧避免每次移动都重排
     this._onChromeMove = (e: MouseEvent) => {
       this._chromePt = { x: e.clientX, y: e.clientY }
@@ -1232,6 +1262,7 @@ export default defineComponent({
       this._chromeRaf = requestAnimationFrame(() => {
         this._chromeRaf = 0
         this.applyChromeState()
+        this.applyTitleChrome()
       })
     }
     window.addEventListener('mousemove', this._onChromeMove)
@@ -1242,6 +1273,7 @@ export default defineComponent({
       this._chromePt = null
       this.toolbarChrome = 'hide'
       this.statusChrome = 'hide'
+      this.titleChrome = 'hide'
     }
     document.addEventListener('mouseout', this._onChromeOut)
     // 就地编辑态链接/图片的悬停提示（v-html 内容绑不了 v-tip，走委托气泡）：
@@ -1340,6 +1372,7 @@ export default defineComponent({
     if (this._onKeydown) window.removeEventListener('keydown', this._onKeydown)
     if (this._onKeyup) window.removeEventListener('keyup', this._onKeyup)
     if (this._onWinBlur) window.removeEventListener('blur', this._onWinBlur)
+    if (this._onWinFocus) window.removeEventListener('focus', this._onWinFocus)
     if (this._onChromeMove) window.removeEventListener('mousemove', this._onChromeMove)
     if (this._onChromeOut) document.removeEventListener('mouseout', this._onChromeOut)
     if (this._chromeRaf) cancelAnimationFrame(this._chromeRaf)
@@ -1411,6 +1444,19 @@ export default defineComponent({
       const sb = overStatusbar ? 'show' : inPanes ? 'dim' : 'hide'
       if (tb !== this.toolbarChrome) this.toolbarChrome = tb
       if (sb !== this.statusChrome) this.statusChrome = sb
+    },
+    /** 标题栏右侧视图切换组（保存 / 锁定 / 就地编辑 / 编辑-分屏-预览）的三态。
+     *  几何判定与上面两条栏同源，但不限预览模式——编辑 / 分屏下这组图标同样占视觉重量，一起收才叫整洁。 */
+    applyTitleChrome() {
+      const el = this.$refs.tbModes as HTMLElement | null
+      const pt = this._chromePt
+      if (!el || !pt) return
+      const r = el.getBoundingClientRect()
+      // 外扩 8px：还没压到按钮上就先变实，省得「眼看着点不中一个半透明的按钮」
+      const pad = 8
+      const over = pt.x >= r.left - pad && pt.x <= r.right + pad && pt.y >= r.top - pad && pt.y <= r.bottom + pad
+      const st = over ? 'show' : 'dim'
+      if (st !== this.titleChrome) this.titleChrome = st
     },
     /** 字体族 id → CSS font-family 值（含跨平台回退栈）：委托给共享的 src/lib/fonts.ts，
         未知/历史 id 自动回退到跟随界面。供 .md 内联变量与导出 HTML 共用。 */
@@ -2239,6 +2285,13 @@ export default defineComponent({
         top = cur.top + frac * (next.top - cur.top)
       }
       const maxScroll = pane.scrollHeight - pane.clientHeight
+      // 首块一律回到 0，而不是「块顶对齐视口顶」：.md 顶部有一圈呼吸内边距（预览浮层模式 56px，
+      // 给浮现的工具栏让位），按块顶算出来的 scrollTop 正好等于这段内边距，于是新开 / 切回文件时
+      // 整篇会自己往下滚 56px，标题钻到浮起的工具栏底下——看起来就像“自动滚到下面一点”。
+      if (i === 0) {
+        pane.scrollTop = 0
+        return
+      }
       pane.scrollTop = Math.max(0, Math.min(top, maxScroll))
     },
     toggleSidebar() {
@@ -6932,7 +6985,7 @@ ${bodyHtml}
       <div class="tb-title">
         <span class="doc">{{ activeFileName }}</span>
         <span class="dot" :title="$t('editor.saved')"></span>
-        <span class="vault">{{ vaultName(store.activeVaultId || activeFile?.vaultId || '') }}</span>
+        <span v-if="titleVaultLabel" class="vault">{{ titleVaultLabel }}</span>
         <span v-if="activeFile && activeFile.encrypted" class="tag tag-gold">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
           {{ $t('editor.encrypted') }}
@@ -6947,21 +7000,31 @@ ${bodyHtml}
         </span>
       </div>
       <div class="tb-right" data-tauri-drag-region="false">
-        <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" :title="$t('editor.saveSc')" @click="saveActive">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><path d="M17 21v-8H7v8M7 3v5h8" /></svg>
-        </span>
-        <span v-if="hasLockables" class="icon-btn" :title="$t('editor.lockSc')" style="color: #d48806;" @click="lockAll">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
-        </span>
-        <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，就近摆在视图切换段左侧（便签窗同位置） -->
-        <span v-if="currentMode === 'preview'" class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
-          <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
-          <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
-        </span>
-        <div class="seg">
-          <span :class="{ on: currentMode === 'edit' }" :title="$t('editor.toggleViewSc')" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
-          <span :class="{ on: currentMode === 'split' }" :title="$t('editor.toggleViewSc')" @click="setMode('split')">{{ $t('editor.modeSplit') }}</span>
-          <span :class="{ on: currentMode === 'preview' }" :title="$t('editor.toggleViewSc')" @click="setMode('preview')">{{ $t('editor.modePreview') }}</span>
+        <!-- 保存 / 锁定 / 就地编辑 / 编辑-分屏-预览 归为一组，盛在 .tb-modes 里：
+             指针在窗内时半透明、压上去变实、离开窗口收起（见 applyTitleChrome）。
+             ⋯ 主菜单不在这组里，任何时候都实心常显（它是所有操作的总入口）。 -->
+        <div
+          ref="tbModes"
+          class="tb-modes"
+          data-tauri-drag-region="false"
+          :class="{ 'chrome-show': titleChrome === 'show', 'chrome-dim': titleChrome === 'dim' }"
+        >
+          <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" v-tip="{ text: $t('editor.saveSc'), place: 'bottom' }" @click="saveActive">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><path d="M17 21v-8H7v8M7 3v5h8" /></svg>
+          </span>
+          <span v-if="hasLockables" class="icon-btn" v-tip="{ text: $t('editor.lockSc'), place: 'bottom' }" style="color: #d48806;" @click="lockAll">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
+          </span>
+          <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，就近摆在视图切换段左侧（便签窗同位置） -->
+          <span v-if="currentMode === 'preview'" class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+            <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
+            <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
+          </span>
+          <div class="seg">
+            <span :class="{ on: currentMode === 'edit' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
+            <span :class="{ on: currentMode === 'split' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('split')">{{ $t('editor.modeSplit') }}</span>
+            <span :class="{ on: currentMode === 'preview' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('preview')">{{ $t('editor.modePreview') }}</span>
+          </div>
         </div>
         <span class="menu-wrap">
           <span class="icon-btn" @click="moreOpen = !moreOpen">
@@ -7369,7 +7432,7 @@ ${bodyHtml}
         </div>
 
         <!-- 编辑 / 预览 双栏（mode-* 类驱动切换滑移动画；拖拽时分屏比例即时跟手，禁用过渡） -->
-        <div ref="panesWrap" class="panes" :class="[`mode-${currentMode}`, { 'no-anim': _splitDragging, 'chrome-overlay': chromeOverlay }]">
+        <div ref="panesWrap" class="panes" :class="[`mode-${currentMode}`, { 'no-anim': _splitDragging, 'chrome-overlay': chromeOverlay, 'chrome-top': chromeTopPad }]">
           <!-- 未打开文件时的空态引导 -->
           <div v-if="!activeFile" class="pane-locked">
             <div class="locked-inner">
@@ -8173,6 +8236,12 @@ ${bodyHtml}
 .tb-title .doc { font-size: 13.5px; font-weight: 600; }
 .tb-title .vault { font-size: 12px; color: var(--text-3); }
 .tb-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+/* 标题栏右侧的视图切换组：默认不跟正文抢注意力。
+   指针在窗内但没压到它时半透明（0.7，保住“当前是哪个模式”的可读性），压上去变实可点，指针离开窗口则完全收起（连点击一起关掉，
+   免得窗口在后台时点一下就误触到看不见的模式按钮）。gap 与原 .tb-right 一致，包裹后间距不变。 */
+.tb-modes { display: flex; align-items: center; gap: 6px; opacity: 0; pointer-events: none; transition: opacity 0.18s ease; }
+.tb-modes.chrome-dim { opacity: 0.7; pointer-events: auto; }
+.tb-modes.chrome-show { opacity: 1; pointer-events: auto; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; }
 
 /* 下拉菜单 */
@@ -8751,10 +8820,14 @@ label.radio input[type="radio"] { margin: 0; }
 
 .pane-preview { background: var(--panel); }
 /* 预览 + 浮层淡出：正文上下留出两条栏的高度余量（顶 40+16 / 底 28+36），
-   工具栏 / 状态栏浮现时不会压住首尾行；滚动条仍贯穿全高 */
+   工具栏 / 状态栏浮现时不会压住首尾行；滚动条仍贯穿全高。
+   顶部留白只在工具栏真会浮上来时才加（.chrome-top）：只读预览整条工具栏是收起的，
+   那 56px 就成了一块空白，正文反而被白白推下去。 */
 .panes.chrome-overlay.mode-preview .pane-preview :deep(.md) {
-  padding-top: 56px;
   padding-bottom: 64px;
+}
+.panes.chrome-overlay.mode-preview.chrome-top .pane-preview :deep(.md) {
+  padding-top: 56px;
 }
 /* 全局搜索命中在预览区的临时高亮（由 _markPreviewHit 注入）：用琥珀色底而非浏览器默认的
    黄底黑字，保证亮/暗主题下都不抢正文颜色；首次出现闪一下以便定位后一眼看到 */
