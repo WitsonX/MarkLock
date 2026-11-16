@@ -1279,6 +1279,10 @@ greet('MarkLock');`
               <div class="info"><div class="t">{{ $t('settings.keys.toggleView') }}</div><div class="d">{{ modKey }} + E</div></div>
               <span><span class="kbd">{{ modKey }}</span> <span class="kbd">E</span></span>
             </div>
+            <div class="row" data-key="kb-pvedit" data-keywords="预览 就地编辑 只读 查看 强制 preview inline edit">
+              <div class="info"><div class="t">{{ $t('settings.keys.pvEditToggle') }}</div><div class="d">{{ modKey }} + ⇧ + E，{{ $t('settings.keys.pvEditToggleD') }}</div></div>
+              <span><span class="kbd">{{ modKey }}</span> <span class="kbd">⇧</span> <span class="kbd">E</span></span>
+            </div>
             <div class="row" data-key="kb-sidebar" data-keywords="侧边栏 显示 隐藏 栏">
               <div class="info"><div class="t">{{ $t('settings.keys.toggleSidebar') }}</div><div class="d">{{ modKey }} + J</div></div>
               <span><span class="kbd">{{ modKey }}</span> <span class="kbd">J</span></span>

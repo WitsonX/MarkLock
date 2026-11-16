@@ -109,8 +109,9 @@ Grab an installer from the [Latest Release](https://github.com/WitsonX/MarkLock/
 - Files inside a locked vault show as `vault file` in tabs, favorites and recent entries — the real filename never leaks
 - **Record recent files** can be turned off: switching it off immediately clears the recent list and stops recording (not recoverable); vault registrations and favorites are unaffected
 - Skin system: on top of light / dark / follow-system there are six color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox), switchable from the status bar; a skin covers the UI, the source editor, the Markdown preview and exported HTML, and advanced users can build their own (per-token palette plus free-form CSS)
+- On Windows the system title bar is gone and merges into the app toolbar; minimize / maximize / close sit flush against the window's top-right corner (the screen corner once maximized), while Linux keeps its native title bar
 - English / Chinese UI, adjustable editor font size plus preview font and spacing
-- Full keyboard shortcut set: save, tab navigation (`⌘1…8` jumps to the Nth tab), find & replace (in Preview mode find runs on the rendered page instead of switching back to the editor), global search, view-mode switching, formatting, lock-everything
+- Full keyboard shortcut set: save, tab navigation (`⌘1…8` jumps to the Nth tab), find & replace (in Preview mode find runs on the rendered page instead of switching back to the editor), global search, view-mode switching, `⌘⇧E` straight into the editable preview, formatting, lock-everything; on Windows / Linux every ⌘ in the hints renders as Ctrl
 - **Show / hide the main window** can be bound to a system-wide hotkey (Settings → Shortcuts → Global), so you can call it back even when it is hidden in the tray or fully covered by another app. Nothing is claimed by default — you record the combination yourself, and rebinding immediately releases the old one
 - One click to make MarkLock the default handler for `.md` / `.mdl` / `.mdlb`
 - Optional launch-at-login (can start silently in the background), close-to-tray

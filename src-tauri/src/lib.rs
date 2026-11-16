@@ -3347,6 +3347,15 @@ pub fn run() {
                     .traffic_light_position(tauri::LogicalPosition::new(14.0, 20.0));
             }
 
+            // Windows：与 macOS 同思路去掉原生标题栏，系统标题条与自绘工具条整合为一条；
+            // 最小化 / 最大化 / 关闭由前端 WindowControls 绘在工具条右端（win.close() 仍走
+            // CloseRequested 的托盘 / 未保存确认语义）。无边框窗的边缘拖拽缩放由 tao 的
+            // WM_NCHITTEST 命中测试接管，双击标题栏最大化由 Tauri drag region 内置处理。
+            #[cfg(target_os = "windows")]
+            {
+                builder = builder.decorations(false);
+            }
+
             builder.build()?;
 
             // macOS：安装自定义菜单接管 ⌘Q——避免系统默认 terminate 直接退出，

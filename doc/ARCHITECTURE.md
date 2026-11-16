@@ -114,7 +114,8 @@ src/
 ├── styles/global.css        # 全局样式（CSS 变量，含深色主题变量与预览/编辑器派生 token）
 ├── styles/skins.css         # 内置配色皮肤（蓝灰 Nord / 夜蓝 Nocturne / 卡布奇诺 Catppuccin / 纸色 Sepia / 日光 Solarized / 暖棕 Gruvbox，每套各含亮暗两版）
 ├── components/
-│   ├── TitleBar.vue         # 标题栏（macOS 红绿灯叠加 + 标题）
+│   ├── TitleBar.vue         # 标题栏（macOS 红绿灯叠加 + 标题；Windows 右端挂 WindowControls）
+│   ├── WindowControls.vue   # Windows 无边框窗的最小化 / 最大化 / 关闭三键
 │   ├── VaultTreeNode.vue    # 库树递归节点（文件夹展开/折叠 + 悬停新建/重命名/删除）
 │   ├── WorkdirNode.vue      # 工作目录树递归节点
 │   ├── CodeMirrorEditor.vue # CodeMirror 6 编辑器封装（markdown 语言 + 语法高亮）
@@ -135,6 +136,7 @@ src/
 │   ├── locales/             # 中英文语言包 + 语言切换
 │   ├── sticky.ts            # 便签窗判定 + 按文件类型读写便签正文
 │   ├── launchArgs.ts        # 快速启动项「启动参数」原始串的引号感知拆分
+│   ├── shortcut.ts          # 快捷键文案按平台改写（mac 记法 ⌘⇧⌥⌃ → Ctrl+Shift+Alt+）
 │   ├── splash.ts            # 启动屏淡出控制
 │   └── update.ts            # 轻量检查更新（GitHub/Gitee 双源 + 频率门控）
 └── views/
@@ -255,12 +257,13 @@ src/
 
 ## 六、关键机制
 
-### 6.1 窗口与标题栏（macOS）
+### 6.1 窗口与标题栏（macOS / Windows）
 
 - `TitleBarStyle::Overlay` + `hidden_title(true)` + `traffic_light_position(14.0, 20.0)`：原生红绿灯叠加到应用自绘工具条左上角，去掉系统标题栏。
 - 拖拽：titlebar 加 `data-tauri-drag-region="deep"`；按钮区 `="false"` 禁止拖拽。
 - 关闭：`CloseRequested` → `lock_all_vaults` + `app_handle().exit(0)`（点红叉整个程序退出）。
-- 跨平台：macOS 专属代码包在 `#[cfg(target_os="macos")]`，前端用 `navigator.userAgent` 检测平台（写 `data-platform`）。
+- **Windows 同样去掉原生标题栏**：`#[cfg(target_os = "windows")]` 下 `decorations(false)`，最小化 / 最大化 / 关闭由 `components/WindowControls.vue` 绘在自绘标题栏右端（主界面挂在 `.tb-right` 末尾，设置 / 解锁 / 弹窗页由 `TitleBar.vue` 挂载），`minimize` / `toggleMaximize` / `close` 三条 ACL 加在 `capabilities/default.json`；`close()` 仍落到 `CloseRequested` 的「关闭到托盘 / 未保存确认」语义，最大化态用 `onResized` + `isMaximized()` 实时换图标。`.tb-right` 与 `.win-controls` 都 `align-self: stretch` 撑满标题栏高度，最大化时屏幕右上角直接落在关闭键上；边缘拖拽缩放与双击标题栏最大化由 tao 的 `WM_NCHITTEST` 与 drag region 分别接管。
+- 跨平台：macOS 专属代码包在 `#[cfg(target_os="macos")]`，前端用 `navigator.userAgent` 检测平台，`data-platform` 取 `macos` / `windows` / `other` 三值（Windows 据此渲染自绘三键，Linux 保留原生标题栏）。
 
 ### 6.2 拖放（两类，需区分）
 
@@ -512,6 +515,8 @@ src/
 - **侧栏字号是跟编辑器字号推的、并封了顶**：`--sb-font-size` 取 `clamp(12.5px, 0.82 × 编辑器字号, 15px)`，字号调到 28px 时侧栏也停在 15px。
 - **大纲折叠态按文件路径存**：重命名或另存后折叠状态丢失（新建草稿路径唯一，暂不受影响）。
 - **导出三路的代码块版式没有真机复验**：`pre` 的内边距挪到 `.code-body`、导出时还要剔除 `.code-ctl`，HTML / 单文件 / PDF 三种产物都要看一眼。
+- **Windows 无边框窗只做了静态核对**：`decorations(false)` 分支、三键与 ACL 只能在本机 mac 上过编译；Windows 侧仍需真机确认边缘拖拽缩放、双击最大化、Snap Layouts（悬停最大化键不会出系统的吸附预览）与高 DPI 下三键的像素对齐。
+- **快捷键文案的改写是逐字符替换**：`scLabel` 只换 `⌘⇧⌥⌃` 四个记号，词典里写成「⌘+ / ⌘-」的串会变成「Ctrl++ / Ctrl+-」；新文案要按 `'⌘⇧T'` 这种纯快捷键串来写，混进说明文字才会读着别扭。
 
 ---
 
@@ -539,6 +544,8 @@ Rust 侧 `cargo test --lib`，覆盖：
 > 视图切换的滚动对位与就地编辑的链接交互也只能真机验：前者依赖真实的宽度过渡与 CodeMirror 的 measure 时序，后者依赖 webview 的原生选区行为。手工至少覆盖四条——① 预览滚到文档中段再切分屏，正文不得整体上跳，源码面板要落在用户刚读的那一句附近，切回预览同样不跳；② macOS 在预览里连续打字半分钟，正文应停在原位、不随每次回写往上跑；③ 就地编辑里普通点击只落光标、⌘ / Ctrl+点击才打开，`#` 锚点两种点击都只做页内滚动；④ 按住修饰键时下划线与「点击打开链接」气泡出现，松手回到「按住 ⌘ 点击打开链接」，中途 ⌘Tab 切出再回来提示态不得卡住（靠 `blur` 兜底）。
 
 > 代码块的就地编辑与阅读态淡出同样只能真机验：前者依赖 WebKit 在 `<pre>` 里的选区与 execCommand 行为，后者依赖真实的鼠标坐标。手工至少覆盖五条——① 点语言标签换一个新语言，高亮跟着换、光标仍停在原处，保存后再打开围栏信息正确；② 代码块里 Tab / Shift+Tab 对单行与多行选区都只动行首，按住 ⌘/Ctrl 的 Tab 不被接管；③ 代码块里回车只落一个换行、不新增第二个代码块，块级插入（表格 / 分隔线 / 新代码块）在块内无效果；④ 代码块是末块时点它下方空白能继续写字，粘贴图片落在粘贴处而不是编辑器光标；⑤ 预览态把鼠标从正文移到窗口外，两栏依次由半透明收起，移回正文再淡出，移到顶部 / 底部显形。
+
+> Windows 无边框窗与前端的快捷键文案只能真机验：`cargo build` 在 mac 上根本编译不到 `#[cfg(target_os="windows")]` 分支，`scLabel` 也只按 UA 分流。手工至少覆盖四条——① 三键各自生效，点关闭走的是托盘 / 未保存确认而不是直接退出；② 拖四边 / 四角都能缩放，双击标题栏最大化，最大化后右上角直接是关闭键；③ Windows 上提示与右键菜单显示 `Ctrl+…`、mac 仍是 `⌘`；④ `⌘` / `Ctrl`+`⇧`+`E` 在编辑 / 分屏 / 预览与便签四种状态下都落到预期模式。
 
 ---
 

@@ -9,3 +9,6 @@ export const isMac = ua.includes('mac os') || (navigator.platform || '').toLower
 
 /** 是否运行在 Linux（WebKitGTK 的 UA 含 "Linux"；本产品只出 mac/Win/Linux 三端，与 isMac 互斥即可） */
 export const isLinux = ua.includes('linux') || (navigator.platform || '').toLowerCase().includes('linux')
+
+/** 是否运行在 Windows（WebView2 的 UA 含 "Windows"；无边框窗自绘最小化/最大化/关闭，见 WindowControls） */
+export const isWindows = ua.includes('windows')

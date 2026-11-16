@@ -20,6 +20,12 @@ export default {
       all: 'All Files',
     },
   },
+  win: {
+    minimize: 'Minimize',
+    maximize: 'Maximize',
+    restore: 'Restore',
+    close: 'Close',
+  },
   sticky: {
     title: 'Sticky Note',
     notSet: 'No sticky note file set',
@@ -110,8 +116,8 @@ export default {
     wrapOff: 'Turn off auto word wrap',
     wrapOn: 'Turn on auto word wrap',
     // Preview inline edit: the read-only ⇄ edit toolbar switch and the link/image dialog
-    pvEditTip: 'Read-only. Click to edit the text right in the preview',
-    pvReadTip: 'Editable. Click to switch back to read-only preview',
+    pvEditTip: 'Read-only. Click to edit the text right in the preview ⌘⇧E',
+    pvReadTip: 'Editable. Click to switch back to read-only preview ⌘⇧E',
     // Hover hint for links in inline-edit mode: plain click only places the caret, modifier-click opens ({mod} is ⌘/Ctrl per platform)
     pvLinkTip: 'Hold {mod} and click to open the link',
     pvLinkOpenTip: 'Click to open the link',
@@ -725,6 +731,8 @@ export default {
       find: 'Find / replace (in-preview find in Preview mode)', globalSearch: 'Global search (vaults + working dirs)',
       gView: 'View',
       toggleView: 'Toggle Edit / Split / Preview', toggleSidebar: 'Show / hide sidebar',
+      pvEditToggle: 'Preview inline editing / read-only',
+      pvEditToggleD: 'from Edit or Split it switches to Preview and turns editing on',
       fontSizeKeys: 'Zoom in / out / reset font size',
       fontSizeKeysD: '{mod} + = zoom in, {mod} + − zoom out (2px steps), {mod} + 0 reset; editor and preview stay in sync',
       gFormat: 'Editor formatting',

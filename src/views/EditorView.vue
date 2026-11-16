@@ -8,7 +8,7 @@ import type { OpenFile, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import type { FsNode } from '../lib/tauri'
 import { externalChanges, workdirChanges } from '../lib/filewatch'
-import { isMac, isLinux } from '../lib/platform'
+import { isMac, isLinux, isWindows } from '../lib/platform'
 import { t as translate, lang } from '../locales'
 import { resolveFontStack } from '../lib/fonts'
 import { cssVar, BUILTIN_SKINS } from '../lib/skins'
@@ -17,6 +17,7 @@ import VaultTreeNode from '../components/VaultTreeNode.vue'
 import WorkdirNode from '../components/WorkdirNode.vue'
 import EncIcon from '../components/EncIcon.vue'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
+import WindowControls from '../components/WindowControls.vue'
 import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
@@ -24,6 +25,7 @@ import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, e
 import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
 import { bindHoverTip } from '../lib/tooltip'
 import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
+import { scLabel } from '../lib/shortcut'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
 // 已抽到 src/lib/preview.ts，主编辑器与便携便签共用；本文件仅保留逐块渲染的滚动同步逻辑。
@@ -97,12 +99,14 @@ const menuIcon = (name: keyof typeof MENU_ICONS) =>
 
 export default defineComponent({
   name: 'EditorView',
-  components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, EncIcon },
+  components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, EncIcon, WindowControls },
   data() {
     return {
       currentMode: 'split' as 'edit' | 'split' | 'preview',
       // 主菜单模板里经 v-html 注入的小图标 svg（映射表见 MENU_ICONS）
       menuIcon,
+      // 快捷键文案按平台改写：词典/菜单里写的是 mac 记法（⌘），Windows 没有 Cmd 键，渲染前转成 Ctrl+…
+      sc: scLabel,
       moreOpen: false,
       // 自绘右键上下文菜单（标题栏/状态栏/页签栏/页签项/侧边栏共用）；title 仅部分菜单用（如状态栏字号/自动锁定）
       // subLeft：含子菜单的项是否把子菜单翻到左侧展开（右侧宽度不够时，见 showCtxMenu）
@@ -396,6 +400,10 @@ export default defineComponent({
     }
   },
   computed: {
+    // Windows 无边框窗才渲染窗口三键（macOS 红绿灯 / Linux 原生标题栏，见 WindowControls）
+    isWindows(): boolean {
+      return isWindows
+    },
     store() {
       return useVaultStore()
     },
@@ -1207,6 +1215,22 @@ export default defineComponent({
         e.preventDefault()
         const cycle: Record<string, 'edit' | 'split' | 'preview'> = { edit: 'split', split: 'preview', preview: 'edit' }
         this.setMode(cycle[this.currentMode] || 'split')
+      }
+      // Cmd+Shift+E：进入/切换「可编辑预览」。预览里就是翻开关（只读 ⇄ 就地编辑）；
+      // 编辑 / 分屏下先强行切到预览，再把开关置为开——而不是盲目取反：
+      // 原本就地编辑开着时取反会直接变成只读，与「去预览里改字」的意图相反。
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 'e' || e.key === 'E')) {
+        if (this.currentMode === 'preview') {
+          // 预览里：锁定 / 无明文时开关无意义，不响应也不吞键
+          if (this.pvCanEdit) {
+            e.preventDefault()
+            this.togglePvEdit()
+          }
+        } else if (this.activeFile) {
+          e.preventDefault()
+          if (this.store.settings.previewInlineEdit === false) this.store.updateSettings({ previewInlineEdit: true })
+          this.setMode('preview')
+        }
       }
       // Cmd+L：全部锁定
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'l' || e.key === 'L')) {
@@ -7009,21 +7033,21 @@ ${bodyHtml}
           data-tauri-drag-region="false"
           :class="{ 'chrome-show': titleChrome === 'show', 'chrome-dim': titleChrome === 'dim' }"
         >
-          <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" v-tip="{ text: $t('editor.saveSc'), place: 'bottom' }" @click="saveActive">
+          <span v-if="activeFile?.dirty || currentMode !== 'preview'" class="icon-btn" v-tip="{ text: sc($t('editor.saveSc')), place: 'bottom' }" @click="saveActive">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" /><path d="M17 21v-8H7v8M7 3v5h8" /></svg>
           </span>
-          <span v-if="hasLockables" class="icon-btn" v-tip="{ text: $t('editor.lockSc'), place: 'bottom' }" style="color: #d48806;" @click="lockAll">
+          <span v-if="hasLockables" class="icon-btn" v-tip="{ text: sc($t('editor.lockSc')), place: 'bottom' }" style="color: #d48806;" @click="lockAll">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>
           </span>
           <!-- 只读 ⇄ 编辑：与设置页「预览可就地编辑」是同一个开关，就近摆在视图切换段左侧（便签窗同位置） -->
-          <span v-if="currentMode === 'preview'" class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+          <span v-if="currentMode === 'preview'" class="icon-btn pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: sc(previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip')), place: 'bottom' }" @click="togglePvEdit">
             <svg v-if="previewEditable" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
             <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
           </span>
           <div class="seg">
-            <span :class="{ on: currentMode === 'edit' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
-            <span :class="{ on: currentMode === 'split' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('split')">{{ $t('editor.modeSplit') }}</span>
-            <span :class="{ on: currentMode === 'preview' }" v-tip="{ text: $t('editor.toggleViewSc'), place: 'bottom' }" @click="setMode('preview')">{{ $t('editor.modePreview') }}</span>
+            <span :class="{ on: currentMode === 'edit' }" v-tip="{ text: sc($t('editor.toggleViewSc')), place: 'bottom' }" @click="setMode('edit')">{{ $t('editor.modeEdit') }}</span>
+            <span :class="{ on: currentMode === 'split' }" v-tip="{ text: sc($t('editor.toggleViewSc')), place: 'bottom' }" @click="setMode('split')">{{ $t('editor.modeSplit') }}</span>
+            <span :class="{ on: currentMode === 'preview' }" v-tip="{ text: sc($t('editor.toggleViewSc')), place: 'bottom' }" @click="setMode('preview')">{{ $t('editor.modePreview') }}</span>
           </div>
         </div>
         <span class="menu-wrap">
@@ -7032,14 +7056,14 @@ ${bodyHtml}
           </span>
           <div class="menu" :class="{ open: moreOpen }">
             <div class="m-cap">{{ $t('menu.capNew') }}</div>
-            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="m-icn" v-html="menuIcon('file')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.newFile') }}</span><span class="kbd-hint">⌘N</span></div>
+            <div class="m-item" @click="openNewDraft(); moreOpen = false"><span class="m-icn" v-html="menuIcon('file')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.newFile') }}</span><span class="kbd-hint">{{ sc('⌘N') }}</span></div>
             <div class="m-item" @click="openCreateVault(); moreOpen = false"><span class="m-icn" v-html="menuIcon('lock')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.newEncVault') }}</span></div>
             <div class="m-item" v-if="activeFile && !isActiveInVault" @click="openCopyToVault(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.copyToVault') }}</span></div>
             <div class="m-sep"></div>
             <div class="m-cap">{{ $t('menu.capOpen') }}</div>
-            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="m-icn" v-html="menuIcon('folderOpen')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">⌘O</span></div>
+            <div class="m-item" @click="openFileAction(); moreOpen = false"><span class="m-icn" v-html="menuIcon('folderOpen')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.openFile') }}</span><span class="kbd-hint">{{ sc('⌘O') }}</span></div>
             <div class="m-item" @click="chooseWorkdir(); moreOpen = false"><span class="ck"></span><span class="m-label">{{ $t('menu.openWorkdirDots') }}</span></div>
-            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="m-icn" v-html="menuIcon('undo')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">⌘⇧T</span></div>
+            <div class="m-item" :class="{ disabled: !store.recentlyClosed.length }" @click="store.recentlyClosed.length && (reopenLastClosed(), moreOpen = false)"><span class="m-icn" v-html="menuIcon('undo')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.undoClose') }}</span><span class="kbd-hint">{{ sc('⌘⇧T') }}</span></div>
             <div class="m-sep"></div>
             <div class="m-item has-sub">
               <span class="ck"></span>{{ $t('menu.importExport') }}<span class="sub-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6" /></svg></span>
@@ -7060,7 +7084,7 @@ ${bodyHtml}
             <div class="m-item has-sub">
               <span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span>{{ $t('menu.viewSidebar') }}<span class="sub-arrow"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6" /></svg></span>
               <div class="sub-menu">
-                <div class="m-item" @click="store.updateSettings({ showSidebar: !store.settings.showSidebar })"><span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span><span class="m-label">{{ $t('menu.showSidebar') }}</span><span class="kbd-hint">⌘J</span></div>
+                <div class="m-item" @click="store.updateSettings({ showSidebar: !store.settings.showSidebar })"><span class="ck">{{ store.settings.showSidebar ? '✓' : '' }}</span><span class="m-label">{{ $t('menu.showSidebar') }}</span><span class="kbd-hint">{{ sc('⌘J') }}</span></div>
                 <div class="m-sep"></div>
                 <div class="m-item" @click="store.updateSettings({ showOpenFiles: !store.settings.showOpenFiles })"><span class="ck">{{ store.settings.showOpenFiles ? '✓' : '' }}</span>{{ $t('sidebar.openFiles') }}</div>
                 <div class="m-item" @click="store.updateSettings({ showUnlockedVaults: !store.settings.showUnlockedVaults })"><span class="ck">{{ store.settings.showUnlockedVaults ? '✓' : '' }}</span>{{ $t('sidebar.vaults') }}</div>
@@ -7082,6 +7106,8 @@ ${bodyHtml}
             <div class="m-item" @click="handleAppClose(); moreOpen = false"><span class="m-icn" v-html="menuIcon('power')"></span><span class="ck"></span><span class="m-label">{{ $t('menu.quit') }}</span></div>
           </div>
         </span>
+        <!-- Windows：原生标题栏已去掉，窗口三键整合进工具条右端（.tb-right 的 auto margin 负责靠右） -->
+        <WindowControls v-if="isWindows" />
       </div>
     </div>
 
@@ -7410,8 +7436,8 @@ ${bodyHtml}
           <span class="icon-btn" v-tip="{ text: $t('editor.h2'), place: 'bottom' }" @click="fmtHeading(2)"><b style="font-size:13px;">H2</b></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.h3'), place: 'bottom' }" @click="fmtHeading(3)"><b style="font-size:13px;">H3</b></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" v-tip="{ text: $t('editor.boldSc'), place: 'bottom' }" @click="fmtWrap('**', '**', $t('editor.fmtBold'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 4h6a3.5 3.5 0 0 1 0 7H7zM7 11h7a3.5 3.5 0 0 1 0 7H7z" /></svg></span>
-          <span class="icon-btn" v-tip="{ text: $t('editor.italicSc'), place: 'bottom' }" @click="fmtWrap('*', '*', $t('editor.fmtItalic'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 4h-9M14 20H5M15 4L9 20" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: sc($t('editor.boldSc')), place: 'bottom' }" @click="fmtWrap('**', '**', $t('editor.fmtBold'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M7 4h6a3.5 3.5 0 0 1 0 7H7zM7 11h7a3.5 3.5 0 0 1 0 7H7z" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: sc($t('editor.italicSc')), place: 'bottom' }" @click="fmtWrap('*', '*', $t('editor.fmtItalic'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 4h-9M14 20H5M15 4L9 20" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.strike'), place: 'bottom' }" @click="fmtWrap('~~', '~~', $t('editor.fmtStrike'))"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /><path d="M17.3 7.5C16.9 5.6 14.8 4 12 4c-3 0-5 1.6-5 3.5 0 .5.1 1 .4 1.5M6.7 16.5C7.1 18.4 9.2 20 12 20c3 0 5-1.6 5-3.5 0-.5-.1-1-.4-1.5" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.inlineCode'), place: 'bottom' }" @click="fmtWrap('`', '`', 'code')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6l-6 6 6 6M16 6l6 6-6 6" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.codeBlock'), place: 'bottom' }" @click="fmtCodeBlock"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M10 9.5 7.5 12l2.5 2.5M14 9.5l2.5 2.5-2.5 2.5" /></svg></span>
@@ -7421,7 +7447,7 @@ ${bodyHtml}
           <span class="icon-btn" v-tip="{ text: $t('editor.tasklist'), place: 'bottom' }" @click="fmtPrefix('- [ ] ')"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="7" height="7" rx="1.5" /><path d="M13.5 7.5h7M13.5 16.5h7M5 15.5l1.8 1.8 3.2-3.6" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.table'), place: 'bottom' }" @click="fmtTable"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 11h18M10 11v8" /></svg></span>
           <span class="tb-sep"></span>
-          <span class="icon-btn" v-tip="{ text: $t('editor.linkSc'), place: 'bottom' }" @click="fmtLink(false)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg></span>
+          <span class="icon-btn" v-tip="{ text: sc($t('editor.linkSc')), place: 'bottom' }" @click="fmtLink(false)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.image'), place: 'bottom' }" @click="fmtLink(true)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 16l-5-5-9 9" /></svg></span>
           <span class="icon-btn" v-tip="{ text: $t('editor.hr'), place: 'bottom' }" @click="fmtHr"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 12h16" /></svg></span>
           <!-- 换行开关只在源码可写的编辑 / 分屏有落点；跟着它一起隐掉分隔线，避免预览态尾部多出一根竖线 -->
@@ -7582,7 +7608,7 @@ ${bodyHtml}
         <span v-if="activeFile && activeFile.encrypted" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#d48806" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></svg>{{ $t('editor.encrypted') }}</span>
         <span v-else-if="activeFile" class="st"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8a919e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" /><path d="M14 3v6h6" /></svg>{{ $t('editor.plaintext') }}</span>
         <span class="st st-menu" :title="$t('skin.statusTip')" @click="openSkinMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 0 18c1.1 0 2-.9 2-2 0-.5-.2-1-.5-1.3-.3-.4-.5-.8-.5-1.2 0-1 .9-2 2-2h1.5A4.5 4.5 0 0 0 21 10c0-3.9-4-7-9-7z" /><circle cx="7.6" cy="11.2" r="1.1" fill="currentColor" stroke="none" /><circle cx="10.2" cy="7.6" r="1.1" fill="currentColor" stroke="none" /><circle cx="14.6" cy="7.6" r="1.1" fill="currentColor" stroke="none" /></svg>{{ skinLabel }}</span>
-        <span class="st st-menu" :title="$t('editor.fontSizeStatus', { size: store.settings.editorFontSize })" @click="openFontSizeMenu($event)"><svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor"><path d="M448 234.688v640H362.688v-640h-256V149.312H704v85.376H448zM789.312 576v298.688H704V576H576V490.688h341.312V576h-128z" /></svg>{{ store.settings.editorFontSize }} px</span>
+        <span class="st st-menu" :title="sc($t('editor.fontSizeStatus', { size: store.settings.editorFontSize }))" @click="openFontSizeMenu($event)"><svg width="12" height="12" viewBox="0 0 1024 1024" fill="currentColor"><path d="M448 234.688v640H362.688v-640h-256V149.312H704v85.376H448zM789.312 576v298.688H704V576H576V490.688h341.312V576h-128z" /></svg>{{ store.settings.editorFontSize }} px</span>
         <span class="st st-menu" :title="$t('editor.autoLockClick')" @click="openAutoLockMenu($event)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>{{ $t('editor.autoLock') }} {{ autoLockLabel }}</span>
         <span class="st">{{ unlockedCount }} {{ $t('editor.vaultWord') }}</span>
       </div>
@@ -8187,12 +8213,12 @@ ${bodyHtml}
           <div class="sub-menu">
             <template v-for="(s, j) in it.items" :key="j">
               <div v-if="s.kind === 'sep'" class="m-sep"></div>
-              <div v-else class="m-item" :class="{ disabled: s.disabled }" @click="runCtxItem(s)"><span class="ck"></span><span class="m-label">{{ s.label }}</span><span v-if="s.sc" class="kbd-hint">{{ s.sc }}</span></div>
+              <div v-else class="m-item" :class="{ disabled: s.disabled }" @click="runCtxItem(s)"><span class="ck"></span><span class="m-label">{{ s.label }}</span><span v-if="s.sc" class="kbd-hint">{{ sc(s.sc) }}</span></div>
             </template>
           </div>
         </div>
         <div v-else class="m-item" :class="{ disabled: it.disabled }" @click="runCtxItem(it)">
-          <span v-if="it.icon" class="m-icn" v-html="it.icon"></span><span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ it.sc }}</span>
+          <span v-if="it.icon" class="m-icn" v-html="it.icon"></span><span class="ck">{{ it.checked ? '✓' : '' }}</span><span class="m-label">{{ it.label }}<span v-if="it.hint" class="m-sub">{{ it.hint }}</span></span><span v-if="it.sc" class="kbd-hint">{{ sc(it.sc) }}</span>
         </div>
       </template>
     </div>
@@ -8235,7 +8261,9 @@ ${bodyHtml}
 .tb-title { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: default; -webkit-user-select: none; user-select: none; }
 .tb-title .doc { font-size: 13.5px; font-weight: 600; }
 .tb-title .vault { font-size: 12px; color: var(--text-3); }
-.tb-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+/* align-self: stretch 让本组撑满标题栏全高：WindowControls 三键随之 top=0 贴顶，
+   最大化时屏幕右上角（Fitts 角）才能直接落在关闭键上；其余子项仍由 align-items 居中 */
+.tb-right { margin-left: auto; display: flex; align-items: center; gap: 6px; align-self: stretch; }
 /* 标题栏右侧的视图切换组：默认不跟正文抢注意力。
    指针在窗内但没压到它时半透明（0.7，保住“当前是哪个模式”的可读性），压上去变实可点，指针离开窗口则完全收起（连点击一起关掉，
    免得窗口在后台时点一下就误触到看不见的模式按钮）。gap 与原 .tb-right 一致，包裹后间距不变。 */

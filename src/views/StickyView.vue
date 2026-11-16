@@ -12,6 +12,7 @@ import { renderMarkdown, setAssetBaseDir } from '../lib/preview'
 import { domToMarkdown, preserveTrailing, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock } from '../lib/wysiwyg'
 import { lang } from '../locales'
 import { isMac } from '../lib/platform'
+import { scLabel } from '../lib/shortcut'
 import { appIcons, ensureAppIcons } from '../lib/appinfo'
 import { splitLaunchArgs } from '../lib/launchArgs'
 import appIcon from '../assets/about-icon.png'
@@ -66,6 +67,8 @@ export default defineComponent({
       pendingTaskChecked: false,
       pwd: '',
       unlockErr: false,
+      // 快捷键文案按平台改写（词典里写的是 mac 记法 ⌘），与主编辑器同一套
+      sc: scLabel,
       // macOS 原生可拖边缩放且 tao 不支持 drag_resize_window，手柄仅在 Windows/Linux 显示
       showResizeGrip: !isMac,
     }
@@ -423,6 +426,21 @@ export default defineComponent({
         e.preventDefault()
         const cycle: Record<string, 'edit' | 'split' | 'preview'> = { edit: 'split', split: 'preview', preview: 'edit' }
         this.mode = cycle[this.mode] || 'split'
+        return
+      }
+      // Cmd/Ctrl + Shift + E：进入/切换「可编辑预览」（与主编辑器同键同语义）：
+      // 预览里翻开关；编辑 / 分屏下先切到预览并打开就地编辑
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 'e' || e.key === 'E')) {
+        if (this.mode === 'preview') {
+          if (this.pvCanEdit) {
+            e.preventDefault()
+            this.togglePvEdit()
+          }
+        } else if (this.target && !this.needUnlock) {
+          e.preventDefault()
+          this.pvEdit = true
+          this.mode = 'preview'
+        }
       }
     },
     /** 双击预览区在分屏 / 预览间切换（受设置项 previewDblClickToggle 控制，与主编辑器一致）：
@@ -644,7 +662,7 @@ export default defineComponent({
              便签里要改格式直接进编辑态打字即可，故不再摆一排水印按钮。
              浮现规则不变：获得焦点且鼠标在正文内才出现，平时半透明、悬停转不透明；容器不吃鼠标。 -->
         <div class="sticky-float" v-show="focused && overBody">
-          <button v-if="pvCanEdit" type="button" class="pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip'), place: 'bottom' }" @click="togglePvEdit">
+          <button v-if="pvCanEdit" type="button" class="pv-toggle" :class="{ on: previewEditable }" v-tip="{ text: sc(previewEditable ? $t('editor.pvReadTip') : $t('editor.pvEditTip')), place: 'bottom' }" @click="togglePvEdit">
             <svg v-if="previewEditable" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M14.5 6.5l3 3" /></svg>
             <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 6.5 12 6.5 21.5 12 21.5 12 18 17.5 12 17.5 2.5 12 2.5 12z" /><circle cx="12" cy="12" r="2.6" /></svg>
           </button>

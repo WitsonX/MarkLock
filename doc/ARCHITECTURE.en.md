@@ -114,7 +114,8 @@ src/
 ├── styles/global.css        # Global styles (CSS variables, incl. dark-theme variables and derived preview/editor tokens)
 ├── styles/skins.css         # Built-in color skins (Nord, Nocturne, Catppuccin, Sepia, Solarized, Gruvbox — each shipping a light and a dark variant)
 ├── components/
-│   ├── TitleBar.vue         # Title bar (macOS traffic-light overlay + title)
+│   ├── TitleBar.vue         # Title bar (macOS traffic-light overlay + title; WindowControls on the right under Windows)
+│   ├── WindowControls.vue   # Minimize / maximize / close for the frameless Windows window
 │   ├── VaultTreeNode.vue    # Recursive vault-tree node (folder expand/collapse + hover create/rename/delete)
 │   ├── WorkdirNode.vue      # Recursive working-directory tree node
 │   ├── CodeMirrorEditor.vue # CodeMirror 6 editor wrapper (markdown language + syntax highlighting)
@@ -135,6 +136,7 @@ src/
 │   ├── locales/             # zh/en language packs + switching
 │   ├── sticky.ts            # Sticky-window detection + note body read/write by file type
 │   ├── launchArgs.ts        # Quote-aware split of a quick-launch item's raw "launch arguments" string
+│   ├── shortcut.ts          # Platform rewrite of shortcut labels (mac marks ⌘⇧⌥⌃ → Ctrl+Shift+Alt+)
 │   ├── splash.ts            # Splash screen fade-out control
 │   └── update.ts            # Lightweight update check (GitHub/Gitee dual source + rate gating)
 └── views/
@@ -255,12 +257,13 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 
 ## 6. Key mechanisms
 
-### 6.1 Window and title bar (macOS)
+### 6.1 Window and title bar (macOS / Windows)
 
 - `TitleBarStyle::Overlay` + `hidden_title(true)` + `traffic_light_position(14.0, 20.0)`: the native traffic lights overlay on the app-drawn toolbar's top-left corner; the system title bar is gone.
 - Dragging: the titlebar carries `data-tauri-drag-region="deep"`; button areas use `="false"` to block dragging.
 - Close: `CloseRequested` → `lock_all_vaults` + `app_handle().exit(0)` — clicking the red X quits the whole program.
-- Cross-platform: macOS-specific code is wrapped in `#[cfg(target_os="macos")]`; the frontend detects the platform via `navigator.userAgent` (writes `data-platform`).
+- **Windows drops the native title bar too**: `#[cfg(target_os = "windows")]` applies `decorations(false)`, and minimize / maximize / close are drawn by `components/WindowControls.vue` at the right end of the app-drawn title bar (the main view mounts it at the end of `.tb-right`, Settings / Unlock / Dialogs get it from `TitleBar.vue`); the three ACLs `minimize` / `toggleMaximize` / `close` are added in `capabilities/default.json`. `close()` still lands on `CloseRequested`, so the "minimize to tray / confirm unsaved" semantics are unchanged, and the maximize icon refreshes through `onResized` + `isMaximized()`. Both `.tb-right` and `.win-controls` are `align-self: stretch`, so the controls fill the title bar's height and the screen's top-right corner lands directly on Close when maximized; edge-drag resizing and double-click maximize come from tao's `WM_NCHITTEST` and the drag region respectively.
+- Cross-platform: macOS-specific code is wrapped in `#[cfg(target_os="macos")]`; the frontend detects the platform via `navigator.userAgent` and `data-platform` takes one of `macos` / `windows` / `other` (Windows uses it to render the drawn controls, Linux keeps its native title bar).
 
 ### 6.2 Drag and drop (two kinds — keep them apart)
 
@@ -512,6 +515,8 @@ Every 2s (and when the window regains focus or returns to the foreground) it bat
 - **The sidebar font is derived from the editor font and capped**: `--sb-font-size` is `clamp(12.5px, 0.82 × editor font, 15px)`, so the sidebar stops at 15px even when the editor goes to 28px.
 - **Outline collapse state is stored per file path**: renaming or saving elsewhere loses it (new drafts have unique paths, so they are unaffected for now).
 - **The code-block layout of all three export paths has not been re-checked on a real device**: the `pre` padding moved to `.code-body` and export has to strip `.code-ctl`, so HTML / single-file / PDF all need a look.
+- **The frameless Windows window has only been checked statically**: the `decorations(false)` branch, the three controls and their ACL can only be compiled for the mac here; a real Windows machine still has to confirm edge-drag resizing, double-click maximize, Snap Layouts (hovering the maximize button shows no system snap preview) and pixel alignment of the glyphs under high DPI.
+- **Shortcut-label rewriting is character substitution**: `scLabel` only maps the four marks `⌘⇧⌥⌃`, and a dictionary string written as "⌘+ / ⌘-" becomes "Ctrl++ / Ctrl+-"; new copy should be authored as a bare shortcut string like `'⌘⇧T'` — mixing the marks into prose is what reads badly.
 
 ---
 
@@ -539,6 +544,8 @@ Rust side, `cargo test --lib`, covering:
 > Scroll anchoring on view switches and link clicks in the editable state are also real-hardware only: the first depends on the actual width transition and CodeMirror's measure timing, the second on the webview's native selection behaviour. Cover at least four cases — ① scroll the preview to mid-document and switch to split: the body must not jump upward as a whole, the source pane should land near the sentence just being read, and switching back must not jump either; ② type in the preview on macOS for half a minute — the body should stay where it is instead of climbing on each write-back; ③ in the editable state a plain click only places the caret while ⌘ / Ctrl+click opens, and `#` anchors only scroll the page however they are clicked; ④ holding the modifier brings up the underline and the "Click to open the link" bubble, releasing it returns to "Hold ⌘ and click to open the link", and leaving the app with ⌘Tab mid-hold must not leave the hint stuck (the `blur` fallback).
 
 > In-place code-block editing and the reading-mode fade are real-hardware only as well: the first depends on WebKit's selection and execCommand behaviour inside `<pre>`, the second on actual pointer coordinates. Cover at least five cases — ① open the language label, pick a new language, and confirm the highlight switches, the caret stays put and the reopened fence carries the right info; ② Tab / Shift+Tab move only the line starts, for a single line and for a multi-line selection alike, and Tab with ⌘/Ctrl held is not taken over; ③ Enter inside a block drops one line break without creating a second block, and block-level inserts (table / rule / new code block) do nothing inside one; ④ when a code block is the last block, clicking below it allows further typing, and a pasted image lands at the paste point instead of the editor caret; ⑤ in Preview, move the pointer out of the body and both bars fade away, move back and they dim, approach the top / bottom and they appear.
+
+> The frameless Windows window and the platform-rewritten shortcut labels can only be verified on real hardware: `cargo build` on the mac never compiles the `#[cfg(target_os="windows")]` branch, and `scLabel` only branches on the UA. Cover at least four cases — ① all three controls work, and Close goes through minimize-to-tray / the unsaved prompt instead of quitting outright; ② dragging every edge and corner resizes, double-clicking the title bar maximizes, and the top-right corner is Close once maximized; ③ hints and context menus show `Ctrl+…` on Windows while the mac still shows `⌘`; ④ ⌘/Ctrl+⇧+E lands on the expected mode from Edit, Split, Preview and the sticky note.
 
 ---
 

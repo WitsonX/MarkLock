@@ -21,6 +21,12 @@ export default {
       all: '所有文件',
     },
   },
+  win: {
+    minimize: '最小化',
+    maximize: '最大化',
+    restore: '还原',
+    close: '关闭',
+  },
   sticky: {
     title: '便携便签',
     notSet: '尚未设置便签文件',
@@ -111,8 +117,8 @@ export default {
     wrapOff: '关闭自动换行',
     wrapOn: '开启自动换行',
     // 预览就地编辑：工具栏的只读 ⇄ 编辑开关，以及链接/图片弹窗
-    pvEditTip: '当前只读，点此直接在预览里编辑正文',
-    pvReadTip: '当前可编辑，点此切回只读预览',
+    pvEditTip: '当前只读，点此直接在预览里编辑正文 ⌘⇧E',
+    pvReadTip: '当前可编辑，点此切回只读预览 ⌘⇧E',
     // 就地编辑态链接悬停提示：普通点击只落光标，按住修饰键点击才打开（{mod} 按平台填 ⌘/Ctrl）
     pvLinkTip: '按住 {mod} 点击打开链接',
     pvLinkOpenTip: '点击打开链接',
@@ -726,6 +732,8 @@ export default {
       find: '搜索 / 替换（预览模式为预览内查找）', globalSearch: '全局搜索（库 + 工作目录）',
       gView: '视图',
       toggleView: '切换 编辑 / 分屏 / 预览', toggleSidebar: '显示 / 隐藏侧边栏',
+      pvEditToggle: '预览就地编辑 / 只读',
+      pvEditToggleD: '编辑、分屏下按会切到预览并打开编辑',
       fontSizeKeys: '放大 / 缩小 / 重置字号',
       fontSizeKeysD: '{mod} + = 放大、{mod} + − 缩小（2px 步进）、{mod} + 0 重置，编辑与预览联动',
       gFormat: '编辑器格式化',
