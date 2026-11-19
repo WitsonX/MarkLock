@@ -9,7 +9,7 @@ import type { QuickLaunchItem, StickyNoteTarget } from '../stores/vault'
 import * as tauri from '../lib/tauri'
 import { readNote, writeNote } from '../lib/sticky'
 import { renderMarkdown, setAssetBaseDir } from '../lib/preview'
-import { domToMarkdown, preserveTrailing, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock } from '../lib/wysiwyg'
+import { domToMarkdown, preserveTrailing, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock, caretInBlankArea, caretInListGap, normalizeTaskCaret, markTaskCaretActivity, clearTaskCaretActivity } from '../lib/wysiwyg'
 import { lang } from '../locales'
 import { isMac } from '../lib/platform'
 import { scLabel } from '../lib/shortcut'
@@ -187,12 +187,15 @@ export default defineComponent({
     // 仅 pointerdown 触发 stickyEngage：热角路径 win.show() 不夺焦，但 Windows 上系统可能自动激活
     // 窗口，此时用户并未真正交互，不应解除 AUTOHIDE（否则「移开即隐藏」失效）。
     window.addEventListener('pointerdown', this.onEngage)
+    // 任务项首的光标会被 WebKit 画到复选框左边：与主编辑器同一套 selectionchange 兜底
+    document.addEventListener('selectionchange', this.onPvSelChange)
   },
   beforeUnmount() {
     window.removeEventListener('keydown', this.onKey)
     window.removeEventListener('blur', this.onBlur)
     window.removeEventListener('focus', this.onFocus)
     window.removeEventListener('pointerdown', this.onEngage)
+    document.removeEventListener('selectionchange', this.onPvSelChange)
   },
   methods: {
     async load() {
@@ -335,6 +338,8 @@ export default defineComponent({
       // 便签是整篇渲染、没有主编辑器那套 ⌘S 之外的键位冲突：Ctrl/Cmd+S 仍交给窗口级 onKey 落盘
       const root = this.previewMdEl()
       if (!root) return
+      // 按键一响就关闭任务项项首的纠正窗口：方向键 / 输入不被拉回，交给浏览器原生行为
+      clearTaskCaretActivity()
       if (e.key === 'Tab') {
         if (tabInCodeBlock(e, root, this.store.settings.codeIndent)) this.onPreviewEditInput()
         return
@@ -346,17 +351,35 @@ export default defineComponent({
       }
       if (enterInTaskItem(e, root)) this.onPreviewEditInput()
     },
+    /** 任务项首的落点（复选框后文本节点的 0 位）会被 WebKit 画到复选框左边：
+     *  selectionchange 兜住点击 / 方向键 / 回车所有路径，与主编辑器同语义（见 `normalizeTaskCaret`）。 */
+    onPvSelChange() {
+      if (!this.previewEditable || this.previewComposing) return
+      const root = this.previewMdEl()
+      if (!root) return
+      normalizeTaskCaret(root)
+    },
     /** 便签的 `.md` 只包住正文，最后一个块下方的空白落在滚动容器上（组件只管自己的根元素）：
-     *  与主编辑器同一套兜底，点空白处把光标落到块后（见 `caretBelowLastBlock`）。 */
+     *  与主编辑器同一套兜底，点空白处把光标落到块后（见 `caretBelowLastBlock`）；
+     *  直接点在 `.md` 根的内边距区同样落进首 / 末块，不留容器根上的光标（见 `caretInBlankArea`）。 */
     onPreviewPaneMousedown(e: MouseEvent) {
       if (!this.previewEditable || e.button !== 0) return
+      // 点击是「产生落点」的动作：短暂打开任务项项首的纠正窗口（见 `normalizeTaskCaret`）
+      markTaskCaretActivity()
       const pane = this.$refs.previewPane as HTMLElement | null
-      if (!pane || e.target !== pane) return
+      const root = this.previewMdEl()
+      const t = e.target as HTMLElement | null
+      if (!pane || !root || !t) return
+      // 任务复选框是控件：这次 mousedown 不该把光标挪进列表项（click 照常翻转勾选）
+      if (t.closest('input.task-cb')) return
+      // 接管：滚动容器的空白、正文根、以及列表内（缩进区 / 列表项空白）
+      if (t !== pane && t !== root && !t.closest('ul,ol')) return
       // 滚动条上的 mousedown 也落在 pane 上：接管后拖不动滚动条，按坐标排除
       const box = pane.getBoundingClientRect()
       if (e.clientX - box.left >= pane.clientWidth || e.clientY - box.top >= pane.clientHeight) return
-      const root = this.previewMdEl()
-      if (root && caretBelowLastBlock(root, e.clientY)) e.preventDefault()
+      if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
+      else if (t === root && caretInBlankArea(root, e.clientY)) e.preventDefault()
+      else if (caretInListGap(root, e.clientX, e.clientY)) e.preventDefault()
     },
     /** 只读 ⇄ 编辑开关（便签自己的会话内状态，不写全局设置项）。 */
     togglePvEdit() {

@@ -21,7 +21,7 @@ import WindowControls from '../components/WindowControls.vue'
 import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
 import { setAssetBaseDir, getAssetBaseDir, toggleTaskMarker } from '../lib/preview'
-import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock, type PreviewFmt } from '../lib/wysiwyg'
+import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, enterInCodeBlock, tabInCodeBlock, caretBelowLastBlock, caretInBlankArea, caretInListGap, normalizeTaskCaret, markTaskCaretActivity, clearTaskCaretActivity, type PreviewFmt } from '../lib/wysiwyg'
 import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
 import { bindHoverTip } from '../lib/tooltip'
 import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
@@ -276,6 +276,7 @@ export default defineComponent({
       _onChromeMove: null as ((e: MouseEvent) => void) | null,
       // 指针出窗监听：mouseout 且 relatedTarget 为 null 时主动收起两条栏
       _onChromeOut: null as ((e: MouseEvent) => void) | null,
+      _onPvSelChange: null as (() => void) | null,
       // 窗口重新聚焦（如 ⌘Tab 回来）时把这组图标放回半透明：那一刻还收不到 mousemove
       _onWinFocus: null as (() => void) | null,
       _onDocMousedown: null as ((e: MouseEvent) => void) | null,
@@ -646,6 +647,13 @@ export default defineComponent({
       void this.assetVersion
       return this.renderMarkdown(this.activeFile?.content ?? '')
     },
+    /** 预览面元素的重建键：切页签 / 附件缓存刷新时整个换掉 `.md` 元素。
+     *  只换 innerHTML 不够——上一个文件留下的焦点与选区会被浏览器折叠成「容器根」上的插入点，
+     *  WebKit 照样照着它画一根悬在正文最顶上的光标（切页签时最明显），
+     *  换掉元素才能把这份绘制状态一起丢掉。 */
+    previewDomKey(): string {
+      return `${this.activePath}::${this.assetVersion}`
+    },
     /** 就地编辑能不能开：纯预览视图 + 当前页签有明文（锁定的库/文件没有明文可改）。
      *  分屏不开——两栏同屏时改渲染区会让光标与焦点在栏间跳，反而更难用。 */
     pvCanEdit(): boolean {
@@ -807,6 +815,9 @@ export default defineComponent({
         this.previewHtml = v
         // 重新注入会重建 DOM，搜索高亮随之消失：面板开着就在新 DOM 上重跑一次
         if (this.pvSearchOpen) this.$nextTick(() => this.runPvSearch())
+        // 同文档重注入（磁盘重载 / 外部修改）时元素不换，旧选区会被折叠成容器根上的插入点，
+        // 焦点还在预览面上就会留下一根悬在正文最顶上的光标：清掉它（切页签靠换元素重建，不受影响）
+        this.$nextTick(() => this.dropDanglingCaret())
       },
     },
     // 离开编辑态（切出预览视图 / 页签被锁 / 关掉设置项）时把 DOM 序列化回源码；
@@ -1300,6 +1311,15 @@ export default defineComponent({
       this.titleChrome = 'hide'
     }
     document.addEventListener('mouseout', this._onChromeOut)
+    // 任务项首的落点（复选框后文本节点的 0 位）会被 WebKit 画到复选框左边：
+    // selectionchange 兜住点击 / 方向键 / 回车所有路径，只在折叠光标且非输入法合成时动手
+    this._onPvSelChange = () => {
+      if (!this.previewEditable || this.previewComposing) return
+      const root = this.$refs.previewMd as HTMLElement | null
+      if (!root) return
+      normalizeTaskCaret(root)
+    }
+    document.addEventListener('selectionchange', this._onPvSelChange)
     // 就地编辑态链接/图片的悬停提示（v-html 内容绑不了 v-tip，走委托气泡）：
     // 绑在组件根而不是 .md 节点——后者随 assetVersion 换 key 重建，监听会丢
     let pvTipImg = false
@@ -1399,6 +1419,7 @@ export default defineComponent({
     if (this._onWinFocus) window.removeEventListener('focus', this._onWinFocus)
     if (this._onChromeMove) window.removeEventListener('mousemove', this._onChromeMove)
     if (this._onChromeOut) document.removeEventListener('mouseout', this._onChromeOut)
+    if (this._onPvSelChange) document.removeEventListener('selectionchange', this._onPvSelChange)
     if (this._chromeRaf) cancelAnimationFrame(this._chromeRaf)
     if (this._pvLinkTipUnbind) this._pvLinkTipUnbind()
     if (this._onDocMousedown) document.removeEventListener('mousedown', this._onDocMousedown)
@@ -1837,6 +1858,8 @@ export default defineComponent({
       if (!this.previewEditable || e.isComposing) return
       const root = this.$refs.previewMd as HTMLElement | undefined
       if (!root) return
+      // 按键一响就关闭任务项项首的纠正窗口：方向键 / 输入不被拉回，交给浏览器原生行为
+      clearTaskCaretActivity()
       if (e.key === 'Tab') {
         if (tabInCodeBlock(e, root, this.store.settings.codeIndent)) this.onPreviewEditInput()
         return
@@ -1848,10 +1871,29 @@ export default defineComponent({
       }
       if (enterInTaskItem(e, root)) this.onPreviewEditInput()
     },
+    /** 丢掉预览面上「悬空」的选区：DOM 被重新注入后，旧选区会折叠成 `.md` 容器根上的插入点，
+     *  焦点还在时 WebKit 就照着它画一根悬在正文最顶上（浮层模式下看着像跑进工具栏）的光标。
+     *  只在焦点确实落在预览面上时动手，不碰 CodeMirror / 输入框自己的选区。 */
+    dropDanglingCaret() {
+      const root = this.$refs.previewMd as HTMLElement | null
+      if (!root) return
+      const ae = document.activeElement
+      if (ae !== root && !root.contains(ae)) return
+      const s = document.getSelection()
+      const n = s?.anchorNode ?? null
+      // 锚点还在正文里（重注入后浏览器把位置还原了）就不打断，只清真正悬空的那种
+      if (n && n !== root && s?.rangeCount && root.contains(n)) return
+      s?.removeAllRanges()
+      root.blur()
+    },
     /** 点最后一个块下方的空白时把光标落到块后：代码块 / 表格这类块底下没有可落笔的段落，
-     *  浏览器会把光标塞回块里，用户就写不了块后的正文（见 `caretBelowLastBlock`）。 */
+     *  浏览器会把光标塞回块里，用户就写不了块后的正文（见 `caretBelowLastBlock`）。
+     *  点正文根（`.md` 自己的内边距区，浮层模式下顶部那一段就压在工具栏下面）时同理：
+     *  浏览器给的是容器根上的插入点，WebKit 会把它画到容器边框盒左上角，还点不掉（见 `caretInBlankArea`）。 */
     onPreviewMousedown(e: MouseEvent) {
       if (!this.previewEditable || e.button !== 0) return
+      // 点击是「产生落点」的动作：短暂打开任务项项首的纠正窗口（见 `normalizeTaskCaret`）
+      markTaskCaretActivity()
       const root = this.$refs.previewMd as HTMLElement | null
       const pane = this.$refs.previewPane as HTMLElement | null
       const t = e.target as HTMLElement | null
@@ -1865,12 +1907,18 @@ export default defineComponent({
         e.preventDefault()
         return
       }
-      // 只接管「点在空白处」（预览滚动容器 / 正文根 / 块外壳）；块内、搜索条、复制按钮照旧交给浏览器
-      if (!root || !pane || (t !== root && t !== pane && !t?.classList.contains('mb'))) return
+      // 任务复选框是控件：这次 mousedown 不该把光标挪进列表项（click 照常翻转勾选）
+      if (t?.closest('input.task-cb')) return
+      // 接管三类落点：预览滚动容器 / 正文根 / 块外壳（空白处），以及列表内（缩进区、列表项空白）
+      if (!root || !pane || !t) return
+      if (t !== root && t !== pane && !t.classList.contains('mb') && !t.closest('ul,ol')) return
       // 滚动条上的 mousedown 也落在 pane 上：接管后拖不动滚动条，按坐标把它排除掉
       const box = pane.getBoundingClientRect()
       if (e.clientX - box.left >= pane.clientWidth || e.clientY - box.top >= pane.clientHeight) return
       if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
+      else if (t === root && caretInBlankArea(root, e.clientY)) e.preventDefault()
+      // 列表的缩进区 / 列表项里的空白：元素级插入点会被画到复选框那一列外侧（见 `caretInListGap`）
+      else if (caretInListGap(root, e.clientX, e.clientY)) e.preventDefault()
     },
 
     // ---------- 预览内搜索（预览模式 ⌘F，不再跳分屏） ----------
@@ -5217,16 +5265,9 @@ export default defineComponent({
         nextTick(() => {
           const el = this.$refs.previewMd as HTMLElement | null
           if (!el) return
-          el.focus({ preventScroll: true })
-          // 空草稿没有块级子节点，显式把 caret 落到容器开头：
-          // 各家 WebView 在 focus 空 contenteditable 时不一定给出可输入的插入点
-          const sel = document.getSelection()
-          if (!sel) return
-          const r = document.createRange()
-          r.selectNodeContents(el)
-          r.collapse(true)
-          sel.removeAllRanges()
-          sel.addRange(r)
+          // 空草稿没有块级子节点：补一个空段落再把光标放进去。直接把光标落在 `.md` 容器根上
+          // 会被 WebKit 画到容器边框盒左上角（浮层模式下正好压在工具栏一带），且点不掉（见 `caretInBlankArea`）
+          caretInBlankArea(el)
         })
         return
       }
@@ -7585,7 +7626,7 @@ ${bodyHtml}
               </div>
               <!-- 预览即编辑面（设置项 previewInlineEdit）：v-html 绑的是 previewHtml 而不是 renderedPreview，
                    编辑期间该字符串被冻结——任何一次重新注入都会重建 DOM、清掉光标并丢掉未回写的改动 -->
-              <div class="md" ref="previewMd" :key="assetVersion" spellcheck="false" :class="[`hljs-theme-${store.settings.codeTheme}`, { 'wysiwyg-on': previewEditable, 'pv-link-hot': pvLinkHot }]" :contenteditable="previewEditable ? 'true' : 'false'" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="previewHtml" @input="onPreviewEditInput" @keydown="onPreviewEditKeydown" @paste="onPreviewEditPaste" @compositionstart="onPreviewCompositionStart" @compositionend="onPreviewCompositionEnd"></div>
+              <div class="md" ref="previewMd" :key="previewDomKey" spellcheck="false" :class="[`hljs-theme-${store.settings.codeTheme}`, { 'wysiwyg-on': previewEditable, 'pv-link-hot': pvLinkHot }]" :contenteditable="previewEditable ? 'true' : 'false'" :style="{ '--code-indent': store.settings.codeIndent, '--preview-font-family': previewFontStack, '--preview-line-height': String(store.settings.previewLineHeight) }" v-html="previewHtml" @input="onPreviewEditInput" @keydown="onPreviewEditKeydown" @paste="onPreviewEditPaste" @compositionstart="onPreviewCompositionStart" @compositionend="onPreviewCompositionEnd"></div>
             </div>
           </template>
         </div>

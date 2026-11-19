@@ -473,12 +473,10 @@ function focusPreview(root: HTMLElement): boolean {
     return true
   }
   const blocks = Array.from(root.querySelectorAll(PV_BLOCK)) as HTMLElement[]
-  const last = [...blocks].reverse().find((b) => (b.textContent || '').trim()) ?? root
-  const r = document.createRange()
-  r.selectNodeContents(last)
-  r.collapse(false)
-  s.removeAllRanges()
-  s.addRange(r)
+  const last = [...blocks].reverse().find((b) => (b.textContent || '').trim())
+  // 空文档没有块可落点：补一个空段落。绝不把光标放进 root —— 落在容器根上的插入点
+  // 会被 WebKit 画到容器边框盒左上角（浮层模式下正好压在工具栏一带），见 `caretInBlankArea`
+  collapseInto(last ?? ensureTrailingParagraph(root), false)
   return true
 }
 
@@ -628,6 +626,9 @@ function applyTask(root: HTMLElement): void {
     s.addRange(r)
     runCmd('insertHTML', '<input type="checkbox" contenteditable="false" class="task-cb"> ')
   }
+  // 插入复选框后光标可能只剩元素级位置（画在复选框左边）：收进所在项的文字里（见 `fixElementLevelCaret`）
+  const cur = pvAncestor<HTMLElement>(root, 'li')
+  if (cur) fixElementLevelCaret(cur)
 }
 
 /** 插入一段 Markdown 渲染出的块（表格、分隔线）：直接借 marked 的输出，
@@ -683,6 +684,7 @@ function applyCodeBlock(root: HTMLElement, placeholder: string): boolean {
 
 /** 就地编辑下执行一次格式化；返回是否真的下发了命令，调用方据此决定要不要回写源码。 */
 export function applyPreviewFormat(root: HTMLElement, fmt: PreviewFmt): boolean {
+  markTaskCaretActivity()
   // 只读预览（contenteditable=false）下命令没有落点：execCommand 会作用到别处或干脆无效，
   // 而调用方还会照旧回写一次源码，等于把没编辑过的文档重排一遍，所以这里先挡掉。
   if (!root.isConnected || !root.isContentEditable || !focusPreview(root)) return false
@@ -755,10 +757,25 @@ export function enterInTaskItem(e: KeyboardEvent, root: HTMLElement): boolean {
   if (!li) return false
   const cb = li.firstElementChild
   if (!cb || cb.tagName !== 'INPUT' || !cb.classList.contains('task-cb')) return false
+  markTaskCaretActivity()
   if (!(li.textContent ?? '').trim()) return false
   e.preventDefault()
   runCmd('insertParagraph')
   runCmd('insertHTML', '<input type="checkbox" contenteditable="false" class="task-cb"> ')
+  // 新建出来的项常常只拿到「元素级」插入点：WebKit 会把它画在复选框左边、低于文字行。
+  // 把光标收进新项的文字里（优先下一项——回车拆出来的就是它）。
+  const nx = li.nextElementSibling as HTMLElement | null
+  let holder: HTMLElement | null = nx && nx.tagName === 'LI' ? nx : null
+  if (!holder) {
+    const focus = document.getSelection()?.focusNode ?? null
+    const node = focus
+      ? focus.nodeType === Node.ELEMENT_NODE
+        ? (focus as HTMLElement)
+        : focus.parentElement
+      : null
+    holder = node?.closest('li') ?? null
+  }
+  if (holder) fixElementLevelCaret(holder)
   return true
 }
 
@@ -980,4 +997,253 @@ function ensureTrailingParagraph(root: HTMLElement): HTMLElement {
   p.appendChild(document.createElement('br'))
   root.appendChild(p)
   return p
+}
+
+/** 浏览器在该点算出的插入位置（WebKit / Chromium 的 caretRangeFromPoint，标准名 caretPositionFromPoint 兜底）。 */
+function probeCaretAt(x: number, y: number): Range | null {
+  const d = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+  }
+  const r = d.caretRangeFromPoint?.(x, y)
+  if (r) return r
+  const p = d.caretPositionFromPoint?.(x, y)
+  if (!p) return null
+  const out = document.createRange()
+  try {
+    out.setStart(p.offsetNode, p.offset)
+  } catch {
+    return null
+  }
+  out.collapse(true)
+  return out
+}
+
+/** 最近一次「产生落点」的动作（点击 / 回车 / 工具条命令）发生的时间。
+ *  任务项项首有一批坏落点（复选框邻域），点击 / 回车后会短暂停留；方向键来回走也会经过
+ *  同样的位置，所以只在动作后一小段时间里纠正，避免把方向键锁死在项首（见 `normalizeTaskCaret`）；
+ *  按键（keydown）到来时清除，用户一按方向键就回到原生行为。 */
+let taskCaretActivityAt = 0
+export function markTaskCaretActivity(): void {
+  taskCaretActivityAt = Date.now()
+}
+export function clearTaskCaretActivity(): void {
+  taskCaretActivityAt = 0
+}
+
+/** 任务项的复选框是 contenteditable=false 的行内控件：光标停在它邻域时（紧邻复选框的文本
+ *  节点 0 位、复选框与文本之间的元素级位置）WebKit 按上游亲和把光标画到复选框左边、高度取整行
+ *  行盒——看着像光标跑到复选框外面去了。点击 / 回车后把这类落点收进项内文字的正确位置
+ *  （空项落到复选框后的 nbsp 之后，见 `placeCaretInText`）。幂等，适合挂在 selectionchange
+ *  上兜住点击 / 回车 / 工具条命令；只在动作后的短时间窗里动手（见 `markTaskCaretActivity`），
+ *  方向键路过项首也经过同样的位置，一直拉回会把人锁死在项首。返回是否做了纠正。 */
+export function normalizeTaskCaret(root: HTMLElement): boolean {
+  const s = document.getSelection()
+  if (!s || !s.rangeCount || !s.isCollapsed) return false
+  if (Date.now() - taskCaretActivityAt > 600) return false
+  const r = s.getRangeAt(0)
+  if (!root.contains(r.startContainer)) return false
+  const isCb = (n: Node | null): n is HTMLElement =>
+    !!n && n.nodeType === Node.ELEMENT_NODE && (n as HTMLElement).matches('input.task-cb')
+  const sc = r.startContainer
+  let li: HTMLElement | null = null
+  let toEnd = true
+  if (sc.nodeType === Node.TEXT_NODE) {
+    // 只有紧跟在复选框后面的文本节点才有邻域问题
+    if (!isCb(sc.previousSibling)) return false
+    const v = sc.nodeValue ?? ''
+    const lead = (/^[ \u00a0]+/.exec(v) ?? [''])[0].length
+    // 非空文本里落在前导空格之后就是好位置（画在复选框右边），不用动
+    if (/\S/.test(v) && r.startOffset >= lead) return false
+    li = sc.parentElement
+    toEnd = false
+  } else if (sc.nodeType === Node.ELEMENT_NODE) {
+    // 元素级落点：只有「复选框是第一个子节点」的列表项才属于坏位置
+    const el = sc as HTMLElement
+    if (el.tagName !== 'LI' || !isCb(el.firstChild)) return false
+    li = el
+    // 复选框邻域（0/1）按项首收；其后的按项尾收
+    toEnd = r.startOffset > 1
+  }
+  if (!li || !root.contains(li)) return false
+  placeCaretInText(li, toEnd)
+  return true
+}
+
+/** 光标当前只有「元素级」位置时，把它收进该元素的文字里；已经在文本节点里就什么也不做
+ *  （浏览器自己放对了，别把拆分后的位置推回项首 / 项尾）。 */
+function fixElementLevelCaret(el: HTMLElement): void {
+  const s = document.getSelection()
+  const r = s?.rangeCount ? s.getRangeAt(0) : null
+  if (!r || r.startContainer.nodeType === Node.TEXT_NODE) return
+  // 落在元素开头（复选框之前）→ 项首；否则视为项尾
+  placeCaretInText(el, !(r.startContainer === el && r.startOffset === 0))
+}
+
+/** 把折叠光标放进元素首 / 末个有字的文本节点。
+ *  直接 `selectNodeContents` 再折叠是「元素级插入点」，WebKit 会把它画在盒子边缘：
+ *  列表项上正好是复选框左边那一列、还低于文字行（段落没内缩，所以以前在 p / h 上看不出来）。
+ *  任务项（复选框是第一个子节点）里唯一文本是纯空白时，落点换成复选框后的 nbsp——
+ *  纯空格在行尾是悬挂空白会被折叠，光标右边没有真实行内盒，WebKit 照样画到复选框左边。 */
+function placeCaretInText(el: HTMLElement, toEnd: boolean): boolean {
+  const s = document.getSelection()
+  if (!s) return false
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+  let first: Text | null = null
+  let firstAny: Text | null = null
+  let last: Text | null = null
+  let lastAny: Text | null = null
+  while (walker.nextNode()) {
+    const t = walker.currentNode as Text
+    const v = t.nodeValue ?? ''
+    if (!v.length) continue
+    if (!firstAny) firstAny = t
+    lastAny = t
+    if (!first && /\S/.test(v)) first = t
+    if (/\S/.test(v)) last = t
+  }
+  const taskLi = el.tagName === 'LI' && !!el.firstElementChild?.matches?.('input.task-cb')
+  const target = toEnd ? (last ?? lastAny) : (first ?? firstAny)
+  if (!target) {
+    // 列表项里可能一个文本节点都不剩（插入复选框后光标只拿到元素级位置）：
+    // 补一个空格文本节点让它落在行内；序列化时 li 的文本会 trim 掉，不进源码。
+    // 任务项补 nbsp：纯空格会被画到复选框左边（见 `normalizeTaskCaret`）
+    if (el.tagName !== 'LI' || !el.isContentEditable) return false
+    const sp = document.createTextNode(taskLi ? '\u00a0' : ' ')
+    el.appendChild(sp)
+    const r0 = document.createRange()
+    r0.setStart(sp, taskLi ? 1 : toEnd ? 1 : 0)
+    r0.collapse(true)
+    s.removeAllRanges()
+    s.addRange(r0)
+    return true
+  }
+  const v = target.nodeValue ?? ''
+  // 任务项的纯空白文本（典型是复选框后的单个空格）：整个节点换成 nbsp 再落点。
+  // nbsp 不参与尾随空白折叠，光标停在它后面就有真实行内盒参照，画在复选框右边
+  if (taskLi && !/\S/.test(v)) {
+    if (v !== '\u00a0') target.nodeValue = '\u00a0'
+    const r = document.createRange()
+    r.setStart(target, 1)
+    r.collapse(true)
+    s.removeAllRanges()
+    s.addRange(r)
+    return true
+  }
+  const r = document.createRange()
+  if (toEnd) r.setStart(target, /\S/.test(v) ? v.search(/\s*$/) : v.length)
+  else r.setStart(target, v.length - v.replace(/^\s+/, '').length)
+  r.collapse(true)
+  s.removeAllRanges()
+  s.addRange(r)
+  return true
+}
+
+/** 把折叠光标放进某个元素内部：优先落在文本节点里（见 `placeCaretInText`），
+ *  空元素再补 `<br>`。落点必须是真正的块（p / h1-6 / li / pre …），不能是 `.md` 容器本身。 */
+function collapseInto(el: HTMLElement, toEnd: boolean): void {
+  const s = document.getSelection()
+  if (!s) return
+  if (placeCaretInText(el, toEnd)) return
+  if (!el.firstChild) el.appendChild(document.createElement('br'))
+  const r = document.createRange()
+  r.selectNodeContents(el)
+  r.collapse(toEnd)
+  s.removeAllRanges()
+  s.addRange(r)
+}
+
+/** 正文第一个可落笔的块：拆掉 `.mb` 外壳，列表 / 表格取里层第一个块。 */
+function firstCaretBlock(root: HTMLElement): HTMLElement | null {
+  for (const el of Array.from(root.children)) {
+    const inner = (el.classList.contains('mb') ? el.firstElementChild : el) as HTMLElement | null
+    if (!inner) continue
+    if (inner.matches(PV_BLOCK)) return inner
+    const nested = inner.querySelector(PV_BLOCK) as HTMLElement | null
+    if (nested) return nested
+  }
+  return null
+}
+
+/** 点在正文根（`.md` 容器本身，典型是顶部 / 底部那几段内边距）的空白处时，把光标落进真实块，
+ *  返回是否接管（调用方据此 preventDefault）。
+ *  这些空白点下去浏览器给的是「容器根」上的插入点：WebKit 会把它画到容器的边框盒左上角——
+ *  浮层模式下正好落在工具栏那一条上（看着像光标跑进了工具栏），而且它不属于任何文本流，
+ *  点正文后旧光标还留在那儿、也点不到。
+ *  y 在首块之上→首块开头；末块之下→末块末尾（代码块 / 表格这类块交给 `caretBelowLastBlock`）；
+ *  块与块之间→离得近的那一端；空文档→补一个空段落（序列化时被 `blockMd` 丢掉，不进源码）。 */
+export function caretInBlankArea(root: HTMLElement, clientY?: number): boolean {
+  const first = firstCaretBlock(root)
+  if (!first) {
+    const p = ensureTrailingParagraph(root)
+    root.focus({ preventScroll: true })
+    collapseInto(p, false)
+    return true
+  }
+  const blocks = Array.from(root.querySelectorAll(PV_BLOCK)) as HTMLElement[]
+  const last = blocks[blocks.length - 1] ?? first
+  let target = last
+  let toEnd = true
+  if (clientY !== undefined) {
+    const head = root.firstElementChild?.getBoundingClientRect()
+    if (head && clientY <= head.top) {
+      target = first
+      toEnd = false
+    } else if (clientY < last.getBoundingClientRect().bottom) {
+      // 块与块之间的空白：挑离点最近的那一条边，避免把光标甩到整篇的开头或结尾
+      let best = Infinity
+      for (const b of blocks) {
+        const box = b.getBoundingClientRect()
+        const dTop = Math.abs(clientY - box.top)
+        const dBottom = Math.abs(clientY - box.bottom)
+        if (dTop < best) {
+          best = dTop
+          target = b
+          toEnd = false
+        }
+        if (dBottom < best) {
+          best = dBottom
+          target = b
+          toEnd = true
+        }
+      }
+    }
+  }
+  root.focus({ preventScroll: true })
+  collapseInto(target, toEnd)
+  return true
+}
+
+/** 点在列表的缩进区（`.md ul` 的 padding 左那一带）或列表项里文字之外的空白时，
+ *  浏览器给的是「元素级」插入点：WebKit 会把它画在列表内容盒左缘（复选框那一列外侧）、
+ *  比文字低一截，看着像光标跑到复选框外面去了。把这类落点收进最近列表项的文本里，返回是否接管。 */
+export function caretInListGap(root: HTMLElement, x: number, y: number): boolean {
+  const probe = probeCaretAt(x, y)
+  if (!probe) return false
+  // 落在文字上：浏览器自己放得对，不接管
+  if (probe.startContainer.nodeType === Node.TEXT_NODE) return false
+  const node = probe.startContainer
+  const el = (node.nodeType === Node.ELEMENT_NODE ? (node as HTMLElement) : node.parentElement) as HTMLElement | null
+  if (!el || !root.contains(el)) return false
+  const li = el.closest('li') as HTMLElement | null
+  const list = el.closest('ul,ol') as HTMLElement | null
+  if (!li && !list) return false
+  // 落在 li 上就直接用它；落在列表容器上（缩进区 / 末项下方）按纵坐标挑最近的一项
+  let target: HTMLElement | null = li
+  if (!target && list) {
+    let best = Infinity
+    for (const child of Array.from(list.children)) {
+      if (child.tagName !== 'LI') continue
+      const b = child.getBoundingClientRect()
+      const d = y < b.top ? b.top - y : y > b.bottom ? y - b.bottom : 0
+      if (d < best) {
+        best = d
+        target = child as HTMLElement
+      }
+    }
+  }
+  if (!target) return false
+  root.focus({ preventScroll: true })
+  const box = target.getBoundingClientRect()
+  return placeCaretInText(target, y > box.top + box.height / 2)
 }

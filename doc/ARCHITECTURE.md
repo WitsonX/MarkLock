@@ -410,6 +410,13 @@ src/
 - **合帧与收尾**：`mousemove` 只记坐标并用 rAF 合帧算一次，避免每次移动都读布局；指针移出窗口时 `mousemove` 不再派发，`mouseout` 且 `relatedTarget` 为 null 时清掉坐标并直接收起（清坐标同时防住已排队的 rAF 用旧坐标把状态复活）。开关是设置项 `chromeAutoFade`（设置 → 外观与工作区右键菜单同一项），初值 `hide`，所以刚进预览又不动鼠标时两栏是藏着的。
 - **标题栏右侧的视图切换组一起收**：保存 / 锁定 / 只读⇄编辑 / 编辑-分屏-预览 包进 `.tb-modes`，`applyTitleChrome` 用同一份鼠标坐标判定——压到组上（外扩 8px）→ `show`，指针在窗内别处 → `dim`（0.7），窗口失焦或指针出窗 → `hide`。`hide` 同时关掉 `pointer-events`，窗口在后台时点一下不会命中看不见的按钮；重新聚焦先回到 `dim`（那一刻还收不到 `mousemove`）。这一组**不限预览模式**，编辑 / 分屏下也照样淡出，也不跟 `chromeAutoFade` 走（设置项管的是两条栏）；⋯ 主菜单留在组外，任何时候都实心。
 
+### 6.19 就地编辑的光标落点
+
+- **容器根级插入点要收掉**：点 `.md` 自己的内边距区（浮层模式下顶部那段就压在工具栏下面）时，浏览器留下的 `Range` 落在根元素上、偏移 0，WebKit 会把元素级 caret 画在容器边框盒左上角——看着像一根悬在正文最顶上、还点不掉的光标。`caretInBlankArea` 接管这种点击：首块上方落到首块起点，末块下方落到末块末尾，中间的空洞就近找块，落点统一用 `collapseInto` 沉进文本节点；`focusPreview` 与空文档建段也走这一入口，不再 `selectNodeContents`。
+- **列表缩进区与任务项项首**：列表项左侧的缩进区、以及任务项复选框之后的空白，点下去同样是元素级插入点，caret 就画到复选框左边。`caretInListGap` 先拿 `caretRangeFromPoint` 探一次：探到文本节点说明点在了字上，直接放行；否则按 y 就近选一个 `<li>`，用 `placeCaretInText` 放进首 / 尾文字，空项补一个 `\u00a0`（纯空格仍会被画到复选框左侧）。插完复选框（`applyTask`）与在任务项里回车（`enterInTaskItem`）后也按同一口径收一次。
+- **纠正窗只在动作之后开**：元素级 caret 与「方向键走到项首」在 DOM 上是同一个位置，无条件纠正会把方向键锁死。所以 `markTaskCaretActivity` 在点击与命令层动作后开一个 600ms 的窗口，挂在 `selectionchange` 上的 `normalizeTaskCaret` 只在这段时间里修正，任意按键都把它关掉，自然过期同样恢复原状；主编辑器与便签窗挂的是同一份回调。
+- **切页签整块换掉 `.md`**：旧 DOM 被 `v-html` 覆盖后，浏览器会把残余选区折成根元素上的插入点，WebKit 照样照着它画一根悬空 caret。所以 `.md` 的 `:key` 从 `assetVersion` 换成 `previewDomKey`（`activePath::assetVersion`），切页签 / 附件缓存刷新时元素连同绘制状态一起丢掉；`dropDanglingCaret` 在重注入后只清锚点确实悬空的选区，不碰 CodeMirror 与输入框。
+
 ---
 
 ## 七、演进时间线（2026-09-24 起）

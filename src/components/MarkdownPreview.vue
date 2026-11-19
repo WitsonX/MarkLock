@@ -3,7 +3,7 @@ import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
 import * as tauri from '../lib/tauri'
 import { toggleTaskMarker } from '../lib/preview'
-import { caretBelowLastBlock } from '../lib/wysiwyg'
+import { caretBelowLastBlock, caretInBlankArea, caretInListGap, markTaskCaretActivity } from '../lib/wysiwyg'
 import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
 import { isMac } from '../lib/platform'
 import { bindHoverTip } from '../lib/tooltip'
@@ -72,19 +72,26 @@ export default defineComponent({
   },
   methods: {
     /** 点最后一个块下方的空白时把光标落到块后（代码块 / 表格底下没有可落笔的段落，
-     *  浏览器会把光标塞回块里）：与主编辑器 `onPreviewMousedown` 同一套逻辑。 */
+     *  浏览器会把光标塞回块里）；点正文根的内边距区则落进首 / 末块：与主编辑器 `onPreviewMousedown`
+     *  同一套逻辑，避免把光标放到 `.md` 容器根上（WebKit 会把它画到容器左上角，且点不掉）。 */
     onMousedown(e: MouseEvent) {
       if (!this.editable || e.button !== 0) return
+      // 点击是「产生落点」的动作：短暂打开任务项项首的纠正窗口（由宿主页的 selectionchange 兜底纠正）
+      markTaskCaretActivity()
       const target = e.target as HTMLElement | null
       // 语言标签与右下角控件带是控件：别让这次 mousedown 把代码块里的光标挪走（click 照常派发）
       if (target?.closest('.code-ctl')) {
         e.preventDefault()
         return
       }
+      // 任务复选框是控件：这次 mousedown 不该把光标挪进列表项（click 照常翻转勾选）
+      if (target?.closest('input.task-cb')) return
       const root = this.$el as HTMLElement
       const t = target
-      if (t !== root && !t?.classList.contains('mb')) return
+      if (t !== root && !t?.classList.contains('mb') && !t?.closest('ul,ol')) return
       if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
+      else if (t === root && caretInBlankArea(root, e.clientY)) e.preventDefault()
+      else if (caretInListGap(root, e.clientX, e.clientY)) e.preventDefault()
     },
     onClick(e: MouseEvent) {
       const target = e.target as HTMLElement
