@@ -1,69 +1,15 @@
-//! 代码块语言：常用语言清单、`<code class="language-x">` 的读写，以及代码块左上角的语言菜单。
+//! 代码块语言：`<code class="language-x">` 的读写，以及代码块左上角的语言菜单。
+//! 语言清单本身在 `lib/codeLangs.ts`（预览的自动识别也用它当候选集）。
 //!
 //! 预览区是 `v-html` 拼出来的 DOM（就地编辑时它还是真源），挂不了 Vue 组件，所以菜单用原生
 //! DOM 画在 body 上；各视图只负责把点击委托进来（主编辑器 `onPreviewLinkClick`、便签
 //! `MarkdownPreview.onClick`）。选中语言后直接改 `<code>` 的 class 并按新语言重排高亮，
 //! 回写源码交给调用方的防抖流程——序列化器本来就按 `language-x` 生成围栏信息串。
 
-import hljs from 'highlight.js'
 import { t } from '../locales'
 import { highlightCode } from './preview'
 import { codeText } from './wysiwyg'
-
-/** 语言项：`id` 同时是写进围栏的信息串（取 highlight.js 认得的别名），空串表示不写语言、交给自动识别。 */
-type Lang = { id: string; label: string }
-
-/** 常用语言清单。只收 highlight.js 认识的名字：选了不上色比没有这个选项更让人困惑。 */
-const LANGS: Lang[] = [
-  { id: '', label: '' },
-  { id: 'text', label: '' },
-  { id: 'js', label: 'JavaScript' },
-  { id: 'ts', label: 'TypeScript' },
-  { id: 'jsx', label: 'JSX' },
-  { id: 'tsx', label: 'TSX' },
-  { id: 'html', label: 'HTML' },
-  { id: 'css', label: 'CSS' },
-  { id: 'scss', label: 'SCSS' },
-  { id: 'less', label: 'Less' },
-  { id: 'json', label: 'JSON' },
-  { id: 'yaml', label: 'YAML' },
-  { id: 'xml', label: 'XML' },
-  { id: 'md', label: 'Markdown' },
-  { id: 'bash', label: 'Bash' },
-  { id: 'shell', label: 'Shell' },
-  { id: 'powershell', label: 'PowerShell' },
-  { id: 'python', label: 'Python' },
-  { id: 'java', label: 'Java' },
-  { id: 'kotlin', label: 'Kotlin' },
-  { id: 'scala', label: 'Scala' },
-  { id: 'c', label: 'C' },
-  { id: 'cpp', label: 'C++' },
-  { id: 'csharp', label: 'C#' },
-  { id: 'go', label: 'Go' },
-  { id: 'rust', label: 'Rust' },
-  { id: 'php', label: 'PHP' },
-  { id: 'ruby', label: 'Ruby' },
-  { id: 'swift', label: 'Swift' },
-  { id: 'objectivec', label: 'Objective-C' },
-  { id: 'dart', label: 'Dart' },
-  { id: 'lua', label: 'Lua' },
-  { id: 'r', label: 'R' },
-  { id: 'sql', label: 'SQL' },
-  { id: 'pgsql', label: 'PostgreSQL' },
-  { id: 'graphql', label: 'GraphQL' },
-  { id: 'dockerfile', label: 'Dockerfile' },
-  { id: 'makefile', label: 'Makefile' },
-  { id: 'ini', label: 'INI / TOML' },
-  { id: 'diff', label: 'Diff' },
-  { id: 'nginx', label: 'Nginx' },
-  { id: 'http', label: 'HTTP' },
-  { id: 'protobuf', label: 'Protobuf' },
-  { id: 'latex', label: 'LaTeX' },
-  { id: 'haskell', label: 'Haskell' },
-  { id: 'elixir', label: 'Elixir' },
-  { id: 'clojure', label: 'Clojure' },
-  { id: 'vim', label: 'Vim Script' },
-]
+import { LANGS } from './codeLangs'
 
 /** 语言的显示名：自动 / 纯文本跟随界面语言，其余用技术名（各语言都这么写，不必翻译）。 */
 export function langLabel(id: string): string {

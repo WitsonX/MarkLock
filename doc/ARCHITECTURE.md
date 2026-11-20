@@ -130,7 +130,8 @@ src/
 │   ├── preview.ts           # marked 共享渲染层（代码高亮/复制/任务清单/图片 asset）
 │   ├── wysiwyg.ts           # 预览就地编辑：DOM→Markdown 序列化 + execCommand 命令层
 │   ├── previewSearch.ts     # 预览内查找：渲染 DOM 上建 haystack、包裹 <mark> 命中并定位
-│   ├── codeLang.ts          # 代码块语言：清单、读写当前围栏语言、语言菜单（body 浮层）
+│   ├── codeLangs.ts         # 代码块语言清单（唯一真源：菜单选项与自动识别候选集共用）
+│   ├── codeLang.ts          # 代码块语言读写与语言菜单（body 浮层）
 │   ├── fonts.ts             # 预览字体内置清单（跨平台回退栈）
 │   ├── skins.ts             # 皮肤注册表：内置清单、token 分组、自定义皮肤 CSS 生成/注入/实时预览
 │   ├── locales/             # 中英文语言包 + 语言切换
@@ -397,7 +398,8 @@ src/
 
 ### 6.17 代码块的就地编辑与语言菜单
 
-- **渲染结构多了两层**：围栏代码块现在渲成 `<pre><div class="code-body"><code class="hljs language-x">…</code></div><div class="code-ctl" contenteditable="false">语言标签 + 复制按钮</div></pre>`。`.code-body` 接管横向滚动（`pre` 自身 `overflow: visible`），`.code-ctl` 绝对定位在右上角、平时透明，鼠标进入代码块、控件拿到焦点或语言菜单开着才浮出；它不占文档流也不给代码留白，所以浮层会盖住首行右侧一小块。`lib/codeLang.ts` 是语言清单与菜单的唯一入口：`codeLangOf(pre)` 读当前围栏语言，`applyCodeLang(pre, id)` 改 `<code>` 的 class、按新语言重排高亮再把光标放回去，`openCodeLangMenu` 在 body 上开一个带搜索框的原生菜单（方向键 / Enter / Esc；点击外部、窗口 resize、列表之外的滚动都会关掉）。
+- **渲染结构多了两层**：围栏代码块现在渲成 `<pre><div class="code-body"><code class="hljs language-x">…</code></div><div class="code-ctl" contenteditable="false">语言标签 + 复制按钮</div></pre>`。`.code-body` 接管横向滚动（`pre` 自身 `overflow: visible`），`.code-ctl` 绝对定位在右上角、平时透明，鼠标进入代码块、控件拿到焦点或语言菜单开着才浮出；它不占文档流也不给代码留白，所以浮层会盖住首行右侧一小块。`lib/codeLangs.ts` 是语言清单的唯一真源，`lib/codeLang.ts` 是读写与菜单的唯一入口：`codeLangOf(pre)` 读当前围栏语言，`applyCodeLang(pre, id)` 改 `<code>` 的 class、按新语言重排高亮再把光标放回去，`openCodeLangMenu` 在 body 上开一个带搜索框的原生菜单（方向键 / Enter / Esc；点击外部、窗口 resize、列表之外的滚动都会关掉）。
+- **没写语言的块只跑常用语法，结果另存一份缓存**：`highlightAuto` 会挨个跑 highlight.js 里注册的 193 种语法给代码打分，一块三百来行的代码约 20ms；分屏下每按一个键整篇重渲，正文里几个未标语言的块叠起来就是几百毫秒的卡顿（写了语言的块走单趟 `highlight`，0.2ms 量级）。`preview.ts` 因此只把菜单里的那批语言（`AUTO_LANGS` = `codeLangs.ts` 的 `LANGS` 去掉空串与「纯文本」）喂给 `highlightAuto`，耗时降到三分之一左右，日常代码的识别结果基本不变；`highlightCode` 再按「语言 + 正文」缓存结果（Map 当 LRU，上限 200 条），没动过的块直接命中——正文里打字只剩 lexer / parser 与 DOM 注入的开销，在代码块里打字也只重算当前这一块。缓存键跟着正文走，就地编辑改出来的新正文自然生成新键，旧结果随淘汰退场。
 - **重排高亮必须自己保住光标**：`highlightCode` 会重建整棵 `<code>` 子树，浏览器选区随之失效；`applyCodeLang` 先用 `codeText` 的口径把光标换算成文本偏移，重排后再放回去，并把焦点交还预览根——否则选完语言光标就掉到 body，接着打字落空。
 - **代码块里的 Enter 与 Tab 各走一条专用路径**：`enterInCodeBlock` 用 `insertLineBreak`（`insertParagraph` 和 `insertText('\n')` 在 WebKit 里都会把 `<pre>` 断成两个）；`tabInCodeBlock` 按 `codeIndent`（2 / 4）插空格，有选区时先算出行首再逐行从后往前插，Shift+Tab 用 `leadingIndent` 反向退一格，增删完都用活 Range 把光标 / 选区放回原处。两处都只在代码块内接管，其余位置把 Tab 留给浏览器切焦点。
 - **代码块内不接受块级结构**：`applyCodeBlock` / `applyInsertMd`（表格、分隔线）进门先看 `pvAncestor(root, 'pre')`，命中就返回 `false`，调用方连回写都不做——源码里表达不出嵌套围栏，硬插只会把 `<pre>` 断成两个。

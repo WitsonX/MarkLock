@@ -8,20 +8,47 @@ import { marked } from 'marked'
 import hljs from 'highlight.js'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { t as translate } from '../locales'
+import { LANGS } from './codeLangs'
 
 /** 代码块高亮失败时的兜底转义 */
 function escapeCode(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/** 自动识别的候选语言 = 语言菜单里能选的那批（空串与「纯文本」除外）。
+ *  highlight.js 全量注册了 193 种语法，`highlightAuto` 会挨个跑一遍打分：一块三百来行的代码
+ *  约 20ms，分屏下每敲一个字整篇重渲，正文里几个未标语言的块叠起来就是几百毫秒的卡顿。
+ *  只跑这 50 来种常用语法耗时降到三分之一左右，日常代码的识别结果基本不变。 */
+const AUTO_LANGS = LANGS.map((l) => l.id).filter((id) => id && id !== 'text')
+
+/** 高亮结果缓存（键 = 语言 + 正文）：分屏每按键都把整篇重渲一遍，但正文里没动过的代码块
+ *  文本不变，命中缓存就不用再跑语法分析——只剩当前正在敲的那个块需要重算。
+ *  Map 的插入顺序当 LRU：命中后挪到队尾，超限从队首丢；就地编辑改动的块会生成新键，
+ *  旧键随淘汰自然退场。 */
+const HL_CACHE = new Map<string, string>()
+const HL_CACHE_MAX = 200
+
 /** marked v5+ 移除了 highlight 选项，改用自定义 renderer 接 highlight.js */
 export function highlightCode(text: string, lang: string): string {
-  try {
-    if (lang && hljs.getLanguage(lang)) return hljs.highlight(text, { language: lang }).value
-    return hljs.highlightAuto(text).value
-  } catch {
-    return escapeCode(text)
+  const key = lang + '\u0000' + text
+  const hit = HL_CACHE.get(key)
+  if (hit !== undefined) {
+    HL_CACHE.delete(key)
+    HL_CACHE.set(key, hit)
+    return hit
   }
+  let out: string
+  try {
+    out = lang && hljs.getLanguage(lang) ? hljs.highlight(text, { language: lang }).value : hljs.highlightAuto(text, AUTO_LANGS).value
+  } catch {
+    out = escapeCode(text)
+  }
+  HL_CACHE.set(key, out)
+  if (HL_CACHE.size > HL_CACHE_MAX) {
+    const oldest = HL_CACHE.keys().next().value
+    if (oldest !== undefined) HL_CACHE.delete(oldest)
+  }
+  return out
 }
 
 /** 预览代码块右上角复制按钮：图标内联 SVG（双矩形「复制」+ 对勾「已复制」），
