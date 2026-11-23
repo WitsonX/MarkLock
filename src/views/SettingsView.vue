@@ -1193,6 +1193,14 @@ greet('MarkLock');`
           </div>
 
           <div class="group">
+            <div class="group-head">{{ $t('settings.security.gRun') }}</div>
+            <div class="row" data-key="confirmRunCode" data-keywords="运行 代码块 终端 确认 bash powershell run code terminal confirm">
+              <div class="info"><div class="t">{{ $t('settings.security.runConfirm') }}</div><div class="d">{{ $t('settings.security.runConfirmD') }}</div></div>
+              <div class="switch" :class="{ on: store.settings.confirmRunCode }" @click="store.updateSettings({ confirmRunCode: !store.settings.confirmRunCode })"></div>
+            </div>
+          </div>
+
+          <div class="group">
             <div class="group-head">{{ $t('settings.security.gData') }}</div>
             <div class="row" data-key="backupEnabled" data-keywords="备份 上一版 恢复 崩溃 半写 backup restore recover crash atomic">
               <div class="info"><div class="t">{{ $t('settings.security.backup') }}</div><div class="d">{{ $t('settings.security.backupD') }}</div></div>

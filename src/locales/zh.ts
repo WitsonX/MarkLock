@@ -11,6 +11,7 @@ export default {
     emptyFolder: '空文件夹',
     copy: '复制',
     copied: '已复制',
+    run: '运行',
     browse: '浏览…',
     close: '关闭',
     fd: {
@@ -56,6 +57,12 @@ export default {
     // 预览代码复制按钮
     copyCodeAria: '复制代码',
     copyInlineAria: '复制行内代码',
+    // 预览代码运行按钮（仅 bash / PowerShell 块）
+    runCodeAria: '运行代码',
+    runTitle: '运行这段代码？',
+    runHint: '将在 {shell} 的新终端窗口 / 页签中执行以下代码，它拥有与你相同的系统权限，请只运行你信任的内容。',
+    runHintWinFallback: '这台 Windows 上没找到 bash（Git for Windows）时，这段代码会改用 PowerShell 执行。',
+    runDontAsk: '不再提醒，之后直接运行',
     // 定位到系统文件管理器
     revealFinder: '在访达中显示',
     revealExplorer: '在资源管理器中显示',
@@ -708,6 +715,9 @@ export default {
       lockOnMinimize: '窗口最小化时锁定',
       lockOnSleep: '系统休眠 / 锁屏时锁定',
       clearClipboard: '锁定后清除剪贴板', clearClipboardD: '防止解密内容残留（复制后也会定时清除）',
+      gRun: '运行代码',
+      runConfirm: '运行代码块前确认',
+      runConfirmD: '点预览里 bash / PowerShell 代码块的运行按钮时，先弹窗展示要执行的命令；关掉后直接在新终端页签运行',
       gData: '数据安全',
       backup: '保存时保留上一版备份', backupD: '采用“临时文件 → 落盘 → 重命名”的原子方式写盘，并在覆盖前把上一版加密备份为隐藏文件，防崩溃/断电/云同步半写导致整库损坏；关闭后仍保留原子写盘，不再生成备份',
       gDanger: '危险操作',

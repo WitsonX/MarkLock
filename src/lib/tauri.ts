@@ -264,6 +264,15 @@ export function launchLocal(path: string, args: string[] = []) {
   return invoke<void>('launch_local', { path, args })
 }
 
+/**
+ * 在系统终端的新页签里运行一段代码块（预览代码块的「运行」按钮）。
+ * shell 按代码块语言映射：'bash'（含 sh/zsh）或 'powershell'（含 ps1/pwsh）。
+ * 正文由 Rust 写入私有临时脚本后再交给终端，不参与命令行拼接。
+ */
+export function runInTerminal(shell: 'bash' | 'powershell', code: string) {
+  return invoke<void>('run_in_terminal', { shell, code })
+}
+
 /** 取本地应用/路径在系统层面的显示名（macOS 本地化名；非 macOS 返回 null，由前端兜底）。 */
 export function appDisplayName(path: string) {
   return invoke<string | null>('app_display_name', { path })

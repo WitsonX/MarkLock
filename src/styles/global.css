@@ -284,7 +284,8 @@ html[data-platform='macos'] .titlebar {
    语言标签与复制按钮的内边距 / 行高改成 0 8px / 1，两个按钮高度才会一致 */
 .code-ctl > * { height: 26px; box-sizing: border-box; opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s; }
 .md pre:hover .code-ctl > *, .code-ctl > *:focus-visible, .code-lang-btn.menu-on { opacity: 1; }
-.code-copy-btn {
+.code-copy-btn,
+.code-run-btn {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -300,6 +301,8 @@ html[data-platform='macos'] .titlebar {
   transition: opacity 0.15s, color 0.15s, border-color 0.15s;
 }
 .code-copy-btn:hover { color: var(--text); border-color: var(--border-pop); }
+/* 运行是「会把正文送到终端执行」的动作，悬停用主题色与复制区分开 */
+.code-run-btn:hover { color: var(--primary); border-color: var(--primary); }
 .code-copy-btn .cc-check { display: none; }
 .code-copy-btn.copied { color: var(--green); border-color: var(--green); opacity: 1; }
 .code-copy-btn.copied .cc-copy { display: none; }
@@ -460,7 +463,7 @@ html[data-theme='dark'] .md input[type="checkbox"]:checked {
 /* contenteditable=false 的应用控件（复制按钮、任务复选框）不参与文本拖拽与选中 */
 .md.wysiwyg-on [contenteditable="false"] { cursor: default; }
 /* 但两枚控件本身仍然可点，不能跟着上面的规则失去手型 */
-.md.wysiwyg-on .code-copy-btn, .md.wysiwyg-on input.task-cb { cursor: pointer; }
+.md.wysiwyg-on .code-copy-btn, .md.wysiwyg-on .code-run-btn, .md.wysiwyg-on input.task-cb { cursor: pointer; }
 .md.wysiwyg-on img { -webkit-user-drag: none; }
 
 /* ---------- highlight.js token 颜色（随主题切换，替代官方主题包） ---------- */

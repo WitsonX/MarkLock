@@ -15,6 +15,11 @@
 		<string>zh-Hans</string>
 		<string>zh_CN</string>
 	</array>
+	<!-- 预览代码块的「运行」按钮通过 osascript 驱动终端新开页签（Apple Events）。
+	     macOS 10.14+ 要求发送方在 Info.plist 声明用途，缺失时首次发送会被系统直接终止；
+	     首次运行时系统还会弹出「允许 MarkLock 控制终端」。 -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>MarkLock 需要控制终端，以便在你确认后于新页签中运行代码块。</string>
 	<!-- 显式声明文档类型并附带自定义图标（.icns）：Tauri 的 bundle.fileAssociations 只写关联、
 	     不写 CFBundleTypeIconFile，导致 .mdl/.mdlb 在 Finder 里回退为「通用文档 + App 图标徽标」。
 	     Tauri 合并 Info.plist 时数组整体替换，这里定义的会覆盖自动生成的版本。

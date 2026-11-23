@@ -17,6 +17,7 @@ import VaultTreeNode from '../components/VaultTreeNode.vue'
 import WorkdirNode from '../components/WorkdirNode.vue'
 import EncIcon from '../components/EncIcon.vue'
 import CodeMirrorEditor from '../components/CodeMirrorEditor.vue'
+import CodeRunDialog from '../components/CodeRunDialog.vue'
 import WindowControls from '../components/WindowControls.vue'
 import { openAboutDialog } from '../lib/aboutDialog'
 import { marked } from 'marked'
@@ -25,6 +26,7 @@ import { domToMarkdown, preserveTrailing, applyPreviewFormat, enterInTaskItem, e
 import { clearPreviewSearch, runPreviewSearch, setActivePreviewSearch } from '../lib/previewSearch'
 import { bindHoverTip } from '../lib/tooltip'
 import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
+import { runCode, runInfoOf, type RunShell } from '../lib/codeRun'
 import { scLabel } from '../lib/shortcut'
 
 // Markdown 渲染配置（marked renderer / 高亮 / 复制按钮 / 图片 asset 解析 / TODO 回改）
@@ -99,7 +101,7 @@ const menuIcon = (name: keyof typeof MENU_ICONS) =>
 
 export default defineComponent({
   name: 'EditorView',
-  components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, EncIcon, WindowControls },
+  components: { VaultTreeNode, WorkdirNode, CodeMirrorEditor, CodeRunDialog, EncIcon, WindowControls },
   data() {
     return {
       currentMode: 'split' as 'edit' | 'split' | 'preview',
@@ -350,6 +352,12 @@ export default defineComponent({
       pendingTaskSrc: '',
       pendingTaskText: '',
       pendingTaskChecked: false,
+
+      // 预览代码块「运行」确认弹窗（正文与运行环境为点击那一刻的快照；
+      // 「不再提醒」由弹窗勾选，落盘到 settings.confirmRunCode）
+      showRunConfirm: false,
+      runCodeText: '',
+      runTarget: 'bash' as RunShell,
 
       // 关闭未保存文件的确认弹窗
       showCloseConfirm: false,
@@ -2166,6 +2174,14 @@ export default defineComponent({
         this.openCodeLang(langBtn)
         return
       }
+      // 代码块运行按钮（仅 bash / PowerShell 块）：查设置决定弹窗还是直接跑
+      const runBtn = target.closest('.code-run-btn') as HTMLElement | null
+      if (runBtn) {
+        e.preventDefault()
+        e.stopPropagation()
+        this.requestRunCode(runBtn)
+        return
+      }
       // 代码块复制按钮优先拦截（button 不在 a 内，后续链接分支不会误捕）
       const copyBtn = target.closest('.code-copy-btn') as HTMLElement | null
       if (copyBtn) {
@@ -2252,6 +2268,27 @@ export default defineComponent({
       if (!f) return
       this.setContentFor(f.path, this.pendingTaskSrc)
       await this.saveActive()
+    },
+    /** 点运行：按设置决定先弹确认还是直接跑；正文取点击那一刻的代码块内容。 */
+    requestRunCode(btn: HTMLElement) {
+      const info = runInfoOf(btn)
+      if (!info) return
+      if (!this.store.settings.confirmRunCode) {
+        this.launchRun(info.shell, info.text)
+        return
+      }
+      this.runTarget = info.shell
+      this.runCodeText = info.text
+      this.showRunConfirm = true
+    },
+    /** 确认弹窗的「运行」：勾了不再提醒就落盘设置，然后执行。 */
+    submitRunConfirm(dontAsk: boolean) {
+      if (dontAsk) this.store.updateSettings({ confirmRunCode: false })
+      this.launchRun(this.runTarget, this.runCodeText)
+    },
+    /** 交给 Rust 在终端新页签里执行；失败（未装 pwsh / 拒绝自动化权限等）直接提示原因。 */
+    launchRun(shell: RunShell, text: string) {
+      runCode(shell, text).catch((err) => message.error(String(err)))
     },
     /** 复制预览代码（代码块或行内代码）到剪贴板（去掉渲染器附带的首尾换行），成功后按钮短暂变对勾「已复制」。 */
     async copyCodeBlock(btn: HTMLElement) {
@@ -8140,6 +8177,9 @@ ${bodyHtml}
         <button class="btn btn-primary" @click="submitTaskConfirm">{{ $t('common.confirm') }}</button>
       </div>
     </a-modal>
+
+    <!-- 预览代码块「运行」确认（bash / PowerShell；勾选不再提醒后直接运行） -->
+    <CodeRunDialog v-model:open="showRunConfirm" :code="runCodeText" :shell="runTarget" @run="submitRunConfirm" />
 
     <!-- 预览就地编辑：链接 / 图片地址弹窗 -->
     <a-modal v-model:open="pvLinkOpen" :title="pvLinkImage ? $t('editor.image') : $t('editor.pvLink')" :width="440" :footer="null">

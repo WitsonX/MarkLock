@@ -2,7 +2,10 @@
 import { defineComponent } from 'vue'
 import { message } from 'ant-design-vue'
 import * as tauri from '../lib/tauri'
+import { useVaultStore } from '../stores/vault'
 import { toggleTaskMarker } from '../lib/preview'
+import { runCode, runInfoOf, type RunShell } from '../lib/codeRun'
+import CodeRunDialog from './CodeRunDialog.vue'
 import { caretBelowLastBlock, caretInBlankArea, caretInListGap, markTaskCaretActivity } from '../lib/wysiwyg'
 import { applyCodeLang, codeLangOf, openCodeLangMenu } from '../lib/codeLang'
 import { isMac } from '../lib/platform'
@@ -19,6 +22,7 @@ import { t } from '../locales'
  */
 export default defineComponent({
   name: 'MarkdownPreview',
+  components: { CodeRunDialog },
   props: {
     /** 父级渲染好的 HTML（就地编辑期间父级会把它冻住，按键只改 DOM） */
     html: { type: String, default: '' },
@@ -32,6 +36,10 @@ export default defineComponent({
     return {
       // ⌘/Ctrl 按住中：编辑态链接此刻可点击打开，pv-link-hot 类给出光标/下划线提示
       linkHot: false,
+      // 「运行代码块」确认弹窗（正文与运行环境为点击那一刻的代码块快照）
+      runOpen: false,
+      runSource: '',
+      runTarget: 'bash' as RunShell,
       _onModKey: null as ((e: KeyboardEvent) => void) | null,
       _onWinBlur: null as (() => void) | null,
       _linkTipUnbind: null as (() => void) | null,
@@ -108,6 +116,13 @@ export default defineComponent({
         }
         return
       }
+      // 代码运行按钮（仅 bash / PowerShell 块）：与复制同理，排在 editable 分叉之前
+      const runBtn = target.closest('.code-run-btn') as HTMLElement | null
+      if (runBtn) {
+        e.preventDefault()
+        this.requestRunCode(runBtn)
+        return
+      }
       // 代码复制按钮（代码块 / 行内代码共用 .code-copy-btn）：编辑态同样可用，故排在 editable 分叉之前
       const btn = target.closest('.code-copy-btn') as HTMLElement | null
       if (btn) {
@@ -155,6 +170,27 @@ export default defineComponent({
         e.preventDefault()
       }
     },
+    /** 点运行：按设置决定先弹确认还是直接跑；正文与运行环境取点击那一刻的代码块内容。 */
+    requestRunCode(btn: HTMLElement) {
+      const info = runInfoOf(btn)
+      if (!info) return
+      if (!useVaultStore().settings.confirmRunCode) {
+        this.launchRun(info.shell, info.text)
+        return
+      }
+      this.runTarget = info.shell
+      this.runSource = info.text
+      this.runOpen = true
+    },
+    /** 确认弹窗的「运行」：勾了不再提醒就落盘设置，然后执行。 */
+    submitRun(dontAsk: boolean) {
+      if (dontAsk) useVaultStore().updateSettings({ confirmRunCode: false })
+      this.launchRun(this.runTarget, this.runSource)
+    },
+    /** 交给 Rust 在终端新页签里执行；失败（未装 pwsh / 拒绝自动化权限等）直接提示原因。 */
+    launchRun(shell: RunShell, text: string) {
+      runCode(shell, text).catch((err) => message.error(String(err)))
+    },
     async copyCode(btn: HTMLElement) {
       const wrap = btn.closest('.codespan-wrap')
       const code = wrap
@@ -193,4 +229,5 @@ export default defineComponent({
     @compositionstart="$emit('edit-compositionstart')"
     @compositionend="$emit('edit-compositionend')"
   ></div>
+  <CodeRunDialog v-model:open="runOpen" :code="runSource" :shell="runTarget" @run="submitRun" />
 </template>

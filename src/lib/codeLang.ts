@@ -8,6 +8,7 @@
 
 import { t } from '../locales'
 import { highlightCode } from './preview'
+import { syncRunButton } from './codeRun'
 import { codeText } from './wysiwyg'
 import { LANGS } from './codeLangs'
 
@@ -103,6 +104,8 @@ export function applyCodeLang(pre: HTMLElement, id: string): boolean {
     chip.textContent = langLabel(id)
     chip.dataset.lang = id
   }
+  // 换到 / 换出可运行语言（bash、PowerShell）时右上角的运行按钮跟着增删
+  syncRunButton(pre, id)
   const root = pre.closest('[contenteditable="true"]') as HTMLElement | null
   if (root) root.focus()
   if (offset !== null) setCaret(code, offset)

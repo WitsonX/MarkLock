@@ -10,6 +10,7 @@ export default {
     emptyFolder: 'Empty folder',
     copy: 'Copy',
     copied: 'Copied',
+    run: 'Run',
     browse: 'Browse…',
     close: 'Close',
     fd: {
@@ -55,6 +56,12 @@ export default {
     // Preview code copy buttons
     copyCodeAria: 'Copy code',
     copyInlineAria: 'Copy inline code',
+    // Preview code run button (bash / PowerShell blocks only)
+    runCodeAria: 'Run code',
+    runTitle: 'Run this code?',
+    runHint: 'The code below will run in a new {shell} terminal window / tab with your user permissions. Only run what you trust.',
+    runHintWinFallback: 'If bash (Git for Windows) is not found on this Windows machine, the code runs in PowerShell instead.',
+    runDontAsk: 'Don’t ask again — run directly next time',
     // Reveal in system file manager
     revealFinder: 'Reveal in Finder',
     revealExplorer: 'Reveal in Explorer',
@@ -707,6 +714,9 @@ export default {
       lockOnMinimize: 'Lock when window is minimized',
       lockOnSleep: 'Lock on system sleep / screen lock',
       clearClipboard: 'Clear clipboard after lock', clearClipboardD: 'Prevents decrypted content from lingering (also cleared on a timer after copying)',
+      gRun: 'Running code',
+      runConfirm: 'Confirm before running code',
+      runConfirmD: 'Show the command in a dialog when the run button on a bash / PowerShell block is clicked; turn off to run in a new terminal tab immediately',
       gData: 'Data safety',
       backup: 'Keep previous version on save', backupD: 'Writes atomically (temp file → fsync → rename) and, before overwriting, keeps an encrypted hidden backup of the previous version—guarding against crashes, power loss, and half-written syncs that could corrupt the whole vault. When off, atomic writing still applies but no backups are created',
       gDanger: 'Danger zone',

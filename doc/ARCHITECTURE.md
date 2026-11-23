@@ -224,6 +224,7 @@ src/
 | `copy_file_to(src, dest)` | 覆盖式复制到指定路径（预览点二进制附件的下载流） |
 | `open_local_file(path)` | 交系统默认应用打开磁盘上已存在的普通文件（导出成功消息的「打开文件」） |
 | `launch_local(path, args)` | 快速启动本地应用并透传启动参数（macOS `open --args`，带参时加 `-n` 另起；Windows 追加；Linux 忽略） |
+| `run_in_terminal(shell, code)` | 把代码块写进一次性的私有脚本，在终端里执行（iTerm2 开新页签，Terminal.app 新开窗口，Windows 在 Windows Terminal 已运行时 `wt new-tab`、否则直开控制台窗口，Linux 几种终端依次尝试；Windows 上没装 Git for Windows 时 bash 块改由 PowerShell 执行）；脚本目录 0700、文件 0600，跑完自删 |
 | `take_pending_open_paths()` | 取干后端缓存的「系统打开文件」路径（冷启动 / 非编辑器页跳转后各取一次） |
 | `export_pdf(html, target)` | 把自包含 HTML 交隐藏 WebView 静默渲染成 PDF 写入 target（macOS `createPDFWithConfiguration` 逐页截取 + PDFKit 合并，Windows WebView2 `PrintToPdfStream`，Linux 返回不支持） |
 | `set_show_hide_shortcut(shortcut)` | 注册 / 更换 / 清除「显示 / 隐藏主界面」的全局热键（Tauri accelerator 串，空串 = 清除）：先反注册上一个再注册新的，失败返回可读错误且不改后端记录，前端据此回滚（见 §6.12） |
@@ -418,6 +419,12 @@ src/
 - **列表缩进区与任务项项首**：列表项左侧的缩进区、以及任务项复选框之后的空白，点下去同样是元素级插入点，caret 就画到复选框左边。`caretInListGap` 先拿 `caretRangeFromPoint` 探一次：探到文本节点说明点在了字上，直接放行；否则按 y 就近选一个 `<li>`，用 `placeCaretInText` 放进首 / 尾文字，空项补一个 `\u00a0`（纯空格仍会被画到复选框左侧）。插完复选框（`applyTask`）与在任务项里回车（`enterInTaskItem`）后也按同一口径收一次。
 - **纠正窗只在动作之后开**：元素级 caret 与「方向键走到项首」在 DOM 上是同一个位置，无条件纠正会把方向键锁死。所以 `markTaskCaretActivity` 在点击与命令层动作后开一个 600ms 的窗口，挂在 `selectionchange` 上的 `normalizeTaskCaret` 只在这段时间里修正，任意按键都把它关掉，自然过期同样恢复原状；主编辑器与便签窗挂的是同一份回调。
 - **切页签整块换掉 `.md`**：旧 DOM 被 `v-html` 覆盖后，浏览器会把残余选区折成根元素上的插入点，WebKit 照样照着它画一根悬空 caret。所以 `.md` 的 `:key` 从 `assetVersion` 换成 `previewDomKey`（`activePath::assetVersion`），切页签 / 附件缓存刷新时元素连同绘制状态一起丢掉；`dropDanglingCaret` 在重注入后只清锚点确实悬空的选区，不碰 CodeMirror 与输入框。
+
+### 6.20 代码块在终端中运行
+
+- **按钮只给脚本类语言，跟着语言变**：`lib/codeRun.ts` 的 `RUN_LANGS` 只收录 bash / sh / shell / zsh（→ bash）与 powershell / ps1 / pwsh（→ PowerShell），其余语言渲染时就把按钮省掉；渲染器把 `runButtonHtml` 排在语言标签与复制按钮之间，换语言时 `applyCodeLang` 调 `syncRunButton` 增删这一颗。它和两块邻居同属 `.code-ctl` 浮动控件带、同样被 `isChrome` 跳过，所以写回源码、导出 HTML / PDF 都不会看见它；主编辑器与便签共用这套渲染与交互。
+- **确认弹窗与「不再提醒」是一条设置**：点击先读 `settings.confirmRunCode`（默认开，设置 → 安全 → 运行代码里也有同一颗开关）。开着就由 `CodeRunDialog.vue` 摊开 `code.trim()`，勾「不再提醒」提交时把 `confirmRunCode` 写成 false，此后点击直接执行；弹窗宽度随窗口收窄（最少 280px），免得窄窗里按钮被挤出屏幕。代码从 `<code>` 的 `textContent` 读，去掉首尾空行，全空则不发请求。
+- **后端只交脚本路径，不拼命令**：代码先写进 `temp_dir()/marklock-run-{pid}-{nanos}/run.sh`（Windows 为 `run.ps1`），目录 0700、文件 0600（`run.ps1` 带 UTF-8 BOM：Windows PowerShell 5.1 会把无 BOM 的脚本按 ANSI 读，中文乱码后还会错位吞掉引号、整篇解析失败）。脚本先把正文按命令行的样子灰着回显一遍（`$ ` 前缀，只作 `printf` 的参数、照旧原样执行），正文后紧跟一行退出码回显（`[MarkLock] 完成` / 失败带退出码）——`nginx -s reload` 这类静默命令不写这两样就看不出跑了哪段、跑没跑——然后 `trap` / 末尾语句停 3 秒让输出留在屏幕上，再删目录、脚本退出。命令统一加 `exec` 前缀让脚本接管页签进程——结束后页签里没有进程，关窗不会撞上 Terminal 的「要终止正在运行的进程吗」。macOS 先用一条独立 osascript 探 `application "iTerm2" is running`——没装 iTerm2 时它的脚本字典根本不存在，探不到就整条脚本编译失败——命中才在 iTerm2 里开页签 `write text`；否则交给 Terminal.app：Terminal 已在运行时用不带 `in` 的 `do script` **新开窗口**——它的 `tabs` 元素只读（`make new tab` 直接报 -10024），而 `do script … in window` 在当前系统是「在窗口当前页签里执行」，会把命令敲进用户正跑着的进程，两样都不能用；Terminal 本来没运行时先用一条独立 osascript 探 `application "Terminal" is running`，命中 false 就等 App 启动时自带的那个空窗口出现（`count of windows` 轮询，最多 5 秒），把命令 `do script … in front window` 敲进它——否则启动窗口 + `do script` 新窗口会一次冒出两个——只有窗口数不为 1（系统恢复了别的窗口或探不到）才退回新开，绝不往用户页签里注入。Terminal 分支的 osascript 不立刻退出：轮询该页签的 `busy`，脚本（含那 3 秒）一结束就按 `tty` 找回这个窗口关掉，且只关单页签窗口——用户把页签拖进别的窗口、或手动关了窗口（`busy` 报错即收工）都不动。首次会触发系统「控制终端」授权（`Info.plist` 的 `NSAppleEventsUsageDescription`）。Windows 先以 `CREATE_NO_WINDOW` 起 `tasklist` 查 `WindowsTerminal.exe`：已在运行时才 `wt -w 0 new-tab --title MarkLock` 发新页签；没在运行就直接 `CREATE_NEW_CONSOLE` 起 shell 开普通控制台窗口——WT 关掉最后一个窗口就整个退出，而我们每次跑完都自动关页签，再走 wt 就是一次冷启动（虚拟机 / 慢盘上要等好几秒才出窗口），直开窗口没有这段。bash 块先找 PATH / Git for Windows 的 `bash.exe`（按 PATH 拼路径探测，不起 `where` 进程），都没装就改用 PowerShell 执行同一段代码（脚本也随之按 PowerShell 生成，`dir` / `rm` / `nginx` 这类照常认，不再弹出「未找到 bash」）；PowerShell 不再带 `-NoExit`、脚本停 3 秒后退出，窗口随进程结束关闭，`run.ps1` 首行把 `$Host.UI.RawUI.WindowTitle` 设成 MarkLock；Linux 依次试 `x-terminal-emulator` / `gnome-terminal` / `konsole` / `xterm`，同样随进程退出收窗。代码全程只作独立参数传给 `Command`，AppleScript 里也只出现脚本路径，没有注入面。
 
 ---
 

@@ -229,6 +229,8 @@ export interface Settings {
   chromeAutoFade: boolean
   /** 预览视图是否允许就地编辑（所见即所得：改渲染结果，防抖反解析回源码） */
   previewInlineEdit: boolean
+  /** 运行 bash / PowerShell 代码块前是否弹窗确认（弹窗里的「不再提醒」勾选后置 false，可在设置里重新打开） */
+  confirmRunCode: boolean
   /** 编辑器模式：编辑 / 分屏 / 预览 */
   editorMode: 'edit' | 'split' | 'preview'
   /** 首次使用时是否已询问过「设为 .mdl/.mdlb 默认打开程序」（避免重复弹窗） */
@@ -312,6 +314,8 @@ export const DEFAULT_SETTINGS: Settings = {
   chromeAutoFade: true,
   // 预览就地编辑默认开启：这是预览视图唯一能改内容的途径，关掉就等于预览只能看
   previewInlineEdit: true,
+  // 运行代码块默认先确认：文档正文会把内容送进本机终端执行，先让用户看清再跑
+  confirmRunCode: true,
   editorMode: 'preview',
   assocPromptAsked: false,
   watchExternalChanges: true,

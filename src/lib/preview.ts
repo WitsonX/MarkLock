@@ -9,6 +9,7 @@ import hljs from 'highlight.js'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { t as translate } from '../locales'
 import { LANGS } from './codeLangs'
+import { runButtonHtml } from './codeRun'
 
 /** 代码块高亮失败时的兜底转义 */
 function escapeCode(s: string): string {
@@ -134,7 +135,8 @@ marked.use({
       const safe = /^[\w+.-]+$/.test(name) ? name : ''
       // 代码正文包一层 .code-body 管横向滚动，让 <pre> 自己 overflow: visible——
       // 否则右下角外侧的工具条会被 pre 的溢出裁剪掉（见 global.css 的 .code-ctl）
-      return `<pre><div class="code-body"><code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></div><div class="code-ctl" contenteditable="false">${CODE_LANG_BTN(safe)}${CODE_COPY_BTN()}</div></pre>\n`
+      // 运行按钮只在 bash 系 / PowerShell 代码块出现（见 lib/codeRun.ts），插在语言标签与复制之间
+      return `<pre><div class="code-body"><code class="hljs${safe ? ` language-${safe}` : ''}">${highlightCode(text, name)}</code></div><div class="code-ctl" contenteditable="false">${CODE_LANG_BTN(safe)}${runButtonHtml(safe)}${CODE_COPY_BTN()}</div></pre>\n`
     },
     // 行内代码：code 后跟复制按钮，外包 inline 容器供 CSS 悬停显现与事件定位；
     // 必须自己转义：marked 只在「默认 renderer」里对 codespan 做 escapeHtml，token.text 是原始文本，

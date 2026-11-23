@@ -2238,6 +2238,418 @@ fn launch_local(path: String, args: Vec<String>) -> Result<(), crypto::CryptoErr
     Ok(())
 }
 
+// ==================== 代码块「运行」 ====================
+
+/// 把代码块正文写进一个进程私有的临时脚本，返回（脚本目录，脚本路径）。
+///
+/// 目录 0700、脚本 0600：正文常来自解密后的文档，不能让同机其它用户读到。终端只接收
+/// 脚本路径，正文永远不拼进 AppleScript / 命令行，引号、`$`、反斜杠都原样留在文件里，
+/// 既不会被截断，也没有命令注入面。脚本结束（含 `exit`）时通过 EXIT 陷阱 / 末尾语句
+/// 连同目录自删，明文不在磁盘上久留。
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn write_temp_script(powershell: bool, code: &str) -> Result<(PathBuf, PathBuf), crypto::CryptoError> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("marklock-run-{}-{}", std::process::id(), stamp));
+    std::fs::create_dir_all(&dir).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let path = dir.join(if powershell { "run.ps1" } else { "run.sh" });
+
+    let mut body = String::new();
+    let code = code.trim_end_matches(['\r', '\n']);
+    if powershell {
+        // Windows PowerShell 5.1 对无 BOM 的 .ps1 按系统 ANSI 代码页（中文机是 GBK）读，
+        // 正文里的中文先变乱码，3 字节 UTF-8 与 ASCII 引号错位配对后整篇解析失败
+        // （报「字符串缺少终止符」）。开头写 UTF-8 BOM 才会按 UTF-8 解析；pwsh 默认
+        // 就是 UTF-8，多这个前缀也无害。
+        body.push('\u{feff}');
+        // 直接开控制台窗口（不经 wt --title）时也把标题改成 MarkLock
+        body.push_str("$Host.UI.RawUI.WindowTitle = 'MarkLock'\n");
+        let mut lines = String::new();
+        for line in code.lines() {
+            if !lines.is_empty() {
+                lines.push(',');
+            }
+            lines.push('\'');
+            lines.push_str(&line.replace('\'', "''"));
+            lines.push('\'');
+        }
+        // 先把要执行的代码按命令行样式回显一遍：静默命令（nginx -s reload）在终端里
+        // 本来一个字都不出，只有回显才能看出这次跑的是哪一段。
+        body.push_str(&format!(
+            "\nforeach ($__marklock_line in @({lines})) {{ if ($__marklock_line -ne '') {{ Write-Host \"PS> $__marklock_line\" -ForegroundColor DarkGray }} }}\n\n"
+        ));
+        body.push_str(code);
+        // 结束后先回显一行结果：nginx -s reload 这类命令本身没有输出，不写一行用户看不出跑没跑。
+        // 再停 3 秒给阅读时间，最后静默删目录。PowerShell 没有覆盖 exit 的清理钩子，
+        // 提前 exit 时跳过删除，但目录在系统临时区且只对本人可读，残留窗口很短。
+        let dir_s = format!("'{}'", dir.to_string_lossy().replace('\'', "''"));
+        // `$?` 是刚才那条语句的成败，cmdlet 报错时 `$LASTEXITCODE` 仍是旧值 /
+        // null，只看退出码会把 `Get-Item /nope` 判成成功；两者都取，前者优先。
+        body.push_str(&format!(
+            r#"
+$marklockOk = $?
+$marklockRc = $LASTEXITCODE
+if ($null -eq $marklockRc) {{ $marklockRc = 0 }}
+if ($marklockOk) {{
+  Write-Host "`n[MarkLock] 完成" -ForegroundColor Green
+}} elseif ($marklockRc -ne 0) {{
+  Write-Host "`n[MarkLock] 失败（退出码 $marklockRc）" -ForegroundColor Red
+}} else {{
+  Write-Host "`n[MarkLock] 失败" -ForegroundColor Red
+}}
+Start-Sleep -Seconds 3
+Remove-Item -LiteralPath {dir_s} -Recurse -Force -ErrorAction SilentlyContinue
+"#
+        ));
+    } else {
+        // trap 覆盖正常结束与 `exit`；rm 在脚本仍被执行时删文件也安全（fd 已打开）。
+        // 正文后紧跟退出码回显，让静默命令也有个结论；再停 3 秒让输出留在屏幕上，
+        // 然后删目录并退出——终端那边据此关窗。路径二次求值发生在双引号里，
+        // `$` / 反引号 / 反斜杠要再转义一层。
+        let dir_dq = dir
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`");
+        body.push_str(&format!("trap 'sleep 3; rm -rf \"{dir_dq}\"' EXIT\n"));
+        // 静默命令（nginx -s reload）自己一个字都不出，先把要执行的代码按命令行样式
+        // 灰着回显一遍，看得出这次跑的是哪一段。代码是 printf 的参数、只用于显示，
+        // 随后再原样落进脚本执行——别用 heredoc，那会把正文整段吃掉改成输入数据。
+        let shown = code
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| format!("'{}'", l.replace('\'', "'\\''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        body.push_str("printf '\\n'\n");
+        if !shown.is_empty() {
+            body.push_str(&format!(
+                "printf '\\033[2m$ %s\\033[0m\\n' {shown}\nprintf '\\n'\n"
+            ));
+        }
+        body.push_str(code);
+        body.push('\n');
+        body.push_str(
+            r#"
+__marklock_rc=$?
+if [ "$__marklock_rc" -eq 0 ]; then
+  printf '\n[MarkLock] 完成\n'
+else
+  printf '\n[MarkLock] 失败（退出码 %s）\n' "$__marklock_rc"
+fi
+"#,
+        );
+    }
+    std::fs::write(&path, body).map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok((dir, path))
+}
+
+/// 单引号包裹一个 shell 参数（无特殊字符时原样返回，终端里更易读）。
+#[cfg(unix)]
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@' | b'%' | b'=' | b',')
+        })
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// AppleScript 字符串字面量转义（只影响我们生成的脚本文本，正文本身不在其中）。
+#[cfg(target_os = "macos")]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// 在 PATH 里查找可执行文件（macOS / Linux 的 PowerShell Core 探测）。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn which_bin(bin: &str) -> Option<String> {
+    let out = std::process::Command::new("which").arg(bin).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_in_terminal_impl(powershell: bool, code: &str) -> Result<(), crypto::CryptoError> {
+    let (_dir, script) = write_temp_script(powershell, code)?;
+    let bin = if powershell {
+        which_bin("pwsh").ok_or_else(|| {
+            crypto::CryptoError::Io("未找到 PowerShell（pwsh），请先安装 PowerShell 7".into())
+        })?
+    } else {
+        "/bin/bash".to_string()
+    };
+    // 终端里显示成一眼能读懂的一行：`exec bash '/tmp/.../run.sh'`。
+    // `exec` 让脚本接管页签进程：脚本结束时这个页签就没有进程了，关窗不会撞上
+    // 「正在运行 bash」的确认框，iTerm2 也会按「会话结束」的配置自行收尾。
+    let cmd = applescript_escape(&format!(
+        "exec {} {}",
+        shell_quote(&bin),
+        shell_quote(&script.to_string_lossy())
+    ));
+    // 已运行 iTerm2 就在它的当前窗口开新页签（用户日常终端不被顶掉），否则交给 Terminal.app。
+    // 先单独探测、再只下发对应终端的脚本：没装 iTerm2 时它的脚本缺字典，osascript 会在
+    // 编译阶段就直接失败（即使那个分支根本不会执行），不能把两个分支写在同一个脚本里。
+    let iterm_running = std::process::Command::new("osascript")
+        .args(["-e", "application \"iTerm2\" is running"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
+    let script = if iterm_running {
+        format!(
+            r#"tell application "iTerm2"
+  activate
+  if (count of windows) = 0 then
+    create window with default profile
+  end if
+  tell current window
+    set newTab to (create tab with default profile)
+    tell current session of newTab
+      write text "{cmd}"
+    end tell
+  end tell
+end tell"#
+        )
+    } else {
+        // Terminal.app 的 AppleScript 造不出页签：`tabs` 元素只读（`make new tab` 报 -10024），
+        // 而 `do script … in window` 在当前系统是「在窗口当前页签里执行」——用户正在跑的进程
+        // 会收到我们敲进去的命令（实测过）。只有不带 in 的 `do script` 稳定新开窗口，所以
+        // Terminal.app 走新窗口，页签只在 iTerm2 里提供。
+        //
+        // Terminal 本来没运行时另有坑：启动 App 自己会弹一个空的 zsh 启动窗口，再 `do script`
+        // 又开一个，用户会看到两个窗口。这种时候等启动窗口出现，把命令敲进它（此刻不可能有
+        // 用户进程，注入是安全的），只留一个窗口；Terminal 已在运行才用不带 in 的 `do script`
+        // 新开窗口，绝不去碰用户现有页签。窗口数不为 1（比如系统恢复了别的窗口）也退回新开。
+        //
+        // 新窗口也要自己收：脚本用 `exec` 接管页签、跑完停 3 秒再退出，这里就轮询页签的
+        // `busy`，一旦静下来（脚本结束、只剩「进程已完成」）就按 tty 找到这个窗口并关掉。
+        // 只关单页签窗口，用户把页签拖进别的窗口时不动它；窗口被手动关掉时 `busy` 会报错，
+        // 直接收工，免得把复用了同一 tty 的新窗口误关。
+        let terminal_running = std::process::Command::new("osascript")
+            .args(["-e", "application \"Terminal\" is running"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            // 探不到时按已运行处理：宁可多开一个窗口，也不能往用户正跑着命令的页签里键入
+            .unwrap_or(true);
+        let launch = if terminal_running {
+            format!("set t to do script \"{cmd}\"")
+        } else {
+            format!(
+                r#"set tries to 0
+  repeat until (count of windows) > 0
+    delay 0.1
+    set tries to tries + 1
+    if tries > 50 then exit repeat
+  end repeat
+  if (count of windows) is 1 then
+    set t to do script "{cmd}" in front window
+  else
+    set t to do script "{cmd}"
+  end if"#
+            )
+        };
+        format!(
+            r#"tell application "Terminal"
+  activate
+  {launch}
+  set tv to tty of t
+  repeat
+    try
+      if not (busy of t) then exit repeat
+    on error
+      return
+    end try
+    delay 0.3
+  end repeat
+  repeat with w in (windows as list)
+    try
+      if (count of tabs of w) is 1 then
+        if (tty of selected tab of w as text) is tv then
+          close w
+        end if
+      end if
+    end try
+  end repeat
+end tell"#
+        )
+    };
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .spawn()
+        .map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn which_exe(name: &str) -> Option<PathBuf> {
+    // 不走 `where`：每次点击都要多起一个进程，PATH 里挂了网络盘 / 共享目录时还能堵上几秒；
+    // 按 PATH 直接拼路径探测文件，普通的本地目录一两次 stat 就命中。
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn run_in_terminal_impl(powershell: bool, code: &str) -> Result<(), crypto::CryptoError> {
+    let bash = if powershell {
+        None
+    } else {
+        which_exe("bash.exe")
+            .map(|p| p.to_string_lossy().to_string())
+            .or_else(|| {
+                [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files (x86)\Git\bin\bash.exe"]
+                    .iter()
+                    .find(|p| Path::new(p).is_file())
+                    .map(|p| p.to_string())
+            })
+    };
+    // 没装 Git for Windows 时不报错：改由 PowerShell（Windows 自带）执行同一段代码。
+    // `dir` / `rm` / `nginx` 这类在 PowerShell 里有别名或在 PATH 上，总比弹一个装不上
+    // 的错误强；脚本也要按 PowerShell 那份生成（trap / printf 是 bash 语法）。
+    let use_powershell = powershell || bash.is_none();
+    let (_dir, script) = write_temp_script(use_powershell, code)?;
+    let path = script.to_string_lossy().to_string();
+    let (exe, args): (String, Vec<String>) = if use_powershell {
+        let exe = if which_exe("pwsh.exe").is_some() {
+            "pwsh.exe".to_string()
+        } else {
+            "powershell.exe".to_string()
+        };
+        (
+            exe,
+            // 不加 -NoExit：脚本末尾停 3 秒后退出，窗口 / 页签随进程结束关闭
+            vec![
+                "-NoLogo".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                path,
+            ],
+        )
+    } else {
+        (bash.unwrap(), vec!["-l".into(), path])
+    };
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // Windows Terminal 关掉最后一个窗口就整个退出；我们每次跑完都自动关页签，WT 随之退出，
+    // 下一次再 `wt new-tab` 就得冷启动（虚拟机 / 慢盘上要等好几秒窗口才出来）。
+    // 所以只在它已经跑着时发新页签（瞬时），否则直接开一个控制台窗口：由系统默认终端宿主
+    // 接管，没有 AppX 激活那一段。查不出结果就按已运行处理，spawn 失败再落回窗口。
+    let wt_running = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq WindowsTerminal.exe", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .to_ascii_lowercase()
+                .contains("windowsterminal.exe")
+        })
+        .unwrap_or(true);
+    if wt_running {
+        let handed_off = std::process::Command::new("wt.exe")
+            .args(["-w", "0", "new-tab", "--title", "MarkLock"])
+            .arg(&exe)
+            .args(&args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if handed_off {
+            return Ok(());
+        }
+    }
+    std::process::Command::new(&exe)
+        .args(&args)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .spawn()
+        .map_err(|e| crypto::CryptoError::Io(e.to_string()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn run_in_terminal_impl(powershell: bool, code: &str) -> Result<(), crypto::CryptoError> {
+    let (_dir, script) = write_temp_script(powershell, code)?;
+    let bin = if powershell {
+        which_bin("pwsh").ok_or_else(|| {
+            crypto::CryptoError::Io("未找到 PowerShell（pwsh），请先安装 PowerShell 7".into())
+        })?
+    } else {
+        "bash".to_string()
+    };
+    let path = script.to_string_lossy().to_string();
+    // Linux 没有统一的「开页签」入口：按常见桌面终端依次尝试，能找到哪个用哪个
+    let attempts: [(&str, Vec<&str>); 4] = [
+        ("x-terminal-emulator", vec!["-e", &bin, &path]),
+        ("gnome-terminal", vec!["--tab", "--", &bin, &path]),
+        ("konsole", vec!["--new-tab", "-e", &bin, &path]),
+        ("xterm", vec!["-e", &bin, &path]),
+    ];
+    let mut last: Option<std::io::Error> = None;
+    for (prog, args) in attempts {
+        match std::process::Command::new(prog).args(&args).spawn() {
+            Ok(_) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(crypto::CryptoError::Io(format!(
+        "未找到可用的终端程序{}",
+        last.map(|e| format!(": {e}")).unwrap_or_default()
+    )))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn run_in_terminal_impl(_powershell: bool, _code: &str) -> Result<(), crypto::CryptoError> {
+    Err(crypto::CryptoError::Io("当前平台不支持在终端中运行代码".into()))
+}
+
+/// 预览区代码块「运行」按钮：在系统终端的新页签里执行一段 bash / PowerShell 代码。
+///
+/// 前端按代码块语言传入 `shell`（`bash` 系或 `powershell` 系），正文经
+/// `write_temp_script` 落到私有临时文件后再交给终端，代码本身不参与任何命令行拼接。
+/// 弹窗确认与「不再提醒」由前端负责（见 `components/CodeRunDialog.vue`）。
+#[tauri::command]
+fn run_in_terminal(shell: String, code: String) -> Result<(), crypto::CryptoError> {
+    let shell = shell.trim().to_ascii_lowercase();
+    let powershell = match shell.as_str() {
+        "bash" | "sh" | "shell" | "zsh" => false,
+        "powershell" | "pwsh" | "ps1" => true,
+        other => {
+            return Err(crypto::CryptoError::Io(format!(
+                "不支持在终端中运行的语言: {other}"
+            )))
+        }
+    };
+    if code.trim().is_empty() {
+        return Err(crypto::CryptoError::Io("代码块为空".into()));
+    }
+    run_in_terminal_impl(powershell, &code)
+}
+
 /// 快速启动项的显示名（macOS 走 NSWorkspace、Windows 走 PowerShell 取本地化应用名；其他平台回退 None，由前端用文件名兜底）。
 #[tauri::command]
 fn app_display_name(path: String) -> Option<String> {
@@ -3301,6 +3713,7 @@ pub fn run() {
             write_encrypted_asset,
             copy_encrypted_asset,
             materialize_vault_assets,
+            run_in_terminal,
             sync_native_menu,
             set_native_menu_lang
         ])
