@@ -55,20 +55,23 @@ export default defineComponent({
     this._onWinBlur = () => { this.linkHot = false }
     window.addEventListener('blur', this._onWinBlur)
     // 编辑态链接的悬停提示（与主编辑器同语义；v-html 内容绑不了 v-tip，走委托气泡）
-    this._linkTipUnbind = bindHoverTip(this.$el as HTMLElement, {
-      pick: (tg) => {
-        if (!this.editable) return null
-        const a = tg.closest('a') as HTMLAnchorElement | null
-        // # 锚点普通点击就能页内滚动，不需要「按住修饰键」提示
-        if (!a || (a.getAttribute('href') || '').startsWith('#')) return null
-        return a
-      },
-      text: () =>
-        this.linkHot
-          ? t('editor.pvLinkOpenTip')
-          : t('editor.pvLinkTip', { mod: isMac ? '⌘' : 'Ctrl' }),
-      enabled: () => this.editable,
-    })
+    const root = this.mdRoot()
+    if (root) {
+      this._linkTipUnbind = bindHoverTip(root, {
+        pick: (tg) => {
+          if (!this.editable) return null
+          const a = tg.closest('a') as HTMLAnchorElement | null
+          // # 锚点普通点击就能页内滚动，不需要「按住修饰键」提示
+          if (!a || (a.getAttribute('href') || '').startsWith('#')) return null
+          return a
+        },
+        text: () =>
+          this.linkHot
+            ? t('editor.pvLinkOpenTip')
+            : t('editor.pvLinkTip', { mod: isMac ? '⌘' : 'Ctrl' }),
+        enabled: () => this.editable,
+      })
+    }
   },
   unmounted() {
     if (this._onModKey) {
@@ -79,6 +82,12 @@ export default defineComponent({
     if (this._linkTipUnbind) this._linkTipUnbind()
   },
   methods: {
+    /** 正文 `.md` 元素。组件模板是多根节点（正文 + 运行确认弹窗），Fragment 的 `$el` 只是
+     *  一个文本锚点，拿不到正文——本组件与宿主（便签）都必须经这里取。 */
+    mdRoot(): HTMLElement | null {
+      const el = this.$refs.mdEl
+      return el instanceof HTMLElement ? el : null
+    },
     /** 点最后一个块下方的空白时把光标落到块后（代码块 / 表格底下没有可落笔的段落，
      *  浏览器会把光标塞回块里）；点正文根的内边距区则落进首 / 末块：与主编辑器 `onPreviewMousedown`
      *  同一套逻辑，避免把光标放到 `.md` 容器根上（WebKit 会把它画到容器左上角，且点不掉）。 */
@@ -94,7 +103,8 @@ export default defineComponent({
       }
       // 任务复选框是控件：这次 mousedown 不该把光标挪进列表项（click 照常翻转勾选）
       if (target?.closest('input.task-cb')) return
-      const root = this.$el as HTMLElement
+      const root = this.mdRoot()
+      if (!root) return
       const t = target
       if (t !== root && !t?.classList.contains('mb') && !t?.closest('ul,ol')) return
       if (caretBelowLastBlock(root, e.clientY)) e.preventDefault()
@@ -216,6 +226,7 @@ export default defineComponent({
 
 <template>
   <div
+    ref="mdEl"
     class="md md-preview"
     :class="{ 'wysiwyg-on': editable, 'pv-link-hot': linkHot }"
     spellcheck="false"

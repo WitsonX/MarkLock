@@ -274,10 +274,11 @@ export default defineComponent({
     },
 
     // ---------- 预览就地编辑（与主编辑器同一套语义） ----------
-    /** contenteditable 的那块 `.md` 是 MarkdownPreview 的根元素（单根组件，直接取 $el）。 */
+    /** contenteditable 的那块 `.md` 由子组件显式暴露：MarkdownPreview 是多根节点（正文 + 运行确认弹窗），
+     *  Fragment 的 `$el` 只是文本锚点，拿不到正文元素。 */
     previewMdEl(): HTMLElement | null {
-      const el = (this.$refs.previewMd as unknown as { $el?: Element } | null)?.$el
-      return el instanceof HTMLElement ? el : null
+      const comp = this.$refs.previewMd as unknown as { mdRoot?: () => HTMLElement | null } | null
+      return comp?.mdRoot?.() ?? null
     },
     /** 编辑期每次输入后防抖回写：只更新正文（记脏、供保存），不动 DOM，光标不受影响。 */
     onPreviewEditInput() {
