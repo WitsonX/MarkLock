@@ -1645,6 +1645,21 @@ fn show_main_window(app: tauri::AppHandle) {
     }
 }
 
+/// 隐藏主窗口到托盘 / 菜单栏（程序继续驻留）：锁定页签下连按 ⌘W 的第二下由前端调用。
+/// 与 `CloseRequested` 的 `CLOSE_TO_TRAY` 分支落点相同，但这是一次显式动作，不受该开关影响。
+/// 托盘不存在时返回错误、窗口保持可见——前端设置里的 `showTrayIcon` 可能开启但图标创建失败，
+/// 真藏起来在 Windows / Linux 上就没有任何入口能唤回了。
+#[tauri::command]
+fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if app.tray_by_id(TRAY_ID).is_none() {
+        return Err("tray unavailable".into());
+    }
+    let Some(win) = app.get_webview_window(MAIN_WINDOW) else {
+        return Ok(());
+    };
+    win.hide().map_err(|e| e.to_string())
+}
+
 /// 设置 / 更新「显示 / 隐藏主界面」的全局快捷键。`shortcut` 为 Tauri accelerator 字符串
 /// （如 `CmdOrCtrl+Alt+H`）；空串表示清除（反注册旧值）。先反注册上一个再注册新值，
 /// 注册失败（解析错误或已被系统占用）时返回可读错误，且不改动已存记录，便于前端回滚提示。
@@ -1773,6 +1788,8 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
     let workdir_toggle = MenuItemBuilder::with_id("menu:workdir-toggle", ml("打开工作目录", "Open Working Directory")).build(handle)?;
     let save = MenuItemBuilder::with_id("menu:save", ml("保存", "Save")).accelerator("Cmd+S").build(handle)?;
     let close_tab = MenuItemBuilder::with_id("menu:close-tab", ml("关闭页签", "Close Tab")).accelerator("Cmd+W").build(handle)?;
+    // 强制关闭：跳过页签锁定（锁定后 ⌘W / 关闭其它 / 全部 / 已保存都会保留该页签）
+    let force_close_tab = MenuItemBuilder::with_id("menu:force-close-tab", ml("强制关闭页签", "Force Close Tab")).accelerator("Cmd+Shift+W").build(handle)?;
     // 三项导出收进「导出」子菜单（与应用内右键/节点菜单的层级一致）；主菜单的「导入/导出」分组保持平铺。
     let export_submenu = SubmenuBuilder::new(handle, ml("导出", "Export"))
         .text("menu:export-html", ml("导出 HTML…", "Export HTML…"))
@@ -1790,6 +1807,7 @@ fn install_native_menu(handle: &tauri::AppHandle) -> tauri::Result<()> {
         .separator()
         .item(&save)
         .item(&close_tab)
+        .item(&force_close_tab)
         .separator()
         .text("menu:batch-encrypt", ml("批量加密文件…", "Batch Encrypt Files…"))
         .text("menu:import-dir", ml("导入目录到库…", "Import Directory to Vault…"))
@@ -3667,6 +3685,7 @@ pub fn run() {
             sticky_is_active,
             open_settings,
             show_main_window,
+            hide_main_window,
             set_show_hide_shortcut,
             sticky_engage,
             set_sticky_corner,

@@ -56,11 +56,11 @@ export function highlightCode(text: string, lang: string): string {
  *  文字/状态切换由 CSS 与 .copied 类驱动；绝对定位不参与 pre 文本流，textContent 复制不受影响。
  *  contenteditable=false 是就地编辑（预览模式所见即所得）的要求：按钮属于界面控件而不是正文，
  *  既不能被光标插进去打字，也要在拖拽选区时不被当成正文删掉；序列化侧按类名整体跳过。 */
-const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = translate('editor.copyCodeAria')) => `<button type="button" contenteditable="false" class="code-copy-btn" aria-label="${aria}" title="${txt}"><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">${txt}</span></button>`
+const CODE_COPY_BTN = (txt: string = translate('common.copy'), aria: string = translate('editor.copyCodeAria'), tip = '') => `<button type="button" contenteditable="false" class="code-copy-btn" aria-label="${aria}"${tip ? ` title="${escAttr(tip)}"` : ''}><svg class="cc-ico cc-copy" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 3.5v-.5a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h.5"/></svg><svg class="cc-ico cc-check" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5 6.5 12 13 4.5"/></svg><span class="cc-txt">${txt}</span></button>`
 
 /** 行内代码复制按钮：复用 .code-copy-btn 状态类（.cc-txt 由 CSS 隐藏只留图标），
  *  与 code 同为 .codespan-wrap 的兄弟节点，选中 code 文本时不会带入按钮文字。 */
-const INLINE_COPY_BTN = () => CODE_COPY_BTN(translate('common.copy'), translate('editor.copyInlineAria'))
+const INLINE_COPY_BTN = () => CODE_COPY_BTN(translate('common.copy'), translate('editor.copyInlineAria'), translate('common.copy'))
 
 /** 代码块右上角的浮动控件带：语言标签 + 复制按钮（见 `lib/codeLang.ts` 的 `openCodeLangMenu`）。
  *  平时隐藏，鼠标移到代码块（或控件拿到焦点、菜单开着）才浮出；绝对定位浮在代码上方，

@@ -31,7 +31,7 @@ export function runButtonHtml(lang: string): string {
   if (!runShellOf(lang)) return ''
   const txt = translate('common.run')
   const aria = translate('editor.runCodeAria')
-  return `<button type="button" contenteditable="false" class="code-run-btn" aria-label="${aria}" title="${txt}"><svg class="cc-ico" viewBox="0 0 16 16" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true"><path d="M5.2 3.3c0-.5.55-.8.98-.54l6.2 3.98c.42.27.42.88 0 1.15l-6.2 3.98a.64.64 0 0 1-.98-.54z"/></svg><span class="cc-txt">${txt}</span></button>`
+  return `<button type="button" contenteditable="false" class="code-run-btn" aria-label="${aria}"><svg class="cc-ico" viewBox="0 0 16 16" width="12" height="12" fill="currentColor" stroke="none" aria-hidden="true"><path d="M5.2 3.3c0-.5.55-.8.98-.54l6.2 3.98c.42.27.42.88 0 1.15l-6.2 3.98a.64.64 0 0 1-.98-.54z"/></svg><span class="cc-txt">${txt}</span></button>`
 }
 
 /** 代码块语言变了（就地编辑里改围栏）后增删运行按钮：插在复制按钮之前，保持「语言 / 运行 / 复制」次序。 */

@@ -66,6 +66,8 @@ export interface OpenFile {
    * 预览时作为相对图片链接的基准目录，替代明文 `.dat`；锁定后后端会清除该缓存。
    */
   assetDir?: string
+  /** 页签已锁定：Cmd+W / 关闭其它 / 关闭全部 / 关闭已保存都跳过，需强制关闭（⌘⇧W） */
+  pinned?: boolean
 }
 
 /** 一个最近打开的文件条目 */
@@ -93,6 +95,8 @@ export interface ClosedTab {
   dirty: boolean
   /** 仅草稿（isNew）保存正文，普通页签按路径重开即可 */
   content: string
+  /** 关闭前是否处于锁定状态，撤销重开时恢复 */
+  pinned?: boolean
 }
 
 /** 库色板（循环使用） */
@@ -453,6 +457,8 @@ interface OpenFileMeta {
   encrypted: boolean
   /** 单文件库内文件的相对路径（仅单文件库有效） */
   relPath?: string
+  /** 页签锁定状态（跨启动保留） */
+  pinned?: boolean
 }
 
 function loadOpenFiles(): OpenFileMeta[] {
@@ -605,6 +611,7 @@ export const useVaultStore = defineStore('vault', {
           vaultId: f.vaultId,
           encrypted: f.encrypted,
           relPath: f.relPath || '',
+          pinned: !!f.pinned,
         }))
       localStorage.setItem(OPEN_FILES_KEY, JSON.stringify(meta))
     },
@@ -1259,6 +1266,7 @@ export const useVaultStore = defineStore('vault', {
         isNew: f.isNew,
         dirty: f.dirty,
         content: f.isNew ? f.content : '',
+        pinned: !!f.pinned,
       }))
       this.recentlyClosed = [...snaps.reverse(), ...this.recentlyClosed].slice(0, 20)
     },
@@ -1283,6 +1291,7 @@ export const useVaultStore = defineStore('vault', {
         dirty: t.dirty,
         content: t.content,
         relPath: '',
+        pinned: !!t.pinned,
       }
       this.openFiles.push(file)
       this.activePath = file.path
@@ -1300,8 +1309,19 @@ export const useVaultStore = defineStore('vault', {
       this.persistRecent()
     },
 
-    closeFile(path: string) {
-      this.noteClosedTabs(this.openFiles.filter((f) => f.path === path))
+    /** 锁定 / 取消锁定页签。锁定后常规关闭操作一律跳过，仅强制关闭（⌘⇧W）生效。 */
+    togglePinFile(path: string) {
+      const f = this.openFiles.find((x) => x.path === path)
+      if (!f) return
+      f.pinned = !f.pinned
+      this.persistOpenFiles()
+    },
+
+    /** 关闭单个页签；force=true 时无视锁定（强制关闭 / 文件已从磁盘删除）。返回是否真的关闭。 */
+    closeFile(path: string, force = false) {
+      const target = this.openFiles.find((f) => f.path === path)
+      if (!target || (target.pinned && !force)) return false
+      this.noteClosedTabs([target])
       this.openFiles = this.openFiles.filter((f) => f.path !== path)
       if (this.activePath === path) {
         const next = this.openFiles[this.openFiles.length - 1]
@@ -1309,28 +1329,36 @@ export const useVaultStore = defineStore('vault', {
         this.activeVaultId = next ? next.vaultId : ''
       }
       this.persistOpenFiles()
+      return true
     },
 
-    /** 关闭除指定页签外的其它所有页签。 */
-    closeOthers(path: string) {
-      this.noteClosedTabs(this.openFiles.filter((f) => f.path !== path))
-      this.openFiles = this.openFiles.filter((f) => f.path === path)
-      const kept = this.openFiles[0]
-      this.activePath = kept ? kept.path : ''
-      this.activeVaultId = kept ? kept.vaultId : ''
+    /** 关闭除指定页签外的其它所有页签（锁定的页签保留，force=true 时一并关闭）。 */
+    closeOthers(path: string, force = false) {
+      const keep = this.openFiles.filter((f) => f.path === path || (f.pinned && !force))
+      if (keep.length === this.openFiles.length) return false
+      this.noteClosedTabs(this.openFiles.filter((f) => !keep.includes(f)))
+      this.openFiles = keep
+      const target = keep.find((f) => f.path === path)
+      const act = target || keep.find((f) => f.path === this.activePath) || keep[keep.length - 1]
+      this.activePath = act ? act.path : ''
+      this.activeVaultId = act ? act.vaultId : ''
       this.persistOpenFiles()
+      return true
     },
 
-    /** 关闭所有已保存（无未保存修改）的页签，保留 dirty 项。 */
-    closeSaved() {
-      this.noteClosedTabs(this.openFiles.filter((f) => !f.dirty))
-      this.openFiles = this.openFiles.filter((f) => f.dirty)
+    /** 关闭所有已保存（无未保存修改）的页签，保留 dirty 与锁定的页签（force=true 时锁定也关）。 */
+    closeSaved(force = false) {
+      const keep = this.openFiles.filter((f) => f.dirty || (f.pinned && !force))
+      if (keep.length === this.openFiles.length) return false
+      this.noteClosedTabs(this.openFiles.filter((f) => !keep.includes(f)))
+      this.openFiles = keep
       if (!this.openFiles.some((f) => f.path === this.activePath)) {
         const next = this.openFiles[this.openFiles.length - 1]
         this.activePath = next ? next.path : ''
         this.activeVaultId = next ? next.vaultId : ''
       }
       this.persistOpenFiles()
+      return true
     },
 
     /** 保存当前文件内容（加密写回或明文写回）。 */
@@ -1488,6 +1516,7 @@ export const useVaultStore = defineStore('vault', {
         dirty: false,
         content: '',
         relPath: m.relPath || '',
+        pinned: !!m.pinned,
       }
       this.openFiles.push(file)
       this.persistOpenFiles()
@@ -1534,11 +1563,17 @@ export const useVaultStore = defineStore('vault', {
           } else {
             await this.openPlainFile(m.path, m.name)
           }
+          // 页签锁定状态随会话恢复（各 open* 不感知持久化元信息，这里统一补回）
+          if (m.pinned) {
+            const t = this.openFiles.find((f) => f.path === m.path)
+            if (t) t.pinned = true
+          }
           restored++
         } catch {
           // 文件已不存在/无权限：跳过该页签
         }
       }
+      if (restored) this.persistOpenFiles()
       return restored
     },
   },

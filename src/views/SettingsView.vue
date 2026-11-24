@@ -1257,6 +1257,10 @@ greet('MarkLock');`
               <div class="info"><div class="t">{{ $t('settings.keys.closeTab') }}</div><div class="d">{{ modKey }} + W</div></div>
               <span><span class="kbd">{{ modKey }}</span> <span class="kbd">W</span></span>
             </div>
+            <div class="row" data-key="kb-force-close" data-keywords="强制关闭页签 锁定 force close tab lock">
+              <div class="info"><div class="t">{{ $t('settings.keys.forceCloseTab') }}</div><div class="d">{{ modKey }} + ⇧ + W</div></div>
+              <span><span class="kbd">{{ modKey }}</span> <span class="kbd">⇧</span> <span class="kbd">W</span></span>
+            </div>
             <div class="row" data-key="kb-reopen" data-keywords="撤销关闭 重新打开 reopen undo 页签">
               <div class="info"><div class="t">{{ $t('settings.keys.reopenTab') }}</div><div class="d">{{ $t('settings.keys.reopenTabD', { mod: modKey }) }}</div></div>
               <span><span class="kbd">{{ modKey }}</span> <span class="kbd">⇧</span> <span class="kbd">T</span></span>

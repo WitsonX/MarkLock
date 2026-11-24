@@ -228,6 +228,11 @@ export function showMainWindow() {
   return invoke<void>('show_main_window')
 }
 
+/** 隐藏主窗口到托盘 / 菜单栏（程序继续驻留）：锁定页签下连按 ⌘W 的第二下由编辑器调用。 */
+export function hideMainWindow() {
+  return invoke<void>('hide_main_window')
+}
+
 /** 设置 / 更新「显示 / 隐藏主界面」的全局快捷键；`shortcut` 为 Tauri accelerator 字符串，
  *  空串表示清除。注册失败（解析错误 / 已被系统占用）时后端返回可读错误供前端提示并回滚。 */
 export function setShowHideShortcut(shortcut: string) {

@@ -426,6 +426,13 @@ src/
 - **确认弹窗与「不再提醒」是一条设置**：点击先读 `settings.confirmRunCode`（默认开，设置 → 安全 → 运行代码里也有同一颗开关）。开着就由 `CodeRunDialog.vue` 摊开 `code.trim()`，勾「不再提醒」提交时把 `confirmRunCode` 写成 false，此后点击直接执行；弹窗宽度随窗口收窄（最少 280px），免得窄窗里按钮被挤出屏幕。代码从 `<code>` 的 `textContent` 读，去掉首尾空行，全空则不发请求。
 - **后端只交脚本路径，不拼命令**：代码先写进 `temp_dir()/marklock-run-{pid}-{nanos}/run.sh`（Windows 为 `run.ps1`），目录 0700、文件 0600（`run.ps1` 带 UTF-8 BOM：Windows PowerShell 5.1 会把无 BOM 的脚本按 ANSI 读，中文乱码后还会错位吞掉引号、整篇解析失败）。脚本先把正文按命令行的样子灰着回显一遍（`$ ` 前缀，只作 `printf` 的参数、照旧原样执行），正文后紧跟一行退出码回显（`[MarkLock] 完成` / 失败带退出码）——`nginx -s reload` 这类静默命令不写这两样就看不出跑了哪段、跑没跑——然后 `trap` / 末尾语句停 3 秒让输出留在屏幕上，再删目录、脚本退出。命令统一加 `exec` 前缀让脚本接管页签进程——结束后页签里没有进程，关窗不会撞上 Terminal 的「要终止正在运行的进程吗」。macOS 先用一条独立 osascript 探 `application "iTerm2" is running`——没装 iTerm2 时它的脚本字典根本不存在，探不到就整条脚本编译失败——命中才在 iTerm2 里开页签 `write text`；否则交给 Terminal.app：Terminal 已在运行时用不带 `in` 的 `do script` **新开窗口**——它的 `tabs` 元素只读（`make new tab` 直接报 -10024），而 `do script … in window` 在当前系统是「在窗口当前页签里执行」，会把命令敲进用户正跑着的进程，两样都不能用；Terminal 本来没运行时先用一条独立 osascript 探 `application "Terminal" is running`，命中 false 就等 App 启动时自带的那个空窗口出现（`count of windows` 轮询，最多 5 秒），把命令 `do script … in front window` 敲进它——否则启动窗口 + `do script` 新窗口会一次冒出两个——只有窗口数不为 1（系统恢复了别的窗口或探不到）才退回新开，绝不往用户页签里注入。Terminal 分支的 osascript 不立刻退出：轮询该页签的 `busy`，脚本（含那 3 秒）一结束就按 `tty` 找回这个窗口关掉，且只关单页签窗口——用户把页签拖进别的窗口、或手动关了窗口（`busy` 报错即收工）都不动。首次会触发系统「控制终端」授权（`Info.plist` 的 `NSAppleEventsUsageDescription`）。Windows 先以 `CREATE_NO_WINDOW` 起 `tasklist` 查 `WindowsTerminal.exe`：已在运行时才 `wt -w 0 new-tab --title MarkLock` 发新页签；没在运行就直接 `CREATE_NEW_CONSOLE` 起 shell 开普通控制台窗口——WT 关掉最后一个窗口就整个退出，而我们每次跑完都自动关页签，再走 wt 就是一次冷启动（虚拟机 / 慢盘上要等好几秒才出窗口），直开窗口没有这段。bash 块先找 PATH / Git for Windows 的 `bash.exe`（按 PATH 拼路径探测，不起 `where` 进程），都没装就改用 PowerShell 执行同一段代码（脚本也随之按 PowerShell 生成，`dir` / `rm` / `nginx` 这类照常认，不再弹出「未找到 bash」）；PowerShell 不再带 `-NoExit`、脚本停 3 秒后退出，窗口随进程结束关闭，`run.ps1` 首行把 `$Host.UI.RawUI.WindowTitle` 设成 MarkLock；Linux 依次试 `x-terminal-emulator` / `gnome-terminal` / `konsole` / `xterm`，同样随进程退出收窗。代码全程只作独立参数传给 `Command`，AppleScript 里也只出现脚本路径，没有注入面。
 
+### 6.21 页签锁定
+
+- 页签右键的「锁定页签」把 `OpenFile.pinned` 置真，与加密文件的 `locked`（未解锁占位）不是一回事：它只改关闭策略。`pinned` 随 `marklock.openFiles` 持久化，撤销关闭栈 `ClosedTab` 也带着它，重开页签 / 重启应用后仍保持锁定。
+- 拦截点放在 store 而不是按钮上：`closeFile` / `closeOthers` / `closeSaved` 一律跳过 `pinned`，只有 `force=true` 才关；「关闭全部」由 `forceCloseAll` 与 `closeKeepDirtyDrafts` 保留锁定页签，未保存确认只统计真正会关掉的那些。于是页签 ✕、侧栏 ✕、右键菜单、`⌘W`（macOS 走原生菜单 `menu:close-tab`，Win/Linux 走窗口 keydown）走哪条入口结果都一致。
+- 入口与反馈：页签栏与侧栏把 ✕ 换成常显的图钉图标（不用挂锁——挂锁在应用里已专指加密 / 未解锁，同形会混淆两层语义），点击解锁；`⌘⇧W` 强制关闭（macOS 原生菜单 `menu:force-close-tab` + Win/Linux keydown 两条），有未保存内容仍先弹原有确认；普通关闭被锁挡住时 toast 提示该快捷键。删除文件、移出库这类「源已不存在」的关闭显式传 `force=true`，不会留下指向空路径的锁定页签。
+- **连按 `⌘W` 收进托盘**：锁定页签第一次被快捷键挡下时，记下页签路径与时间戳并 toast（托盘图标开着时文案顺带提示再按一次）；3 秒内对同一页签再按一次，前端调 `hide_main_window` 隐藏主窗口，程序继续驻留、从托盘 / Dock 唤回。只有快捷键入口参与：页签 ✕、侧栏 ✕ 与右键菜单始终只提示；`showTrayIcon` 关闭、或托盘实际创建失败（后端 `hide_main_window` 查不到托盘会拒绝）时也退回每次都只 toast。第二步不弹确认、不动页签与会话。
+
 ---
 
 ## 七、演进时间线（2026-09-24 起）
@@ -562,6 +569,8 @@ Rust 侧 `cargo test --lib`，覆盖：
 > 代码块的就地编辑与阅读态淡出同样只能真机验：前者依赖 WebKit 在 `<pre>` 里的选区与 execCommand 行为，后者依赖真实的鼠标坐标。手工至少覆盖五条——① 点语言标签换一个新语言，高亮跟着换、光标仍停在原处，保存后再打开围栏信息正确；② 代码块里 Tab / Shift+Tab 对单行与多行选区都只动行首，按住 ⌘/Ctrl 的 Tab 不被接管；③ 代码块里回车只落一个换行、不新增第二个代码块，块级插入（表格 / 分隔线 / 新代码块）在块内无效果；④ 代码块是末块时点它下方空白能继续写字，粘贴图片落在粘贴处而不是编辑器光标；⑤ 预览态把鼠标从正文移到窗口外，两栏依次由半透明收起，移回正文再淡出，移到顶部 / 底部显形。
 
 > Windows 无边框窗与前端的快捷键文案只能真机验：`cargo build` 在 mac 上根本编译不到 `#[cfg(target_os="windows")]` 分支，`scLabel` 也只按 UA 分流。手工至少覆盖四条——① 三键各自生效，点关闭走的是托盘 / 未保存确认而不是直接退出；② 拖四边 / 四角都能缩放，双击标题栏最大化，最大化后右上角直接是关闭键；③ Windows 上提示与右键菜单显示 `Ctrl+…`、mac 仍是 `⌘`；④ `⌘` / `Ctrl`+`⇧`+`E` 在编辑 / 分屏 / 预览与便签四种状态下都落到预期模式。
+
+> 页签锁定的关闭拦截与强制快捷键也只能真机验（原生菜单加速键在 AppKit 层拦截）：① 锁定后 `⌘W`、页签与侧栏的 ✕、「关闭其它」「关闭全部」「关闭已保存」都不关它；② `⌘⇧W` 能关掉，脏内容先弹确认；③ 页签上的图钉图标点击能解锁；④ 重启应用后锁定状态仍在（锁定 + 撤销重开也只恢复一次）；⑤ 托盘图标开着时对锁定页签 3 秒内连按两次 `⌘W`，第二下把窗口收进托盘；第一下后等过 3 秒再按仍只提示；关掉托盘图标后第二下也只提示。
 
 ---
 

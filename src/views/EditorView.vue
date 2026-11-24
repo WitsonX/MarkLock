@@ -69,6 +69,8 @@ const MENU_ICONS: Record<string, string> = {
   star: '<path d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
   starFilled: '<path fill="currentColor" stroke="none" d="M12 3l2.7 5.7 6.1.7-4.5 4.1 1.2 6-5.5-3-5.5 3 1.2-6L3.2 9.4l6.1-.7z" />',
   reveal: '<path d="M11 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" /><path d="M14 4h6v6" /><path d="M20 4l-8.5 8.5" />',
+  // 页签固定用图钉、不用挂锁：挂锁在应用里已专指「加密 / 未解锁」，同形会让两层语义混淆
+  pin: '<g transform="translate(12 12) rotate(45) scale(0.94) translate(-12 -12)"><path fill="currentColor" stroke="none" d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" /></g>',
   // 导出（从托盘向上送出）与撤销关闭（回旋箭头）：子菜单入口与「可恢复的关闭」两处语义标识
   export: '<path d="M12 15V4" /><path d="M8 8l4-4 4 4" /><path d="M5 13v5a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-5" />',
   undo: '<path d="M4 9h11a5 5 0 0 1 0 10h-6" /><path d="M8 5L4 9l4 4" />',
@@ -86,6 +88,7 @@ const MENU_ICON_COLORS: Record<string, string> = {
   export: '#4a9e8f',
   undo: '#8a919e',
   lock: '#c99a3f',
+  pin: '#8a919e',
   star: '#c9a227',
   starFilled: '#e0a92b',
   close: '#d0685f',
@@ -290,6 +293,9 @@ export default defineComponent({
       _autoSaveTimer: null as ReturnType<typeof setInterval> | null,
       // saveActive 的 in-flight 互斥标志：Ctrl/⌘S 多路径并发命中时防重复写盘/toast
       _savingActive: false,
+      // 锁定页签连按 ⌘W：记录上一下落在哪个页签、何时（3 秒内再按同一页签收进托盘）
+      _pinWPath: '',
+      _pinWAt: 0,
       _onVisChange: null as (() => void) | null,
       _onSidebarMousemove: null as ((e: MouseEvent) => void) | null,
       _onSidebarMouseup: null as ((e: MouseEvent) => void) | null,
@@ -365,7 +371,7 @@ export default defineComponent({
       closeConfirmTitle: translate('editor.closeUnsavedTitle'),
       closeConfirmDiscard: translate('editor.discard'),
       closeConfirmSave: translate('editor.save'),
-      pendingClose: null as null | { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[] },
+      pendingClose: null as null | { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[]; force?: boolean },
       // 当前确认弹窗是针对“退出应用”而非“关闭页签”
       pendingQuit: false,
 
@@ -1174,11 +1180,19 @@ export default defineComponent({
         this.saveActive()
       }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && (e.key === 'w' || e.key === 'W')) {
-        // 有打开页签才拦截，否则放行（允许系统关闭窗口）
+        // 有打开页签才拦截，否则放行（允许系统关闭窗口）；按住不放的重复事件不参与「连按」判定
         if (this.store.openFiles.length > 0) {
           e.preventDefault()
           const cur = this.store.activePath
-          if (cur) this.closeFile(cur)
+          if (cur && !e.repeat) this.closeFile(cur, true)
+        }
+      }
+      // Cmd/Ctrl+Shift+W：强制关闭当前页签（无视页签锁定）
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 'w' || e.key === 'W')) {
+        if (this.store.openFiles.length > 0) {
+          e.preventDefault()
+          const cur = this.store.activePath
+          if (cur) this.forceCloseFile(cur)
         }
       }
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && (e.key === 't' || e.key === 'T')) {
@@ -1670,7 +1684,8 @@ export default defineComponent({
         case 'menu:new-vault': this.openCreateVault(); break
         case 'menu:open-file': this.openFileAction(); break
         case 'menu:save': this.saveActive(); break
-        case 'menu:close-tab': { const p = this.store.activePath; if (p) this.closeFile(p); break }
+        case 'menu:close-tab': { const p = this.store.activePath; if (p) this.closeFile(p, true); break }
+        case 'menu:force-close-tab': { const p = this.store.activePath; if (p) this.forceCloseFile(p); break }
         case 'menu:batch-encrypt': this.openBatchEncrypt(); break
         case 'menu:import-dir': this.openImportDir(); break
         case 'menu:export-html': this.exportHtml(); break
@@ -2815,28 +2830,71 @@ export default defineComponent({
       if (f.isNew && f.content.trim() === '') return false
       return true
     },
-    /** 关闭单个页签：存在未保存修改则先确认。 */
-    closeFile(path: string) {
+    /** 关闭单个页签：锁定的页签不响应，存在未保存修改则先确认。
+     *  走快捷键（⌘/Ctrl+W）且托盘可用时，3 秒内对同一锁定页签再按一次改为收起窗口到托盘。 */
+    closeFile(path: string, viaShortcut = false) {
       this.flushPreviewDom()
       const f = this.openFiles.find((x) => x.path === path)
-      if (!f || !this.needsClose(f)) {
+      if (!f) return
+      if (f.pinned) {
+        const tray = this.store.settings.showTrayIcon
+        if (viaShortcut && tray && this._pinWPath === path && Date.now() - this._pinWAt < 3000) {
+          this._pinWPath = ''
+          this._pinWAt = 0
+          // 托盘实际不可用（图标创建失败）时保持窗口可见，退回到普通提示
+          tauri.hideMainWindow().catch(() => {
+            message.info(this.$t('toast.tabPinned', { sc: this.sc('⌘⇧W') }))
+          })
+          return
+        }
+        this._pinWPath = viaShortcut ? path : ''
+        this._pinWAt = viaShortcut ? Date.now() : 0
+        if (viaShortcut && tray) {
+          message.info(this.$t(isMac ? 'toast.tabPinnedTrayMac' : 'toast.tabPinnedTray', {
+            close: this.sc('⌘W'),
+            force: this.sc('⌘⇧W'),
+          }))
+        } else {
+          message.info(this.$t('toast.tabPinned', { sc: this.sc('⌘⇧W') }))
+        }
+        return
+      }
+      this._pinWPath = ''
+      this._pinWAt = 0
+      if (!this.needsClose(f)) {
         this.store.closeFile(path)
         return
       }
       this.openCloseConfirm({ kind: 'one', path, files: [f] })
     },
-    /** 关闭全部页签：存在未保存修改则先确认。 */
+    /** 强制关闭单个页签（无视锁定）；存在未保存修改仍先确认。 */
+    forceCloseFile(path: string) {
+      this.flushPreviewDom()
+      const f = this.openFiles.find((x) => x.path === path)
+      if (!f) return
+      if (!this.needsClose(f)) {
+        this.store.closeFile(path, true)
+        return
+      }
+      this.openCloseConfirm({ kind: 'one', path, files: [f], force: true })
+    },
+    /** 关闭全部页签：锁定的页签保留；存在未保存修改则先确认。 */
     closeAllFiles() {
-      const dirty = this.openFiles.filter((f) => this.needsClose(f))
+      const closable = this.openFiles.filter((f) => !f.pinned)
+      if (!closable.length) {
+        if (this.openFiles.length) message.info(this.$t('toast.tabPinned', { sc: this.sc('⌘⇧W') }))
+        return
+      }
+      const dirty = closable.filter((f) => this.needsClose(f))
       if (!dirty.length) {
         this.forceCloseAll()
         return
       }
       this.openCloseConfirm({ kind: 'all', files: dirty })
     },
-    /** 关闭其它页签：其它中存在未保存修改则先确认。 */
+    /** 关闭其它页签：锁定的页签保留；其它中存在未保存修改则先确认。 */
     closeOthers(path: string) {
-      const dirty = this.openFiles.filter((f) => this.needsClose(f) && f.path !== path)
+      const dirty = this.openFiles.filter((f) => !f.pinned && f.path !== path && this.needsClose(f))
       if (!dirty.length) {
         this.store.closeOthers(path)
         return
@@ -2855,19 +2913,32 @@ export default defineComponent({
         return
       }
       await this.recentOpenFile({ path: t.path, name: t.name, vaultId: t.vaultId, encrypted: t.encrypted })
+      // 关闭前是锁定态的话，重开后继续保持锁定
+      if (t.pinned) {
+        const f = this.store.openFiles.find((x) => x.path === t.path)
+        if (f) {
+          f.pinned = true
+          this.store.persistOpenFiles()
+        }
+      }
     },
-    /** 无条件清空所有页签。 */
+    /** 清空所有未锁定页签（锁定的页签保留）。 */
     forceCloseAll() {
-      this.store.noteClosedTabs(this.store.openFiles)
-      this.store.openFiles = []
-      this.store.activePath = ''
-      this.store.activeVaultId = ''
+      const closed = this.store.openFiles.filter((f) => !f.pinned)
+      if (!closed.length) return
+      this.store.noteClosedTabs(closed)
+      this.store.openFiles = this.store.openFiles.filter((f) => f.pinned)
+      if (!this.store.openFiles.some((f) => f.path === this.store.activePath)) {
+        const next = this.store.openFiles[this.store.openFiles.length - 1]
+        this.store.activePath = next ? next.path : ''
+        this.store.activeVaultId = next ? next.vaultId : ''
+      }
       this.store.persistOpenFiles()
     },
 
     // ---------- 关闭/退出未保存确认 ----------
     /** 打开确认弹窗，记录待执行的关闭操作；quitting=true 时为“退出应用”语义。 */
-    openCloseConfirm(op: { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[] }, quitting = false) {
+    openCloseConfirm(op: { kind: 'one' | 'others' | 'all'; path?: string; files: OpenFile[]; force?: boolean }, quitting = false) {
       this.pendingClose = op
       this.pendingQuit = quitting
       const verb = quitting ? this.$t('editor.verbBeforeQuit') : this.$t('editor.verbBeforeClose')
@@ -2961,22 +3032,18 @@ export default defineComponent({
       tauri.quitApp().catch(() => {})
     },
     /** 执行真正的关闭动作（已确认或无需确认时调用）。 */
-    execCloseOp(op: { kind: 'one' | 'others' | 'all'; path?: string }) {
-      if (op.kind === 'one' && op.path) this.store.closeFile(op.path)
-      else if (op.kind === 'others' && op.path) this.store.closeOthers(op.path)
+    execCloseOp(op: { kind: 'one' | 'others' | 'all'; path?: string; force?: boolean }) {
+      if (op.kind === 'one' && op.path) this.store.closeFile(op.path, !!op.force)
+      else if (op.kind === 'others' && op.path) this.store.closeOthers(op.path, !!op.force)
       else this.forceCloseAll()
     },
-    /** 关闭除「保留页签 + 未保存草稿」外的所有页签。 */
+    /** 关闭除「保留页签 + 未保存草稿 + 锁定页签」外的所有页签。 */
     closeKeepDirtyDrafts(op: { kind: 'one' | 'others' | 'all'; path?: string }) {
+      const keepOf = (f: OpenFile) =>
+        (f.isNew && this.needsClose(f)) || (op.kind === 'others' && f.path === op.path) || !!f.pinned
       // 先入撤销栈：保留条件取反即被关闭的页签
-      this.store.noteClosedTabs(
-        this.store.openFiles.filter(
-          (f) => !((f.isNew && this.needsClose(f)) || (op.kind === 'others' && f.path === op.path)),
-        ),
-      )
-      this.store.openFiles = this.store.openFiles.filter(
-        (f) => (f.isNew && this.needsClose(f)) || (op.kind === 'others' && f.path === op.path),
-      )
+      this.store.noteClosedTabs(this.store.openFiles.filter((f) => !keepOf(f)))
+      this.store.openFiles = this.store.openFiles.filter(keepOf)
       const kept = this.store.openFiles
       if (!kept.some((f) => f.path === this.store.activePath)) {
         const next = kept[kept.length - 1]
@@ -3072,7 +3139,10 @@ export default defineComponent({
         const f = this.openFiles.find((x) => x.path === p)
         const isMdl = p.endsWith('.mdl')
         items = [
-          { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.close'), sc: '⌘W', run: () => this.closeFile(p) },
+          f?.pinned
+            ? { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.forceCloseTab'), sc: '⌘⇧W', run: () => this.forceCloseFile(p) }
+            : { kind: 'item', icon: menuIcon('close'), label: this.$t('menu.close'), sc: '⌘W', run: () => this.closeFile(p) },
+          { kind: 'item', icon: menuIcon('pin'), label: f?.pinned ? this.$t('menu.unpinTab') : this.$t('menu.pinTab'), disabled: !f, run: () => f && this.store.togglePinFile(p) },
           { kind: 'item', label: this.$t('menu.closeOthers'), run: () => this.closeOthers(p) },
           { kind: 'item', label: this.$t('menu.closeSaved'), run: () => this.store.closeSaved() },
           { kind: 'item', label: this.$t('menu.closeAll'), run: () => this.closeAllFiles() },
@@ -4074,7 +4144,8 @@ export default defineComponent({
       }
     },
     closeWdTab(path: string) {
-      this.store.closeFile(path)
+      // 源文件已从磁盘移除：锁定页签也一并关闭
+      this.store.closeFile(path, true)
       this.store.dropClosedTab(path)
     },
     closeWdTabUnder(absDir: string) {
@@ -4112,13 +4183,13 @@ export default defineComponent({
         if (v.isFileVault) {
           const r = f.path.includes('#') ? this.normPath(f.path.split('#').slice(1).join('#')) : ''
           if (r === normRel || r.startsWith(normRel + '/')) {
-            this.store.closeFile(f.path)
+            this.store.closeFile(f.path, true)
             this.store.dropClosedTab(f.path)
           }
         } else {
           const nf = this.normPath(f.path)
           if (nf === normDirAbs || nf.startsWith(normDirAbs + '/')) {
-            this.store.closeFile(f.path)
+            this.store.closeFile(f.path, true)
             this.store.dropClosedTab(f.path)
           }
         }
@@ -5748,7 +5819,7 @@ export default defineComponent({
           await tauri.deletePath(target)
           message.success(this.$t('toast.movedToTrash'))
           this.showDelete = false
-          this.store.closeFile(target)
+          this.store.closeFile(target, true)
           this.store.dropClosedTab(target)
           await this.reloadWorkdirDir(this.parentDir(target))
         } catch (e) {
@@ -5772,7 +5843,7 @@ export default defineComponent({
         // 若删除的是已打开的文件，关闭其页签
         const root = v?.path || ''
         const key = v?.isFileVault ? `${root}#${rel}` : (root ? `${root}/${rel}` : rel)
-        this.store.closeFile(key)
+        this.store.closeFile(key, true)
         this.store.dropClosedTab(key)
         if (v) await this.refreshVaultTree(v.id, v.path)
       } catch (e) {
@@ -6980,12 +7051,13 @@ ${bodyHtml}
      * 文件条目的 tooltip 文案：库内文件锁定后不暴露真实路径，仅提示「xx 库文件（已锁定）」。
      * f 需带 path 字段（OpenFile / recentFile 均有）。
      */
-    fileTip(f: { path: string; name: string; vaultId: string; encrypted: boolean }) {
+    fileTip(f: { path: string; name: string; vaultId: string; encrypted: boolean; pinned?: boolean }) {
+      const pinTip = f.pinned ? '\n' + this.$t('editor.tabPinnedTip', { sc: this.sc('⌘⇧W') }) : ''
       if (this.isVaultFileLocked(f)) {
         const vn = this.vaultName(f.vaultId) || this.$t('editor.vaultFallback')
-        return this.$t('editor.vaultFileLocked', { name: vn })
+        return this.$t('editor.vaultFileLocked', { name: vn }) + pinTip
       }
-      return this.externalTip((f as any).external) + ((f as any).path || f.name)
+      return this.externalTip((f as any).external) + ((f as any).path || f.name) + pinTip
     },
     /** 外部修改状态的 tooltip 文案（无异常时为空串）。 */
     externalTip(ext?: string): string {
@@ -7246,7 +7318,8 @@ ${bodyHtml}
                 <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
                 <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
                 <span class="star" :class="{ on: store.isFavoriteFile(f.path) }" :title="$t('menu.fav')" @click.stop="store.toggleFavoriteFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" :fill="store.isFavoriteFile(f.path) ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 2l2.9 6.3 6.9.7-5.1 4.6 1.4 6.8-6.1-3.5-6.1 3.5 1.4-6.8L2.2 9l6.9-.7z" /></svg></span>
-                <span class="x" @click.stop="closeFile(f.path)">✕</span>
+                <span v-if="f.pinned" class="pin" v-tip="{ text: $t('editor.tabPinnedTip', { sc: sc('⌘⇧W') }), place: 'bottom' }" @click.stop="store.togglePinFile(f.path)"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><g transform="translate(12 12) rotate(45) scale(0.94) translate(-12 -12)"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" /></g></svg></span>
+                <span v-else class="x" @click.stop="closeFile(f.path)">✕</span>
               </div>
             </div>
           </div>
@@ -7484,7 +7557,7 @@ ${bodyHtml}
           :key="f.path"
           class="tab"
           :dragable="'open:' + f.path"
-          :class="{ on: activePath === f.path, dragging: dragKey === 'open:' + f.path, dragover: dragOverKey === 'open:' + f.path }"
+          :class="{ on: activePath === f.path, pinned: f.pinned, dragging: dragKey === 'open:' + f.path, dragover: dragOverKey === 'open:' + f.path }"
           @mousedown="onItemMouseDown('open:' + f.path, $event)"
           @click="activateFile(f.path)"
           @contextmenu.stop="activateFile(f.path); openContextMenu($event, 'tab', f.path)"
@@ -7496,7 +7569,8 @@ ${bodyHtml}
           <span class="vt">{{ vaultName(f.vaultId) }}</span>
           <span v-if="f.external" class="ext" :class="f.external" :title="f.external === 'missing' ? $t('editor.extMissingTab') : $t('editor.extModifiedTab')"></span>
           <span v-if="f.dirty" class="dirty" :title="$t('editor.unsaved')"></span>
-          <span class="x" @click.stop="closeFile(f.path)">✕</span>
+          <span v-if="f.pinned" class="pin" v-tip="{ text: $t('editor.tabPinnedTip', { sc: sc('⌘⇧W') }), place: 'bottom' }" @click.stop="store.togglePinFile(f.path)"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor" stroke="none"><g transform="translate(12 12) rotate(45) scale(0.94) translate(-12 -12)"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" /></g></svg></span>
+          <span v-else class="x" @click.stop="closeFile(f.path)">✕</span>
         </div>
         <div class="tab-add" :title="$t('menu.newFile')" @click="openNewDraft">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
@@ -8455,6 +8529,8 @@ ${bodyHtml}
   max-width: 240px;
 }
 .tab:hover { color: var(--text-2); background: var(--hover); }
+/* 锁定页签的图钉图标常显（绝对定位），右侧留出它的位置避免压住长文件名 */
+.tab.pinned { padding-right: 28px; }
 .tab.on { background: var(--panel); color: var(--text); font-weight: 500; }
 .tab.dragging { opacity: 0.45; }
 .tab.dragover { box-shadow: inset 2px 0 0 var(--primary); background: var(--primary-bg); }
@@ -8469,6 +8545,15 @@ ${bodyHtml}
 /* .tab:hover .x, .tab.on .x { opacity: 1; } */
 .tab:hover .x { opacity: 1; background-color: var(--panel);}
 .tab .x:hover { background: var(--border); color: var(--text); }
+/* 锁定页签：占据关闭按钮的位置常显，替代 ✕（点击解锁） */
+.tab .pin {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px; color: var(--text-4);
+  z-index: 1;
+}
+.tab .pin:hover { background: var(--border); }
 .tab .dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); flex: 0 0 auto; }
 /* 外部修改角标：空心环区别于实心未保存小圆点，避免两种状态同现时看不出区别 */
 .tab .ext, .t-item .ext {
@@ -8672,6 +8757,13 @@ ${bodyHtml}
 }
 .t-item:hover .x { display: inline-flex; }
 .t-item .x:hover { background: var(--border); color: var(--text); }
+/* 锁定页签：与关闭按钮同尺寸同占位，常显不随悬停隐没 */
+.t-item .pin {
+  width: 17px; height: 17px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 4px; color: var(--text-4); flex: 0 0 auto;
+}
+.t-item .pin:hover { background: var(--border); }
 .t-item .dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); flex: 0 0 auto; }
 /* 状态栏外部修改提示：modified 可点击重载，missing 仅展示 */
 .statusbar .st-ext { color: #d46b08; cursor: pointer; }
