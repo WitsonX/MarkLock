@@ -72,7 +72,8 @@ jobs:
 
           macOS：把 zip 解压后拖到「应用程序」或直接放在任意目录；未做 Apple 公证，首次打开仍需在「系统设置 → 隐私与安全性」点「仍要打开」。
           Windows：解压后直接运行 \`MarkLock.exe\`，需要系统已装有 WebView2 运行时（Win 11 与更新过的 Win 10 自带）。
-          macOS builds are ad-hoc signed and never notarized, so Gatekeeper asks once; on Windows the extracted exe needs the WebView2 runtime, which current Windows 11 / updated 10 already ship.
+          Linux：AppImage 先 \`chmod +x\` 再运行；没装 FUSE 的系统会提示挂载失败，装一下 \`libfuse2\`，或改成 \`--appimage-extract\` 解包后跑 \`squashfs-root/AppRun\`。Linux 上不提供「导出 PDF」，全局热键只在 X11 会话生效。
+          macOS builds are ad-hoc signed and never notarized, so Gatekeeper asks once; on Windows the extracted exe needs the WebView2 runtime, which current Windows 11 / updated 10 already ship. On Linux, \`chmod +x\` the AppImage first; systems without FUSE need \`libfuse2\` (or \`--appimage-extract\` and launch \`squashfs-root/AppRun\`). PDF export is not offered on Linux and the global hotkey only works in X11 sessions.
 
           ## 下载 / Downloads
 
@@ -81,6 +82,7 @@ jobs:
           | macOS（Apple Silicon） | \`MarkLock_Canary_macOS_aarch64.zip\` |
           | macOS（Intel） | \`MarkLock_Canary_macOS_x64.zip\` |
           | Windows x64 | \`MarkLock_Canary_Windows_x64.zip\` |
+          | Linux x64 | \`MarkLock_Canary_Linux_x64.AppImage\` |
 
           「关于」窗口里会显示 \`Canary <commit>\`，正式版不显示这一段。
           The About card shows \`Canary <commit>\`; stable builds show nothing extra.
@@ -211,3 +213,68 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload canary "MarkLock_Canary_Windows_x64.zip" --clobber
+
+  linux:
+    name: Portable Linux (x64)
+    needs: prepare
+    # 固定 22.04 而非 latest：AppImage 里的 glibc 下限 2.35，能在 22.04 及以上跑
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri v2 的 Linux 依赖：webkit2gtk-4.1 + gtk3 + 托盘（appindicator）+ AppImage 打包（patchelf）
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev libssl-dev pkg-config patchelf libfuse2
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: x86_64-unknown-linux-gnu-canary
+
+      - name: Add Rust target
+        run: rustup target add x86_64-unknown-linux-gnu
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build AppImage
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: npx tauri build --target x86_64-unknown-linux-gnu --bundles appimage
+
+      - name: Verify build stamp injected
+        shell: bash
+        env:
+          MARKLOCK_BUILD: ${{ needs.prepare.outputs.stamp }}
+        run: |
+          set -euo pipefail
+          grep -rq "$MARKLOCK_BUILD" dist/assets/
+          echo "绿色版构建号已注入前端：$MARKLOCK_BUILD"
+
+      # AppImage 文件名带版本号，绿色版要的是固定名才能 --clobber 覆盖
+      - name: Rename the AppImage to a fixed asset name
+        shell: bash
+        run: |
+          set -euo pipefail
+          src=$(ls src-tauri/target/x86_64-unknown-linux-gnu/release/bundle/appimage/*.AppImage)
+          cp "$src" MarkLock_Canary_Linux_x64.AppImage
+          chmod +x MarkLock_Canary_Linux_x64.AppImage
+          ls -lh MarkLock_Canary_Linux_x64.AppImage
+
+      - name: Attach to canary release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload canary "MarkLock_Canary_Linux_x64.AppImage" --clobber
